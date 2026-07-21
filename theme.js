@@ -115,6 +115,8 @@
     const value = normalize(theme);
     const dark = value.mode === "dark";
     const text = dark ? "#F2F6F5" : "#1F2529";
+    const success = dark ? "#49D3A5" : "#147D64";
+    const info = dark ? "#79A9FF" : "#175CD3";
     const accentText = contrast(value.accent, "#101416") >= contrast(value.accent, "#F7FAF9")
       ? "#101416"
       : "#F7FAF9";
@@ -142,9 +144,20 @@
       "--accent-3-ink": readable(value.tertiary, value.surface, text),
       "--accent-3-soft": alpha(value.tertiary, dark ? 0.09 : 0.07),
       "--accent-3-border": alpha(value.tertiary, 0.4),
+      "--success": success,
+      "--success-ink": readable(success, value.surface, text),
+      "--success-soft": alpha(success, dark ? 0.12 : 0.08),
+      "--success-border": alpha(success, 0.42),
+      "--info": info,
+      "--info-ink": readable(info, value.surface, text),
+      "--info-soft": alpha(info, dark ? 0.12 : 0.08),
+      "--info-border": alpha(info, 0.42),
       "--warning": value.warning,
+      "--warning-ink": readable(value.warning, value.surface, text),
+      "--warning-soft": alpha(value.warning, dark ? 0.12 : 0.08),
       "--warning-border": alpha(value.warning, 0.38),
       "--danger": value.danger,
+      "--danger-ink": readable(value.danger, value.surface, text),
       "--danger-soft": alpha(value.danger, 0.12),
       "--danger-border": alpha(value.danger, 0.4),
       "--lime": value.accent,

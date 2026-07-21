@@ -30,8 +30,21 @@
       --accent-3-ink: #ff7659;
       --accent-3-soft: rgba(232,83,50,.09);
       --accent-3-border: rgba(232,83,50,.4);
+      --success: #49d3a5;
+      --success-ink: #49d3a5;
+      --success-soft: rgba(73,211,165,.12);
+      --success-border: rgba(73,211,165,.42);
+      --info: #79a9ff;
+      --info-ink: #91b9ff;
+      --info-soft: rgba(121,169,255,.12);
+      --info-border: rgba(121,169,255,.42);
       --warning: #f5bd4f;
+      --warning-ink: #f5bd4f;
+      --warning-soft: rgba(245,189,79,.12);
+      --warning-border: rgba(245,189,79,.38);
       --danger: #e85332;
+      --danger-ink: #ff7659;
+      --danger-soft: rgba(232,83,50,.12);
       --danger-border: rgba(232,83,50,.4);
       --lime: var(--accent);
       --cyan: var(--accent);
@@ -70,7 +83,7 @@
     button:hover { border-color: var(--cyan); }
     button:active { transform: translateY(1px); }
     button.primary { color: var(--accent-text); background: var(--accent); border-color: var(--accent); font-weight: 750; }
-    button.danger { color: var(--red); }
+    button.danger { color: var(--danger-ink); }
     button:disabled { opacity: .45; cursor: not-allowed; }
     .notice {
       display: flex; justify-content: space-between; align-items: center; gap: 20px;
@@ -79,8 +92,8 @@
     }
     .notice strong { color: var(--lime); }
     .config-status { min-height: 22px; color: var(--muted); text-align: right; }
-    .config-status.ok { color: var(--lime); }
-    .config-status.error { color: var(--red); }
+    .config-status.ok { color: var(--success-ink); }
+    .config-status.error { color: var(--danger-ink); }
     .config-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .config-card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: 18px; min-width: 0; }
     .config-card .config-card { background: var(--panel-2); border-radius: 14px; }
@@ -127,11 +140,12 @@
     .color-field input[type="color"] { width: 38px; height: 38px; padding: 3px; cursor: pointer; }
     .color-field output { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text-secondary); }
     .runtime-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
-    .badge { display: inline-flex; align-items: center; min-height: 25px; padding: 2px 9px; border: 1px solid var(--accent-border); border-radius: 999px; color: var(--accent-ink); font-size: 12px; white-space: nowrap; }
+    .badge { display: inline-flex; align-items: center; min-height: 25px; padding: 2px 9px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--text-secondary); background: var(--control); font-size: 12px; white-space: nowrap; }
+    .badge.brand { color: var(--accent-ink); border-color: var(--accent-border); background: var(--accent-soft); }
+    .badge.info { color: var(--info-ink); border-color: var(--info-border); background: var(--info-soft); }
+    .badge.warning { color: var(--warning-ink); border-color: var(--warning-border); background: var(--warning-soft); }
     .runtime-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
     .runtime-card { border: 1px solid var(--line); border-radius: 14px; background: var(--panel-2); overflow: hidden; }
-    .runtime-summary .badge:nth-child(2), .runtime-card:nth-child(3n+2) .badge { color: var(--accent-2-ink); border-color: var(--accent-2-border); }
-    .runtime-summary .badge:nth-child(3), .runtime-card:nth-child(3n) .badge { color: var(--accent-3-ink); border-color: var(--accent-3-border); }
     .runtime-card summary { list-style: none; cursor: pointer; padding: 14px; }
     .runtime-card summary::-webkit-details-marker { display: none; }
     .runtime-card:hover { border-color: var(--line-strong); }
@@ -173,7 +187,7 @@
 
     <section class="panel" aria-labelledby="appearanceTitle">
       <div class="section-head">
-        <div><h2 id="appearanceTitle">外观主题</h2><p>主题仅保存在当前浏览器，选择后会立即同步到值班台。</p></div>
+        <div><h2 id="appearanceTitle">外观主题</h2><p>主题色用于品牌与背景；成功、处理中、等待和失败使用固定语义色。</p></div>
         <span id="themeStatus" class="config-status" role="status" aria-live="polite"></span>
       </div>
       <div class="theme-group"><h3>深色</h3><div id="darkThemes" class="theme-strip"></div></div>
@@ -182,8 +196,8 @@
         <label class="color-field"><span>背景色</span><input id="customBackground" type="color"><output id="customBackgroundValue"></output></label>
         <label class="color-field"><span>卡片色</span><input id="customSurface" type="color"><output id="customSurfaceValue"></output></label>
         <label class="color-field"><span>主色</span><input id="customAccent" type="color"><output id="customAccentValue"></output></label>
-        <label class="color-field"><span>辅助色</span><input id="customSecondary" type="color"><output id="customSecondaryValue"></output></label>
-        <label class="color-field"><span>重点色</span><input id="customTertiary" type="color"><output id="customTertiaryValue"></output></label>
+        <label class="color-field"><span>背景装饰 A</span><input id="customSecondary" type="color"><output id="customSecondaryValue"></output></label>
+        <label class="color-field"><span>背景装饰 B</span><input id="customTertiary" type="color"><output id="customTertiaryValue"></output></label>
         <button id="saveCustomTheme" type="button">保存自定义</button>
       </div>
     </section>
@@ -300,10 +314,10 @@
       }
       box.className = "";
       const summary = node("div", "runtime-summary");
-      summary.append(node("span", "badge", `补充消息：${workflow.supplementStrategy || "-"}`));
+      summary.append(node("span", "badge info", `补充消息：${workflow.supplementStrategy || "-"}`));
       const auto = workflow.autoMessages || {};
       summary.append(node("span", "badge", `进度：${auto.progressEnabled ? `${auto.progressIntervalSeconds}s` : "关闭"}`));
-      if (auto.ack) summary.append(node("span", "badge", `处理中：${auto.ack}`));
+      if (auto.ack) summary.append(node("span", "badge info", `处理中：${auto.ack}`));
       box.append(summary);
 
       const grid = node("div", "runtime-grid");
@@ -313,7 +327,7 @@
         const top = node("div", "runtime-top");
         const title = node("div", "runtime-title");
         const first = node("div");
-        first.append(node("strong", "", stage.label || stage.id), node("span", "badge", stage.agent));
+        first.append(node("strong", "", stage.label || stage.id), node("span", `badge ${stage.readOnly ? "info" : "warning"}`, stage.agent));
         const launch = Array.isArray(stage.launchCommand) ? stage.launchCommand.join(" ") : stage.driver;
         title.append(
           first,

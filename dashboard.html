@@ -30,9 +30,20 @@
       --accent-3-ink: #ff7659;
       --accent-3-soft: rgba(232,83,50,.09);
       --accent-3-border: rgba(232,83,50,.4);
+      --success: #49d3a5;
+      --success-ink: #49d3a5;
+      --success-soft: rgba(73,211,165,.12);
+      --success-border: rgba(73,211,165,.42);
+      --info: #79a9ff;
+      --info-ink: #91b9ff;
+      --info-soft: rgba(121,169,255,.12);
+      --info-border: rgba(121,169,255,.42);
       --warning: #f5bd4f;
+      --warning-ink: #f5bd4f;
+      --warning-soft: rgba(245,189,79,.12);
       --warning-border: rgba(245,189,79,.38);
       --danger: #e85332;
+      --danger-ink: #ff7659;
       --danger-soft: rgba(232,83,50,.12);
       --danger-border: rgba(232,83,50,.4);
       --lime: var(--accent);
@@ -82,48 +93,57 @@
     .metric { padding: 16px 18px; }
     .metric span { display: block; color: var(--muted); font-size: 12px; }
     .metric strong { display: block; margin-top: 4px; font-size: 25px; letter-spacing: -.04em; }
-    .metric strong.accent { color: var(--lime); }
-    .metric:nth-child(2) strong { color: var(--accent-2-ink); }
-    .metric:nth-child(3) strong { color: var(--accent-3-ink); }
-    .metric:nth-child(4) strong { color: var(--accent-ink); }
-    .metric:nth-child(5) strong { color: var(--danger); }
+    .metric strong.brand { color: var(--accent-ink); }
+    .metric strong.success { color: var(--success-ink); }
+    .metric strong.info { color: var(--info-ink); }
+    .metric strong.warning { color: var(--warning-ink); }
+    .metric strong.danger { color: var(--danger-ink); }
     .workbench { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(280px, .7fr); gap: 14px; margin-bottom: 14px; }
     .panel { padding: 20px; min-width: 0; }
     .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
     .panel h2 { margin: 0; font-size: 14px; letter-spacing: .02em; }
     .hint { color: var(--muted); font-size: 12px; }
     .active-list, .queue-list, .recent-list { display: grid; gap: 10px; }
-    .active-card { background: var(--panel-2); border: 1px solid var(--line-strong); border-radius: 15px; padding: 18px; }
+    .active-card {
+      background: linear-gradient(90deg, var(--info-soft), transparent 28rem), var(--panel-2);
+      border: 1px solid var(--line-strong); border-left: 3px solid var(--info); border-radius: 15px; padding: 18px;
+    }
     .active-top, .run-top { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
     .person { font-size: 17px; font-weight: 700; }
     .request { color: var(--text-secondary); margin: 9px 0 16px; max-width: 78ch; white-space: pre-wrap; }
-    .badge { display: inline-flex; align-items: center; min-height: 25px; padding: 2px 9px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--accent-ink); font-size: 12px; white-space: nowrap; }
-    .badge.sent { color: var(--accent-ink); border-color: var(--accent-border); }
-    .badge.error { color: var(--danger); border-color: var(--danger-border); }
-    .badge.refused { color: var(--accent-3-ink); border-color: var(--accent-3-border); }
-    .badge.quiet { color: var(--muted); }
-    .badge.replan { color: var(--accent-2-ink); border-color: var(--accent-2-border); }
+    .badge { display: inline-flex; align-items: center; min-height: 25px; padding: 2px 9px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--text-secondary); background: var(--control); font-size: 12px; white-space: nowrap; }
+    .badge.brand { color: var(--accent-ink); border-color: var(--accent-border); background: var(--accent-soft); }
+    .badge.success { color: var(--success-ink); border-color: var(--success-border); background: var(--success-soft); }
+    .badge.info { color: var(--info-ink); border-color: var(--info-border); background: var(--info-soft); }
+    .badge.warning { color: var(--warning-ink); border-color: var(--warning-border); background: var(--warning-soft); }
+    .badge.danger { color: var(--danger-ink); border-color: var(--danger-border); background: var(--danger-soft); }
+    .badge.muted { color: var(--muted); }
     .steps { display: grid; grid-template-columns: repeat(9, 1fr); gap: 5px; }
     .step { min-width: 0; }
     .step-line { height: 4px; border-radius: 999px; background: var(--line); margin-bottom: 7px; }
-    .step:nth-child(3n+1) { --phase-color: var(--accent); --phase-border: var(--accent-border); }
-    .step:nth-child(3n+2) { --phase-color: var(--accent-2); --phase-border: var(--accent-2-border); }
-    .step:nth-child(3n) { --phase-color: var(--accent-3); --phase-border: var(--accent-3-border); }
-    .step.done .step-line, .step.current .step-line { background: var(--phase-color); }
-    .step.current .step-line { box-shadow: 0 0 0 1px var(--phase-border); }
+    .step.done .step-line { background: var(--success); }
+    .step.current .step-line { background: var(--info); box-shadow: 0 0 0 1px var(--info-border); }
     .step-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10px; }
     .step.current .step-label { color: var(--text); }
     .meta { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--muted); font-size: 12px; margin-top: 14px; }
-    .queue-item { padding: 13px 14px; border: 1px solid var(--line); border-radius: 13px; background: var(--panel-2); }
+    .queue-item { padding: 13px 14px; border: 1px solid var(--line); border-left: 3px solid var(--warning); border-radius: 13px; background: linear-gradient(90deg, var(--warning-soft), transparent 16rem), var(--panel-2); }
     .queue-item strong { display: block; }
     .queue-item .request { margin: 6px 0 8px; }
     .empty { display: grid; place-items: center; min-height: 130px; color: var(--muted); border: 1px dashed var(--line); border-radius: 14px; text-align: center; padding: 20px; }
     .filters { display: flex; gap: 8px; flex-wrap: wrap; }
     select { color: var(--text); background: var(--control); border: 1px solid var(--line); border-radius: 10px; padding: 7px 30px 7px 10px; }
-    .run { border: 1px solid var(--line); border-radius: 14px; background: var(--panel-2); overflow: hidden; }
+    .run {
+      --tone: var(--line-strong); --tone-soft: transparent;
+      border: 1px solid var(--line); border-left: 3px solid var(--tone); border-radius: 14px;
+      background: linear-gradient(90deg, var(--tone-soft), transparent 24rem), var(--panel-2); overflow: hidden;
+    }
+    .run.tone-success { --tone: var(--success); --tone-soft: var(--success-soft); }
+    .run.tone-info { --tone: var(--info); --tone-soft: var(--info-soft); }
+    .run.tone-warning { --tone: var(--warning); --tone-soft: var(--warning-soft); }
+    .run.tone-danger { --tone: var(--danger); --tone-soft: var(--danger-soft); }
     .run summary { list-style: none; cursor: pointer; padding: 15px 16px; }
     .run summary::-webkit-details-marker { display: none; }
-    .run:hover { border-color: var(--line-strong); }
+    .run:hover { border-color: var(--line-strong); border-left-color: var(--tone); }
     .run-title { min-width: 0; }
     .run-title strong { margin-right: 10px; }
     .run-title p { margin: 5px 0 0; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -195,10 +215,10 @@
       ["verifying", "代码核验"], ["freshness", "发送前复查"], ["sending", "发送"]
     ];
     const STATUS = {
-      sent: ["已回复", "sent"], shadow: ["影子回复", "sent"], no_reply: ["无需回复", "quiet"],
-      human_cooldown: ["人工接管", "quiet"], refused: ["安全拒绝", "refused"], error: ["处理失败", "error"],
-      stale_supplement: ["补充后重算", "replan"], delivery_replan: ["交付重算", "replan"],
-      invalid_reply: ["回复重算", "replan"]
+      sent: ["已回复", "success"], shadow: ["影子回复", "info"], no_reply: ["无需回复", "muted"],
+      human_cooldown: ["人工接管", "warning"], refused: ["安全拒绝", "danger"], error: ["处理失败", "danger"],
+      stale_supplement: ["补充后重算", "info"], delivery_replan: ["交付重算", "info"],
+      invalid_reply: ["回复重算", "info"]
     };
     let snapshot = null;
     const openRuns = new Set();
@@ -217,9 +237,10 @@
       return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
     };
     const statusBadge = status => {
-      const [label, cls] = STATUS[status] || [status || "未知", "quiet"];
+      const [label, cls] = STATUS[status] || [status || "未知", "muted"];
       return node("span", `badge ${cls}`, label);
     };
+    const statusTone = status => (STATUS[status] || ["", "muted"])[1];
     const modelLane = (sessionId, workflow = snapshot?.workflow) => {
       if (!sessionId?.startsWith("dm-")) return "";
       const stage = (workflow?.stages || []).find(item => {
@@ -235,9 +256,9 @@
 
     function renderMetrics(data) {
       const box = document.getElementById("metrics"); clear(box);
-      [["正在执行", data.summary.active, "accent"], ["等待队列", data.summary.queued],
-       ["今日回复", data.summary.sentToday], ["今日代码任务", data.summary.changesToday],
-       ["今日失败", data.summary.errorsToday]].forEach(([label, value, cls]) => {
+      [["正在执行", data.summary.active, "info"], ["等待队列", data.summary.queued, "warning"],
+       ["今日回复", data.summary.sentToday, "success"], ["今日代码任务", data.summary.changesToday, "brand"],
+       ["今日失败", data.summary.errorsToday, "danger"]].forEach(([label, value, cls]) => {
         const card = node("div", "metric"); card.append(node("span", "", label), node("strong", cls || "", value)); box.append(card);
       });
     }
@@ -249,7 +270,7 @@
         const card = node("article", "active-card");
         const top = node("div", "active-top");
         const identity = node("div"); identity.append(node("div", "person", item.contactName), node("div", "hint", item.contactAlias || ""));
-        top.append(identity, node("span", "badge", item.phaseLabel || "处理中")); card.append(top);
+        top.append(identity, node("span", "badge info", item.phaseLabel || "处理中")); card.append(top);
         if (item.requestPreview) card.append(node("p", "request", item.requestPreview));
         const steps = node("div", "steps");
         const current = Math.max(0, PHASES.findIndex(([key]) => key === item.phase));
@@ -289,9 +310,9 @@
       const items = (snapshot?.recent || []).filter(item => (!contact || item.contactName === contact) && (!status || item.status === status));
       if (!items.length) { box.append(node("div", "empty", "当前筛选下没有处理记录")); return; }
       items.forEach(item => {
-        const details = node("details", "run"); const summary = node("summary"); const top = node("div", "run-top");
+        const details = node("details", `run tone-${statusTone(item.status)}`); const summary = node("summary"); const top = node("div", "run-top");
         const title = node("div", "run-title"); const line = node("div"); line.append(node("strong", "", item.contactName), statusBadge(item.status));
-        const lane = modelLane(item.sessionId); if (lane) line.append(node("span", "badge", lane));
+        const lane = modelLane(item.sessionId); if (lane) line.append(node("span", "badge brand", lane));
         title.append(line, node("p", "", item.requestPreview || "历史记录未保存请求摘要"));
         top.append(title, node("span", "run-time", `${time(item.finishedAt)} · ${duration(item.startedAt, item.finishedAt)}`)); summary.append(top); details.append(summary);
         const body = node("div", "run-body"); addBlock(body, "对方消息", item.requestPreview || "历史记录未保存请求摘要"); addBlock(body, "模型路径", lane); addBlock(body, "处理结果", item.handled); addBlock(body, "原因", item.reason); addBlock(body, "验证", item.validation); addBlock(body, "告警", item.warnings); addBlock(body, "外部调用", item.externalCalls);

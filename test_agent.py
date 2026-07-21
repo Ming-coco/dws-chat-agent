@@ -1380,6 +1380,23 @@ class DeliveryTests(unittest.TestCase):
 
 
 class DashboardTests(unittest.TestCase):
+    def test_dashboard_uses_semantic_status_colors(self) -> None:
+        root = Path(__file__).parent
+        dashboard = (root / "dashboard.html").read_text(encoding="utf-8")
+        theme = (root / "theme.js").read_text(encoding="utf-8")
+
+        for mapping in (
+            'sent: ["已回复", "success"]',
+            'human_cooldown: ["人工接管", "warning"]',
+            'no_reply: ["无需回复", "muted"]',
+            'error: ["处理失败", "danger"]',
+        ):
+            self.assertIn(mapping, dashboard)
+        self.assertIn('"--success-ink"', theme)
+        self.assertIn('"--info-ink"', theme)
+        self.assertNotIn(".metric:nth-child", dashboard)
+        self.assertNotIn(".step:nth-child", dashboard)
+
     def test_snapshot_separates_active_work_from_queue(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
