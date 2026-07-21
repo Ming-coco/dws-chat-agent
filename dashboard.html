@@ -60,13 +60,11 @@
     .brand { display: flex; align-items: center; gap: 14px; }
     .mark {
       width: 46px; height: 46px; display: grid; place-items: center; overflow: hidden;
-      border: 1px solid var(--line-strong); border-radius: 14px; background: var(--control-deep);
+      border: 1px solid var(--accent-border); border-radius: 14px; background: var(--accent);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.18), 0 8px 24px var(--accent-soft);
     }
-    .mark svg { width: 38px; height: 38px; display: block; }
-    .mark .route-main { stroke: var(--accent); }
-    .mark .route-warm { stroke: var(--accent-2); }
-    .mark .route-hot { stroke: var(--accent-3); }
-    .mark .station { fill: var(--control-deep); stroke: var(--text); }
+    .mark svg { width: 34px; height: 34px; display: block; }
+    .mark .glyph { fill: var(--accent-text); }
     h1 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
     .eyebrow { color: var(--muted); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
     .service-state { display: flex; align-items: center; gap: 10px; color: var(--muted); }
@@ -144,7 +142,7 @@
       header { align-items: flex-start; flex-direction: column; }
     }
   </style>
-  <link rel="icon" href="/favicon.svg?v=2" type="image/svg+xml">
+  <link rel="icon" href="/favicon.svg?v=3" type="image/svg+xml">
   <script src="/theme.js"></script>
 </head>
 <body>
@@ -153,10 +151,7 @@
       <div class="brand">
         <div class="mark" aria-hidden="true">
           <svg viewBox="0 0 48 48" focusable="false">
-            <path class="route-warm" d="M5 13h13c6 0 8 8 14 8h11" fill="none" stroke-width="4" stroke-linecap="round"/>
-            <path class="route-main" d="M5 24h38" fill="none" stroke-width="4" stroke-linecap="round"/>
-            <path class="route-hot" d="M5 35h13c7 0 8-8 15-8h10" fill="none" stroke-width="4" stroke-linecap="round"/>
-            <circle class="station" cx="24" cy="24" r="5" stroke-width="3"/>
+            <path class="glyph" fill-rule="evenodd" d="M11 9h26a7 7 0 0 1 7 7v13a7 7 0 0 1-7 7H26l-10 7 2-7h-7a7 7 0 0 1-7-7V16a7 7 0 0 1 7-7Zm4 10h10v-5l10 10-10 10v-5H15a5 5 0 0 1 0-10Z"/>
           </svg>
         </div>
         <div><div class="eyebrow">钉钉代理值班台</div><h1>DWS Chat Agent</h1></div>
