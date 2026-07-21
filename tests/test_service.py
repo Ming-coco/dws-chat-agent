@@ -926,6 +926,9 @@ class ModelRoutingTests(unittest.TestCase):
             for context in (front_context, expanded_context):
                 self.assertIn(prior_user.content, [item["text"] for item in context])
                 self.assertIn(prior_agent.content, [item["text"] for item in context])
+            self.assertEqual(expanded_context[-1]["sender"], "Operator")
+            self.assertEqual(expanded_context[-1]["role"], "agent")
+            self.assertEqual(expanded_context[-1]["conversation_id"], event.conversation_id)
             self.assertTrue(calls[0].kwargs["front"])
             self.assertTrue(calls[1].kwargs["front"])
             variables = service._prompt_variables(
@@ -938,6 +941,7 @@ class ModelRoutingTests(unittest.TestCase):
                 execution_mode="read_only",
             )
             self.assertIn(event.content, variables["current_messages_json"])
+            self.assertIn('"sender": "Teammate"', variables["current_messages_json"])
             self.assertIn("禁止修改文件", variables["execution_rule"])
             service._send_supervisor_text.assert_not_awaited()
             service._verify_changes.assert_awaited_once_with([])
