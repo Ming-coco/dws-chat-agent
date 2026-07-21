@@ -568,9 +568,11 @@ class AgentService:
             messages.append(
                 {
                     "role": role,
+                    "sender": contact.display_name if role == "contact" else getattr(self.settings, "self_name", ""),
                     "execution": execution,
                     "time": message.created_at.isoformat(),
                     "message_id": message.message_id,
+                    "conversation_id": message.conversation_id,
                     "text": message.content,
                 }
             )
@@ -722,14 +724,21 @@ class AgentService:
                     batch = self._deduplicate([*batch, *result.consumed_supplements])
                 front_value = result.decision or {}
                 execution_mode = str(front_value.get("execution", "read_only"))
-                if front_value.get("need_more_context"):
+                requested_more_context = bool(front_value.get("need_more_context"))
+                if requested_more_context and not expanded_context:
                     expanded_context = True
                     recent_context, follows_plan = self._recent_context(
                         history,
                         batch,
                         limit=int(self.settings.raw.get("history_limit", 80)),
                     )
-                force_sol = bool(front_value.get("need_more_context")) or execution_mode != "read_only"
+                    # The front agent is allowed one context expansion before
+                    # handing off. This lets it answer after seeing the real
+                    # preceding messages instead of turning an ambiguous
+                    # short continuation into an unnecessary worker run.
+                    front_attempted = False
+                    continue
+                force_sol = requested_more_context or execution_mode != "read_only"
                 front_decision = (
                     None if force_sol else self._front_reply_decision(result.decision)
                 )
@@ -1185,6 +1194,9 @@ class AgentService:
         messages = [
             {
                 "time": item.created_at.isoformat(),
+                "sender": item.contact.display_name,
+                "role": "contact",
+                "conversation_id": item.conversation_id,
                 "message_id": item.message_id,
                 "text": item.content,
             }

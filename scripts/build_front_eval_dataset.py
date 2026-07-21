@@ -30,8 +30,9 @@ def label(text: str, context: list[HistoryMessage]) -> str:
     return "ask_clarification" if len(value) <= 8 else "reply"
 
 def bucketize(messages: list[HistoryMessage], self_name: str) -> list[dict]:
+    ordered = sorted(messages, key=lambda x: x.created_at)
     buckets, current = [], []
-    for m in sorted(messages, key=lambda x: x.created_at):
+    for m in ordered:
         if current and m.created_at - current[-1].created_at > GAP:
             buckets.append(current); current = []
         current.append(m)
@@ -40,16 +41,21 @@ def bucketize(messages: list[HistoryMessage], self_name: str) -> list[dict]:
     for bi, bucket in enumerate(buckets):
         ins = [m for m in bucket if incoming(m, self_name)]
         if not ins: continue
-        cur = ins[-1]; ctx = bucket[-8:]
+        cur = ins[-1]
+        # Keep every message in the time bucket. The evaluator must not turn
+        # a short continuation into an artificial context-free sample.
+        bucket_context = [m for m in ordered if m.created_at <= cur.created_at]
+        ctx = bucket_context[-80:]
         rows.append({
             "id": f"real-{cur.conversation_id}-{cur.message_id}", "source": "real",
             "contact": cur.sender, "conversation_id": cur.conversation_id,
             "bucket_index": bi, "bucket_start": bucket[0].created_at.isoformat(),
             "bucket_end": bucket[-1].created_at.isoformat(), "bucket_size": len(bucket),
+            "context_complete": len(bucket_context) <= 80,
             "bucket_preview": [sanitize_text(m.content, 50) for m in bucket],
             "messages": [{"sender": m.sender, "role": "contact" if incoming(m, self_name) else "self",
-                          "created_at": m.created_at.isoformat(), "content": sanitize_text(m.content, 1000)} for m in ctx],
-            "current_message": sanitize_text(cur.content, 1000), "gold": label(cur.content, ctx),
+                          "created_at": m.created_at.isoformat(), "content": sanitize_text(m.content, 50)} for m in ctx],
+            "current_message": sanitize_text(cur.content, 50), "gold": label(cur.content, ctx),
             "gold_status": "needs_review", "bucket_corrected": True,
             "correction": "label latest incoming message; do not label whole bucket",
         })
@@ -108,7 +114,8 @@ def main() -> int:
     real,errors=asyncio.run(fetch()); rows=real+synthetic(); dev,hold=split(rows)
     for name,values in (("all",rows),("dev",dev),("holdout",hold)):
         (args.output/f"{name}.jsonl").write_text("\n".join(json.dumps(r,ensure_ascii=False) for r in values)+"\n",encoding="utf-8")
-    report=["# Front evaluation dataset","", "- Bucket gap: `>30m`; preview uses first 50 chars only.", "- Real gold is latest incoming message; all real rows need reviewer confirmation.", f"- Rows: {len(rows)} (real={len(real)}, synthetic={len(rows)-len(real)}), history errors={errors}.", f"- Split: dev={len(dev)}, holdout={len(hold)}; holdout contacts={sorted({r['contact'] for r in hold})}.", f"- Seed labels: {dict(Counter(r['gold'] for r in rows))}.", "- Reproduce: `PYTHONPATH=src python3 scripts/build_front_eval_dataset.py --output /tmp/dws-front-eval`"]
+    complete = sum(1 for row in real if row.get("context_complete"))
+    report=["# Front evaluation dataset","", "- Bucket gap: `>30m`; every message and preview is truncated to the first 50 characters.", f"- Real rows carry all available prior messages for the conversation (up to the service history limit of 80), with sender/role/time/message IDs; context-complete real rows: {complete}/{len(real)}.", "- Real gold is latest incoming message; all real rows need reviewer confirmation.", f"- Rows: {len(rows)} (real={len(real)}, synthetic={len(rows)-len(real)}), history errors={errors}.", f"- Split: dev={len(dev)}, holdout={len(hold)}; holdout contacts={sorted({r['contact'] for r in hold})}.", f"- Seed labels: {dict(Counter(r['gold'] for r in rows))}.", "- Reproduce: `PYTHONPATH=src python3 scripts/build_front_eval_dataset.py --output /tmp/dws-front-eval`"]
     (args.output/"REPORT.md").write_text("\n".join(report)+"\n",encoding="utf-8")
     print(json.dumps({"rows":len(rows),"real":len(real),"synthetic":len(rows)-len(real),"dev":len(dev),"holdout":len(hold),"labels":dict(Counter(r['gold'] for r in rows)),"history_errors":errors},ensure_ascii=False)); return 0
 if __name__ == "__main__": raise SystemExit(main())

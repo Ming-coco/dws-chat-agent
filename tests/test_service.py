@@ -840,10 +840,12 @@ class ModelRoutingTests(unittest.TestCase):
         self.assertIn("当前消息若是“已经提测了”“你试试”“还需要吗”等状态、测试或前一动作回执，必须结合上一条", prompt)
         self.assertIn("需要给接口增加字段/入参、保存详情、删除生成中记录", prompt)
         self.assertIn("企业当前/近期业务事实、线上环境状态、接口实时结果或外部检索结果", prompt)
+        self.assertIn("`sender`、`role`、`time`、`conversation_id` 和 `message_id`", prompt)
+        self.assertIn("服务会补取该聊天更早消息并让你重新判断一次", prompt)
         self.assertIn("没有实际读取附件、图片或代码证据", prompt)
         self.assertIn("若真实任务意图本身不明确，必须 `route=reply` 先自然澄清", prompt)
 
-    def test_followup_context_is_shared_and_can_expand_for_sol(self) -> None:
+    def test_front_can_expand_context_and_answer_without_sol(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             event = IncomingEvent(
@@ -869,22 +871,22 @@ class ModelRoutingTests(unittest.TestCase):
                     "warnings": [],
                 },
             )
-            sol = self._result(
+            expanded_front = self._result(
                 event,
-                "dm-followup-sol",
+                "dm-followup-luna-expanded",
                 {
+                    "route": "reply",
                     "action": "reply",
-                    "delivery": "none",
                     "reply": "会涉及 AI 问答的上下文接入，但归档读取时机还要继续确认。",
                     "handled": "分析需求影响链路",
                     "reason": "done",
-                    "changes": [],
+                    "execution": "read_only",
+                    "need_more_context": False,
                     "validation": [],
-                    "external_calls": [],
                     "warnings": [],
                 },
             )
-            service, store = self._service(root, event, [front, sol])
+            service, store = self._service(root, event, [front, expanded_front], max_replans=2)
             history: list[HistoryMessage] = [
                 HistoryMessage(
                     f"history-{index}",
@@ -918,24 +920,26 @@ class ModelRoutingTests(unittest.TestCase):
 
             calls = service._run_agent.await_args_list
             front_context = calls[0].kwargs["recent_context"]
-            sol_context = calls[1].kwargs["recent_context"]
+            expanded_context = calls[1].kwargs["recent_context"]
             self.assertEqual(len(front_context), 6)
-            self.assertEqual(len(sol_context), 8)
-            for context in (front_context, sol_context):
+            self.assertEqual(len(expanded_context), 8)
+            for context in (front_context, expanded_context):
                 self.assertIn(prior_user.content, [item["text"] for item in context])
                 self.assertIn(prior_agent.content, [item["text"] for item in context])
-            self.assertFalse(calls[1].kwargs["allow_write"])
+            self.assertTrue(calls[0].kwargs["front"])
+            self.assertTrue(calls[1].kwargs["front"])
             variables = service._prompt_variables(
-                "worker",
-                sol.session_id,
+                "front",
+                expanded_front.session_id,
                 [event],
                 "",
-                sol_context,
+                expanded_context,
                 allow_write=False,
                 execution_mode="read_only",
             )
             self.assertIn(event.content, variables["current_messages_json"])
             self.assertIn("禁止修改文件", variables["execution_rule"])
+            service._send_supervisor_text.assert_not_awaited()
             service._verify_changes.assert_awaited_once_with([])
             store.close()
 
