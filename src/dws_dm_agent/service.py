@@ -552,9 +552,12 @@ class AgentService:
         current_ids = {item.message_id for item in batch}
         latest_current = max(item.created_at for item in batch)
         contact = batch[0].contact
+        conversation_id = batch[0].conversation_id
         messages: list[dict[str, str]] = []
         for message in sorted(history, key=lambda item: item.created_at):
             if message.message_id in current_ids or message.created_at > latest_current:
+                continue
+            if message.conversation_id != conversation_id:
                 continue
             if message.sender_open_dingtalk_id == contact.open_dingtalk_id:
                 role = "contact"

@@ -909,6 +909,13 @@ class ModelRoutingTests(unittest.TestCase):
                 datetime(2026, 7, 21, 16, 36, tzinfo=TZ),
             )
             history.extend([prior_user, prior_agent])
+            history.append(
+                HistoryMessage(
+                    "foreign-message", "other-conversation", CONTACT.display_name,
+                    CONTACT.open_dingtalk_id, "其他会话里的旧任务",
+                    datetime(2026, 7, 21, 16, 35, tzinfo=TZ),
+                )
+            )
             store.record_outgoing(
                 "agent-question-uuid", prior_agent.message_id, event.conversation_id,
                 CONTACT.user_id, prior_agent.created_at, prior_agent.content,
@@ -926,6 +933,7 @@ class ModelRoutingTests(unittest.TestCase):
             for context in (front_context, expanded_context):
                 self.assertIn(prior_user.content, [item["text"] for item in context])
                 self.assertIn(prior_agent.content, [item["text"] for item in context])
+                self.assertNotIn("其他会话里的旧任务", [item["text"] for item in context])
             self.assertEqual(expanded_context[-1]["sender"], "Operator")
             self.assertEqual(expanded_context[-1]["role"], "agent")
             self.assertEqual(expanded_context[-1]["conversation_id"], event.conversation_id)
