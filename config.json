@@ -117,13 +117,13 @@
           "label": "Codex 快速前台",
           "agent": "codex-front",
           "prompt": "prompts/front.md",
-          "schema": "front-decision.schema.json"
+          "schema": "src/dws_dm_agent/schemas/front-decision.json"
         },
         "worker": {
           "label": "Codex 执行 Agent",
           "agent": "codex-worker",
           "prompt": "prompts/worker.md",
-          "schema": "decision.schema.json"
+          "schema": "src/dws_dm_agent/schemas/decision.json"
         }
       },
       "claude-default": {
@@ -140,13 +140,13 @@
           "label": "Claude 快速前台",
           "agent": "claude-front",
           "prompt": "prompts/front.md",
-          "schema": "front-decision.schema.json"
+          "schema": "src/dws_dm_agent/schemas/front-decision.json"
         },
         "worker": {
           "label": "Claude 执行 Agent",
           "agent": "claude-worker",
           "prompt": "prompts/worker.md",
-          "schema": "decision.schema.json"
+          "schema": "src/dws_dm_agent/schemas/decision.json"
         }
       },
       "pi-default": {
@@ -163,13 +163,13 @@
           "label": "Pi 快速前台",
           "agent": "pi-front",
           "prompt": "prompts/front.md",
-          "schema": "front-decision.schema.json"
+          "schema": "src/dws_dm_agent/schemas/front-decision.json"
         },
         "worker": {
           "label": "Pi 执行 Agent",
           "agent": "pi-worker",
           "prompt": "prompts/worker.md",
-          "schema": "decision.schema.json"
+          "schema": "src/dws_dm_agent/schemas/decision.json"
         }
       }
     }

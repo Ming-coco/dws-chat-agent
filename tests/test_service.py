@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from agent_core import (
+from dws_dm_agent.core import (
     AuditStore,
     ChangeEvidence,
     Contact,
@@ -25,7 +25,7 @@ from agent_core import (
     render_reply,
     sanitize_text,
 )
-from dm_agent import (
+from dws_dm_agent.service import (
     AgentService,
     DwsClient,
     _find_dws_error_code,
@@ -33,7 +33,7 @@ from dm_agent import (
     build_change_archive,
     load_settings,
 )
-from dashboard import DashboardServer
+from dws_dm_agent.dashboard import DashboardServer
 
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -43,7 +43,7 @@ CONTACT = Contact("teammate", "Teammate", "u-1", "open-contact")
 class SettingsTests(unittest.TestCase):
     def test_asia_shanghai_has_a_stdlib_fallback_on_windows(self) -> None:
         with patch(
-            "dm_agent.ZoneInfo", side_effect=ZoneInfoNotFoundError("Asia/Shanghai")
+            "dws_dm_agent.config.ZoneInfo", side_effect=ZoneInfoNotFoundError("Asia/Shanghai")
         ):
             timezone = _load_timezone("Asia/Shanghai")
 
@@ -823,12 +823,23 @@ class ModelRoutingTests(unittest.TestCase):
             store.close()
 
     def test_front_prompt_includes_real_read_only_code_examples(self) -> None:
-        prompt = (Path(__file__).parent / "prompts" / "front.md").read_text(
+        prompt = (Path(__file__).parents[1] / "prompts" / "front.md").read_text(
             encoding="utf-8"
         )
         self.assertIn("代码定位、读代码解释、表名、接口和入参", prompt)
         self.assertIn("route=worker", prompt)
         self.assertIn("禁止修改文件", prompt)
+        self.assertIn("recent_context", prompt)
+        self.assertIn("已按 `time` 升序", prompt)
+        self.assertIn("泛口语单独出现不构成修改授权", prompt)
+        self.assertIn("模糊闲聊不得用 `need_more_context=true` 兜底", prompt)
+        self.assertIn("闲聊、玩笑、确认、泛化聊天或普通只读问答时必须 `need_more_context=false`", prompt)
+        self.assertIn("前置 Agent 直接 `route=reply` 拒绝", prompt)
+        self.assertIn("URL、镜像 tag、CID、接口路径、配置值、文件、产品约束", prompt)
+        self.assertIn("当前消息若是“已经提测了”“你试试”“还需要吗”等状态确认", prompt)
+        self.assertIn("需要给接口增加字段/入参、保存详情、删除生成中记录", prompt)
+        self.assertIn("没有实际读取附件、图片或代码证据", prompt)
+        self.assertIn("若连真实任务意图都不明确，不得因“上下文不足”升级 worker", prompt)
 
     def test_followup_context_is_shared_and_can_expand_for_sol(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1239,7 +1250,7 @@ class HumanTakeoverTests(unittest.TestCase):
 
 class DeliveryTests(unittest.TestCase):
     def test_prompt_defaults_code_delivery_through_dev_to_test(self) -> None:
-        prompt = (Path(__file__).parent / "prompts" / "worker.md").read_text(
+        prompt = (Path(__file__).parents[1] / "prompts" / "worker.md").read_text(
             encoding="utf-8"
         )
 
@@ -1381,7 +1392,7 @@ class DeliveryTests(unittest.TestCase):
 
 class DashboardTests(unittest.TestCase):
     def test_dashboard_uses_semantic_status_colors(self) -> None:
-        root = Path(__file__).parent
+        root = Path(__file__).parents[1] / "src" / "dws_dm_agent" / "web"
         dashboard = (root / "dashboard.html").read_text(encoding="utf-8")
         theme = (root / "theme.js").read_text(encoding="utf-8")
 

@@ -166,6 +166,7 @@
     }
   </style>
   <link rel="icon" href="/favicon.svg?v=3" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css?v=1">
   <script src="/theme.js"></script>
 </head>
 <body>
@@ -224,6 +225,7 @@
       invalid_reply: ["回复重算", "info"]
     };
     let snapshot = null;
+    let recentRenderKey = "";
     const openRuns = new Set();
 
     const node = (tag, cls, text) => {
@@ -306,11 +308,15 @@
       list.forEach(value => block.append(node("p", "", value))); parent.append(block);
     }
 
-    function renderRecent() {
-      const box = document.getElementById("recent"); clear(box);
+    function renderRecent(force = false) {
+      const box = document.getElementById("recent");
       const contact = document.getElementById("contactFilter").value;
       const status = document.getElementById("statusFilter").value;
       const items = (snapshot?.recent || []).filter(item => (!contact || item.contactName === contact) && (!status || item.status === status));
+      const nextKey = JSON.stringify([contact, status, items]);
+      if (!force && nextKey === recentRenderKey) return;
+      recentRenderKey = nextKey;
+      clear(box);
       if (!items.length) { box.append(node("div", "empty", "当前筛选下没有处理记录")); return; }
       items.forEach(item => {
         const details = node("details", `run tone-${statusTone(item.status)}`); const summary = node("summary"); const top = node("div", "run-top");
@@ -350,8 +356,8 @@
         document.getElementById("pulse").classList.remove("live"); document.getElementById("serviceText").textContent = "无法读取本地代理";
       }
     }
-    document.getElementById("contactFilter").addEventListener("change", renderRecent);
-    document.getElementById("statusFilter").addEventListener("change", renderRecent);
+    document.getElementById("contactFilter").addEventListener("change", () => renderRecent(true));
+    document.getElementById("statusFilter").addEventListener("change", () => renderRecent(true));
     refresh(); setInterval(refresh, 3000); setInterval(() => snapshot && renderActive(snapshot.active), 1000);
   </script>
 </body>

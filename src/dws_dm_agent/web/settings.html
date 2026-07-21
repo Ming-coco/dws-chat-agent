@@ -173,6 +173,7 @@
     }
   </style>
   <link rel="icon" href="/favicon.svg?v=3" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css?v=1">
   <script src="/theme.js"></script>
 </head>
 <body>
@@ -273,6 +274,10 @@
     function themeChoice(theme, selectedId) {
       const button = node("button", `theme-choice ${theme.id === selectedId ? "selected" : ""}`.trim());
       button.type = "button";
+      button.style.setProperty("--preview-bg", theme.background);
+      button.style.setProperty("--preview-surface", theme.surface);
+      button.style.setProperty("--preview-accent", theme.accent);
+      button.style.setProperty("--preview-text", theme.mode === "light" ? "#1F2529" : "#F2F6F5");
       button.setAttribute("aria-pressed", String(theme.id === selectedId));
       button.append(node("strong", "", theme.name), node("small", "", theme.note));
       const swatches = node("span", "swatches");

@@ -1,0 +1,103 @@
+{
+  "version": 3,
+  "mode": "${DWS_CHAT_AGENT_MODE}",
+  "timezone": "Asia/Shanghai",
+  "self": {
+    "name": "${DWS_CHAT_AGENT_SELF_NAME}",
+    "open_dingtalk_id": "${DWS_CHAT_AGENT_SELF_OPEN_ID}"
+  },
+  "contacts": "${DWS_CHAT_AGENT_CONTACTS_JSON}",
+  "quiet_window_seconds": 20,
+  "human_cooldown_seconds": 600,
+  "history_limit": 80,
+  "recent_context_messages": 6,
+  "monitor_interval_seconds": 5,
+  "max_replans": 5,
+  "max_parallel_conversations": 2,
+  "max_reply_chars": 16000,
+  "rate_limit": {
+    "per_contact_per_hour": 12,
+    "global_per_hour": 40
+  },
+  "workspace_root": "${DWS_CHAT_AGENT_WORKSPACE_ROOT}",
+  "worktree_root": "${DWS_CHAT_AGENT_WORKTREE_ROOT}",
+  "state_dir": "state",
+  "agents": {
+    "codex-front": {
+      "driver": "codex",
+      "protocol": "codex-app-server",
+      "command": ["${DWS_CHAT_AGENT_CODEX_BINARY}"],
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "medium",
+      "read_only": true,
+      "timeout_seconds": 60,
+      "options": {"web_search": "disabled"}
+    },
+    "codex-worker": {
+      "driver": "codex",
+      "protocol": "codex-app-server",
+      "command": ["${DWS_CHAT_AGENT_CODEX_BINARY}"],
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "high",
+      "read_only": false,
+      "timeout_seconds": 10800,
+      "options": {"sandbox": "danger-full-access", "web_search": "disabled"}
+    },
+    "claude-worker": {
+      "driver": "claude",
+      "protocol": "claude-stream-json",
+      "command": ["claude"],
+      "model": "sonnet",
+      "reasoning_effort": "",
+      "read_only": false,
+      "timeout_seconds": 10800
+    },
+    "pi-worker": {
+      "driver": "pi",
+      "protocol": "pi-rpc",
+      "command": ["pi"],
+      "model": "",
+      "reasoning_effort": "high",
+      "read_only": false,
+      "timeout_seconds": 10800
+    }
+  },
+  "workflows": {
+    "active": "codex-default",
+    "presets": {
+      "codex-default": {
+        "supplement_strategy": "steer",
+        "supplement_prompt": "prompts/supplement.md",
+        "auto_messages": {
+          "ack": "已收到消息，正在处理中。",
+          "progress": "{{progress}}",
+          "progress_enabled": true,
+          "progress_interval_seconds": 180,
+          "max_progress_updates": 60
+        },
+        "front": {
+          "label": "快速前台",
+          "agent": "codex-front",
+          "prompt": "prompts/front.md",
+          "schema": "src/dws_dm_agent/schemas/front-decision.json"
+        },
+        "worker": {
+          "label": "执行 Agent",
+          "agent": "codex-worker",
+          "prompt": "prompts/worker.md",
+          "schema": "src/dws_dm_agent/schemas/decision.json"
+        }
+      }
+    }
+  },
+  "dws": {
+    "binary": "dws",
+    "profile": "${DWS_CHAT_AGENT_DWS_PROFILE}",
+    "ai_tag": true
+  },
+  "security": {
+    "max_message_chars": 12000,
+    "allowed_execution_domains": "${DWS_CHAT_AGENT_EXECUTION_DOMAINS_JSON}",
+    "allowed_reference_domains": ["github.com", "docs.github.com", "openai.com", "platform.openai.com"]
+  }
+}

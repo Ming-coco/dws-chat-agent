@@ -39,23 +39,37 @@ If native steering fails, the current run is stopped safely and restarted with t
 ## Repository layout
 
 ```text
-agent_runtime.py             launchers, session protocols, profiles, and workflow preset
-dm_agent.py                  DingTalk queue, context, safety, delivery, and audit orchestration
-agent_core.py                deterministic gate and SQLite audit model
-prompts/front.md             configurable front-agent prompt
-prompts/worker.md            configurable worker-agent prompt
-prompts/supplement.md        prompt used for messages received during a run
-docs/agent-config.md         copy-paste setup guide for another coding agent
-docs/custom-agent-protocol.md custom CLI stdin/stdout contract
-config.json                  public profiles, active workflow, and runtime policy
-dashboard.py/html            localhost monitoring console and HTTP API
-settings.html                visual Agent and workflow configuration page
-theme.js                     shared browser-local theme presets and custom colors
-favicon.svg                  Metropolis-inspired page mark
+pyproject.toml               package metadata and dws-chat-agent console command
+config.json                  current public profiles, workflow, and runtime policy
+config.example.json          portable configuration scaffold
+dm_agent.py                  compatibility CLI used by existing installations
+agent_core.py                compatibility import for older local scripts
+agent_runtime.py             compatibility import for older local scripts
+dashboard.py                 compatibility import for older local scripts
+src/dws_dm_agent/
+  __main__.py                python -m dws_dm_agent entry point
+  config.py                  environment expansion and validated settings model
+  core.py                    messages, coarse gate, audit, and result normalization
+  dws.py                     history, text replies, and file delivery through DWS
+  service.py                 serial queues, context, steering, takeover, and orchestration
+  delivery.py                verified, bounded, reversible code attachment handling
+  prompts.py                 shared prompt variables, rendering, and validation
+  dashboard.py               localhost API, audit snapshot, and safe config editor
+  runners/runtime.py         Codex, Claude, Pi, and custom JSONL session protocols
+  schemas/                   front and worker structured-output contracts
+  web/                       dashboard, settings, themes, motion, and favicon
+tests/                       service, delivery, dashboard, and runner regressions
+prompts/                     editable front, worker, and supplement business rules
+deploy/macos/                LaunchAgent template
+scripts/manage.sh            macOS LaunchAgent lifecycle implementation
 start-macos.command          one-click macOS setup/start
 start-windows.cmd            one-click Windows setup/start
-manage.sh                    macOS LaunchAgent lifecycle
 ```
+
+The top-level Python files are deliberately thin compatibility seams. Existing
+LaunchAgents and local scripts keep working while new code imports the
+`dws_dm_agent` package. Runtime configuration, prompts, `.env`, audit state, and
+worktrees remain outside the package so updates never overwrite operator data.
 
 The main dashboard at [http://127.0.0.1:8765/](http://127.0.0.1:8765/) stays focused on active work, the queue, and the processing timeline. Use its gear button to open the separate settings page at [http://127.0.0.1:8765/settings](http://127.0.0.1:8765/settings). That page shows the current runtime flow, switches presets, edits Agent profiles and prompts, and offers Metropolis plus common editor themes and custom colors. Appearance is stored only in the current browser. Agent saves are revision-checked, schema-validated, blocked while work is active or queued, written atomically, and applied to subsequent sessions without restarting. The page never exposes or overwrites profile environment variables, provider options, auth files, contact IDs, or `.env` values.
 
@@ -98,9 +112,16 @@ On the first run it creates `.env`, opens Notepad, and stops. After configuratio
 ```bash
 cp .env.example .env
 chmod 600 .env
-python3 -m unittest -v
+PYTHONPATH=src python3 -m unittest discover -s tests -v
 python3 dm_agent.py doctor
 python3 dm_agent.py run --mode shadow --open-dashboard
+```
+
+The packaged entry point is equivalent:
+
+```bash
+PYTHONPATH=src python3 -m dws_dm_agent doctor
+PYTHONPATH=src python3 -m dws_dm_agent run --mode shadow --open-dashboard
 ```
 
 Start in `shadow` mode until configuration is verified. Shadow mode performs analysis and audit but does not send DingTalk messages. Switch `DWS_CHAT_AGENT_MODE` to `live` when it should reply.

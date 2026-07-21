@@ -12,8 +12,8 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from agent_runtime import AgentRuntime, AgentSession
-from dashboard import (
+from dws_dm_agent.runners.runtime import AgentRuntime, AgentSession
+from dws_dm_agent.dashboard import (
     AgentConfigStore,
     ConfigBusyError,
     ConfigConflictError,
@@ -538,6 +538,7 @@ class AgentConfigStoreTests(unittest.TestCase):
                 "<!doctype html><title>settings test</title>", encoding="utf-8"
             )
             (root / "theme.js").write_text("window.themeTest = true;", encoding="utf-8")
+            (root / "app.css").write_text("body { color: CanvasText; }", encoding="utf-8")
             (root / "favicon.svg").write_text("<svg></svg>", encoding="utf-8")
             store = AgentConfigStore(root / "config.json", root)
             server = DashboardServer(
@@ -559,6 +560,9 @@ class AgentConfigStoreTests(unittest.TestCase):
                 with urlopen(f"{base}/theme.js", timeout=2) as response:
                     self.assertEqual(response.headers.get_content_type(), "text/javascript")
                     self.assertIn("themeTest", response.read().decode("utf-8"))
+                with urlopen(f"{base}/app.css", timeout=2) as response:
+                    self.assertEqual(response.headers.get_content_type(), "text/css")
+                    self.assertIn("CanvasText", response.read().decode("utf-8"))
                 with urlopen(f"{base}/favicon.ico", timeout=2) as response:
                     self.assertEqual(response.headers.get_content_type(), "image/svg+xml")
                 with urlopen(f"{base}/api/config", timeout=2) as response:

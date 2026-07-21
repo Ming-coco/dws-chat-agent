@@ -84,11 +84,19 @@ Prompts are ordinary UTF-8 files. Edit them only when the user requests differen
 Run from the repository root:
 
 ```text
-python3 -m unittest -v
+PYTHONPATH=src python3 -m unittest discover -s tests -v
 python3 dm_agent.py doctor
 ```
 
-On Windows use `py -3` if that is the installed Python launcher. Fix every failed check. Do not claim readiness from executable discovery alone.
+On Windows use:
+
+```bat
+set PYTHONPATH=src
+py -3 -m unittest discover -s tests -v
+py -3 dm_agent.py doctor
+```
+
+Use `python` instead of `py -3` when that is the installed launcher. Fix every failed check. Do not claim readiness from executable discovery alone.
 
 For a first installation, start in `shadow` mode and open `http://127.0.0.1:8765/`. Confirm:
 
