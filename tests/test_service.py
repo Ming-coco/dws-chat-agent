@@ -841,7 +841,7 @@ class ModelRoutingTests(unittest.TestCase):
         self.assertIn("需要给接口增加字段/入参、保存详情、删除生成中记录", prompt)
         self.assertIn("企业当前/近期业务事实、线上环境状态、接口实时结果或外部检索结果", prompt)
         self.assertIn("`sender`、`role`、`time`、`conversation_id` 和 `message_id`", prompt)
-        self.assertIn("服务会补取该聊天更早消息并让你重新判断一次", prompt)
+        self.assertIn("只补取同一聊天更早最多 80 条消息", prompt)
         self.assertIn("没有实际读取附件、图片或代码证据", prompt)
         self.assertIn("若真实任务意图本身不明确，必须 `route=reply` 先自然澄清", prompt)
 
