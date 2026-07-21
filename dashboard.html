@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DWS × Codex 值班台</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090c0d;
+      --panel: #111617;
+      --panel-2: #161c1d;
+      --line: #263031;
+      --text: #edf4f2;
+      --muted: #8f9e9a;
+      --lime: #c7f36b;
+      --cyan: #64d8cb;
+      --red: #ff776f;
+      --amber: #f5c66f;
+      --purple: #b39cff;
+      --radius: 18px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 8% 0%, rgba(100,216,203,.08), transparent 28rem),
+        radial-gradient(circle at 95% 12%, rgba(199,243,107,.05), transparent 25rem),
+        var(--bg);
+      color: var(--text);
+      font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    button, select { font: inherit; }
+    .shell { width: min(1480px, calc(100% - 40px)); margin: 0 auto; padding: 28px 0 48px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
+    .brand { display: flex; align-items: center; gap: 14px; }
+    .mark {
+      width: 44px; height: 44px; display: grid; place-items: center;
+      border: 1px solid #354243; border-radius: 13px; background: #151b1c;
+      font-weight: 800; letter-spacing: -.04em; color: var(--lime);
+    }
+    h1 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
+    .eyebrow { color: var(--muted); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
+    .service-state { display: flex; align-items: center; gap: 10px; color: var(--muted); }
+    .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--red); box-shadow: 0 0 0 5px rgba(255,119,111,.1); }
+    .pulse.live { background: var(--lime); box-shadow: 0 0 0 5px rgba(199,243,107,.1); }
+    .metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+    .metric, .panel { border: 1px solid var(--line); background: rgba(17,22,23,.92); border-radius: var(--radius); }
+    .metric { padding: 16px 18px; }
+    .metric span { display: block; color: var(--muted); font-size: 12px; }
+    .metric strong { display: block; margin-top: 4px; font-size: 25px; letter-spacing: -.04em; }
+    .metric strong.accent { color: var(--lime); }
+    .workbench { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(280px, .7fr); gap: 14px; margin-bottom: 14px; }
+    .panel { padding: 20px; min-width: 0; }
+    .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+    .panel h2 { margin: 0; font-size: 14px; letter-spacing: .02em; }
+    .hint { color: var(--muted); font-size: 12px; }
+    .active-list, .queue-list, .recent-list { display: grid; gap: 10px; }
+    .active-card { background: var(--panel-2); border: 1px solid #31403f; border-radius: 15px; padding: 18px; }
+    .active-top, .run-top { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+    .person { font-size: 17px; font-weight: 700; }
+    .request { color: #ced8d5; margin: 9px 0 16px; max-width: 78ch; white-space: pre-wrap; }
+    .badge { display: inline-flex; align-items: center; min-height: 25px; padding: 2px 9px; border: 1px solid #3a4746; border-radius: 999px; color: var(--cyan); font-size: 12px; white-space: nowrap; }
+    .badge.sent { color: var(--lime); border-color: rgba(199,243,107,.3); }
+    .badge.error { color: var(--red); border-color: rgba(255,119,111,.35); }
+    .badge.refused { color: var(--purple); border-color: rgba(179,156,255,.35); }
+    .badge.quiet { color: var(--muted); }
+    .badge.replan { color: var(--amber); border-color: rgba(245,198,111,.35); }
+    .steps { display: grid; grid-template-columns: repeat(8, 1fr); gap: 5px; }
+    .step { min-width: 0; }
+    .step-line { height: 4px; border-radius: 999px; background: #2a3334; margin-bottom: 7px; }
+    .step.done .step-line, .step.current .step-line { background: var(--lime); }
+    .step.current .step-line { box-shadow: 0 0 12px rgba(199,243,107,.35); }
+    .step-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10px; }
+    .step.current .step-label { color: var(--text); }
+    .meta { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--muted); font-size: 12px; margin-top: 14px; }
+    .queue-item { padding: 13px 14px; border: 1px solid var(--line); border-radius: 13px; background: #131819; }
+    .queue-item strong { display: block; }
+    .queue-item .request { margin: 6px 0 8px; }
+    .empty { display: grid; place-items: center; min-height: 130px; color: var(--muted); border: 1px dashed #2c3637; border-radius: 14px; text-align: center; padding: 20px; }
+    .filters { display: flex; gap: 8px; flex-wrap: wrap; }
+    select { color: var(--text); background: #151b1c; border: 1px solid #303a3b; border-radius: 10px; padding: 7px 30px 7px 10px; }
+    .run { border: 1px solid var(--line); border-radius: 14px; background: #121718; overflow: hidden; }
+    .run summary { list-style: none; cursor: pointer; padding: 15px 16px; }
+    .run summary::-webkit-details-marker { display: none; }
+    .run:hover { border-color: #3b4748; }
+    .run-title { min-width: 0; }
+    .run-title strong { margin-right: 10px; }
+    .run-title p { margin: 5px 0 0; color: #c6d0cd; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .run-time { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .run-body { border-top: 1px solid var(--line); padding: 16px; display: grid; gap: 14px; color: #c8d2cf; }
+    .detail-block h3 { margin: 0 0 6px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
+    .detail-block p { margin: 0; white-space: pre-wrap; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip { max-width: 100%; overflow-wrap: anywhere; border: 1px solid #323d3e; background: #171d1e; border-radius: 8px; padding: 4px 8px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .code-change { border-left: 2px solid var(--cyan); padding-left: 12px; }
+    footer { color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 12px; margin-top: 14px; }
+    @media (max-width: 900px) {
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .workbench { grid-template-columns: 1fr; }
+      .steps { grid-template-columns: repeat(4, 1fr); }
+      header { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="brand">
+        <div class="mark">D×C</div>
+        <div><div class="eyebrow">Private-message operations</div><h1>DWS × Codex 值班台</h1></div>
+      </div>
+      <div class="service-state"><span id="pulse" class="pulse"></span><span id="serviceText">正在连接本地代理…</span></div>
+    </header>
+
+    <section id="metrics" class="metrics"></section>
+
+    <section class="workbench">
+      <article class="panel">
+        <div class="panel-head"><h2>现在正在处理</h2><span class="hint">真实阶段 · 不显示虚假百分比</span></div>
+        <div id="active" class="active-list"></div>
+      </article>
+      <aside class="panel">
+        <div class="panel-head"><h2>等待队列</h2><span id="queueCount" class="hint"></span></div>
+        <div id="queue" class="queue-list"></div>
+      </aside>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div><h2>处理时间线</h2><span class="hint">点击展开代码、验证与告警</span></div>
+        <div class="filters">
+          <select id="contactFilter" aria-label="联系人筛选"><option value="">全部联系人</option></select>
+          <select id="statusFilter" aria-label="状态筛选"><option value="">全部状态</option></select>
+        </div>
+      </div>
+      <div id="recent" class="recent-list"></div>
+    </section>
+    <footer><span>只读 · 仅监听 127.0.0.1 · 每 3 秒刷新</span><span id="updated"></span></footer>
+  </main>
+
+  <script>
+    const PHASES = [
+      ["stabilizing", "合并消息"], ["screening", "规则检查"], ["routing", "Luna"],
+      ["acknowledged", "已确认"], ["codex", "Sol"], ["verifying", "代码核验"], ["freshness", "发送前复查"], ["sending", "发送"]
+    ];
+    const STATUS = {
+      sent: ["已回复", "sent"], shadow: ["影子回复", "sent"], no_reply: ["无需回复", "quiet"],
+      human_cooldown: ["人工接管", "quiet"], refused: ["安全拒绝", "refused"], error: ["处理失败", "error"],
+      stale_supplement: ["补充后重算", "replan"], delivery_replan: ["交付重算", "replan"],
+      invalid_reply: ["回复重算", "replan"]
+    };
+    let snapshot = null;
+    const openRuns = new Set();
+
+    const node = (tag, cls, text) => {
+      const value = document.createElement(tag);
+      if (cls) value.className = cls;
+      if (text !== undefined && text !== null) value.textContent = String(text);
+      return value;
+    };
+    const clear = value => { while (value.firstChild) value.removeChild(value.firstChild); };
+    const time = value => value ? new Intl.DateTimeFormat("zh-CN", {hour:"2-digit", minute:"2-digit", second:"2-digit"}).format(new Date(value)) : "—";
+    const duration = (start, end = Date.now()) => {
+      const seconds = Math.max(0, Math.floor((new Date(end).getTime() - new Date(start).getTime()) / 1000));
+      if (seconds < 60) return `${seconds}s`;
+      return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+    };
+    const statusBadge = status => {
+      const [label, cls] = STATUS[status] || [status || "未知", "quiet"];
+      return node("span", `badge ${cls}`, label);
+    };
+    const modelLane = sessionId => {
+      if (!sessionId?.startsWith("dm-")) return "";
+      if (sessionId.includes("-luna-sol-")) return "Luna → Sol";
+      if (sessionId.includes("-luna-")) return "Luna";
+      if (sessionId.includes("-sol-")) return "Sol";
+      return "Codex（旧）";
+    };
+
+    function renderMetrics(data) {
+      const box = document.getElementById("metrics"); clear(box);
+      [["正在执行", data.summary.active, "accent"], ["等待队列", data.summary.queued],
+       ["今日回复", data.summary.sentToday], ["今日代码任务", data.summary.changesToday],
+       ["今日失败", data.summary.errorsToday]].forEach(([label, value, cls]) => {
+        const card = node("div", "metric"); card.append(node("span", "", label), node("strong", cls || "", value)); box.append(card);
+      });
+    }
+
+    function renderActive(items) {
+      const box = document.getElementById("active"); clear(box);
+      if (!items.length) { box.append(node("div", "empty", "当前没有正在执行的私聊任务")); return; }
+      items.forEach(item => {
+        const card = node("article", "active-card");
+        const top = node("div", "active-top");
+        const identity = node("div"); identity.append(node("div", "person", item.contactName), node("div", "hint", item.contactAlias || ""));
+        top.append(identity, node("span", "badge", item.phaseLabel || "处理中")); card.append(top);
+        if (item.requestPreview) card.append(node("p", "request", item.requestPreview));
+        const steps = node("div", "steps");
+        const current = Math.max(0, PHASES.findIndex(([key]) => key === item.phase));
+        PHASES.forEach(([key, label], index) => {
+          const step = node("div", `step ${index < current ? "done" : index === current ? "current" : ""}`);
+          step.append(node("div", "step-line"), node("div", "step-label", label)); steps.append(step);
+        });
+        card.append(steps);
+        const meta = node("div", "meta");
+        meta.append(node("span", "", `已运行 ${duration(item.startedAt)}`), node("span", "", `第 ${item.attempt || 1} 次处理`), node("span", "", `${item.batchSize || 1} 条消息`));
+        if (item.sessionId) meta.append(node("span", "", `session ${item.sessionId.slice(-10)}`));
+        card.append(meta); box.append(card);
+      });
+    }
+
+    function renderQueue(items) {
+      const box = document.getElementById("queue"); clear(box);
+      document.getElementById("queueCount").textContent = `${items.length} 个会话`;
+      if (!items.length) { box.append(node("div", "empty", "没有等待任务")); return; }
+      items.forEach(item => {
+        const row = node("div", "queue-item");
+        row.append(node("strong", "", item.contactName), node("p", "request", item.requestPreview || "请求摘要未保存"), node("span", "hint", `等待 ${duration(item.receivedAt)} · ${item.batchSize} 条 · ${item.contentLength} 字`)); box.append(row);
+      });
+    }
+
+    function addBlock(parent, title, values) {
+      const list = (Array.isArray(values) ? values : [values]).filter(Boolean);
+      if (!list.length) return;
+      const block = node("section", "detail-block"); block.append(node("h3", "", title));
+      list.forEach(value => block.append(node("p", "", value))); parent.append(block);
+    }
+
+    function renderRecent() {
+      const box = document.getElementById("recent"); clear(box);
+      const contact = document.getElementById("contactFilter").value;
+      const status = document.getElementById("statusFilter").value;
+      const items = (snapshot?.recent || []).filter(item => (!contact || item.contactName === contact) && (!status || item.status === status));
+      if (!items.length) { box.append(node("div", "empty", "当前筛选下没有处理记录")); return; }
+      items.forEach(item => {
+        const details = node("details", "run"); const summary = node("summary"); const top = node("div", "run-top");
+        const title = node("div", "run-title"); const line = node("div"); line.append(node("strong", "", item.contactName), statusBadge(item.status));
+        const lane = modelLane(item.sessionId); if (lane) line.append(node("span", "badge", lane));
+        title.append(line, node("p", "", item.requestPreview || "历史记录未保存请求摘要"));
+        top.append(title, node("span", "run-time", `${time(item.finishedAt)} · ${duration(item.startedAt, item.finishedAt)}`)); summary.append(top); details.append(summary);
+        const body = node("div", "run-body"); addBlock(body, "对方消息", item.requestPreview || "历史记录未保存请求摘要"); addBlock(body, "模型路径", lane); addBlock(body, "处理结果", item.handled); addBlock(body, "原因", item.reason); addBlock(body, "验证", item.validation); addBlock(body, "告警", item.warnings); addBlock(body, "外部调用", item.externalCalls);
+        (item.changes || []).forEach(change => {
+          const code = node("section", "detail-block code-change"); code.append(node("h3", "", change.repo || "代码改动"));
+          addBlock(code, "分支 / Commit", [change.branch, change.head_sha]); addBlock(code, "推送目标", change.pushed_to);
+          if ((change.files || []).length) { const chips = node("div", "chips"); change.files.forEach(file => chips.append(node("span", "chip", file))); code.append(chips); }
+          body.append(code);
+        });
+        details.append(body); details.open = openRuns.has(item.sessionId);
+        details.addEventListener("toggle", () => details.open ? openRuns.add(item.sessionId) : openRuns.delete(item.sessionId));
+        box.append(details);
+      });
+    }
+
+    function populateFilters(data) {
+      const contact = document.getElementById("contactFilter"); const previousContact = contact.value;
+      const names = [...new Set(data.recent.map(item => item.contactName))].sort(); clear(contact); contact.append(new Option("全部联系人", "")); names.forEach(name => contact.append(new Option(name, name))); contact.value = previousContact;
+      const status = document.getElementById("statusFilter"); const previousStatus = status.value;
+      const statuses = [...new Set(data.recent.map(item => item.status))]; clear(status); status.append(new Option("全部状态", "")); statuses.forEach(value => status.append(new Option((STATUS[value] || [value])[0], value))); status.value = previousStatus;
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch("/api/snapshot", {cache: "no-store"}); if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        snapshot = await response.json(); const heartbeat = snapshot.service.heartbeatAt ? Date.now() - new Date(snapshot.service.heartbeatAt).getTime() : Infinity;
+        const healthy = snapshot.service.running && heartbeat < 15000; document.getElementById("pulse").classList.toggle("live", healthy);
+        document.getElementById("serviceText").textContent = healthy ? `${String(snapshot.service.mode).toUpperCase()} · 代理运行中 · PID ${snapshot.service.pid}` : "状态可能已过期";
+        renderMetrics(snapshot); renderActive(snapshot.active); renderQueue(snapshot.queue); populateFilters(snapshot); renderRecent();
+        document.getElementById("updated").textContent = `更新于 ${time(snapshot.generatedAt)}`;
+      } catch (error) {
+        document.getElementById("pulse").classList.remove("live"); document.getElementById("serviceText").textContent = "无法读取本地代理";
+      }
+    }
+    document.getElementById("contactFilter").addEventListener("change", renderRecent);
+    document.getElementById("statusFilter").addEventListener("change", renderRecent);
+    refresh(); setInterval(refresh, 3000); setInterval(() => snapshot && renderActive(snapshot.active), 1000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["reply", "no_reply", "refuse", "handoff"]
+    },
+    "delivery": {
+      "type": "string",
+      "enum": ["none", "feature", "attachment", "dev", "test"]
+    },
+    "reply": {"type": "string"},
+    "handled": {"type": "string"},
+    "reason": {"type": "string"},
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "repo": {"type": "string"},
+          "worktree": {"type": "string"},
+          "branch": {"type": "string"},
+          "base_sha": {"type": "string"},
+          "head_sha": {"type": "string"},
+          "commits": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "files": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "pushed_to": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        },
+        "required": [
+          "repo",
+          "worktree",
+          "branch",
+          "base_sha",
+          "head_sha",
+          "commits",
+          "files",
+          "pushed_to"
+        ]
+      }
+    },
+    "validation": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "external_calls": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  },
+  "required": [
+    "action",
+    "delivery",
+    "reply",
+    "handled",
+    "reason",
+    "changes",
+    "validation",
+    "external_calls",
+    "warnings"
+  ]
+}

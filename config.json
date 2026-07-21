@@ -1,0 +1,59 @@
+{
+  "version": 2,
+  "mode": "${DWS_CHAT_AGENT_MODE}",
+  "timezone": "Asia/Shanghai",
+  "self": {
+    "name": "${DWS_CHAT_AGENT_SELF_NAME}",
+    "open_dingtalk_id": "${DWS_CHAT_AGENT_SELF_OPEN_ID}"
+  },
+  "contacts": "${DWS_CHAT_AGENT_CONTACTS_JSON}",
+  "quiet_window_seconds": 20,
+  "human_cooldown_seconds": 600,
+  "history_limit": 80,
+  "recent_context_messages": 6,
+  "monitor_interval_seconds": 5,
+  "progress_interval_seconds": 180,
+  "max_progress_updates": 60,
+  "front_timeout_seconds": 60,
+  "codex_timeout_seconds": 10800,
+  "max_replans": 5,
+  "max_parallel_conversations": 2,
+  "max_reply_chars": 16000,
+  "rate_limit": {
+    "per_contact_per_hour": 12,
+    "global_per_hour": 40
+  },
+  "workspace_root": "${DWS_CHAT_AGENT_WORKSPACE_ROOT}",
+  "worktree_root": "${DWS_CHAT_AGENT_WORKTREE_ROOT}",
+  "state_dir": "state",
+  "codex": {
+    "binary": "${DWS_CHAT_AGENT_CODEX_BINARY}",
+    "sandbox": "workspace-write",
+    "network_access": true,
+    "writable_roots": "${DWS_CHAT_AGENT_WRITABLE_ROOTS_JSON}",
+    "front_model": "gpt-5.6-luna",
+    "front_reasoning_effort": "medium",
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "high",
+    "web_search": "disabled"
+  },
+  "dws": {
+    "binary": "dws",
+    "profile": "${DWS_CHAT_AGENT_DWS_PROFILE}",
+    "ai_tag": true
+  },
+  "security": {
+    "max_message_chars": 12000,
+    "allowed_execution_domains": "${DWS_CHAT_AGENT_EXECUTION_DOMAINS_JSON}",
+    "allowed_reference_domains": [
+      "github.com",
+      "docs.github.com",
+      "openai.com",
+      "platform.openai.com"
+    ]
+  },
+  "daily_summary": {
+    "time": "09:00",
+    "recipient_user_id": null
+  }
+}

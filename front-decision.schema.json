@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "route",
+    "action",
+    "reply",
+    "handled",
+    "reason",
+    "execution",
+    "need_more_context",
+    "validation",
+    "warnings"
+  ],
+  "properties": {
+    "route": {
+      "type": "string",
+      "enum": ["reply", "sol"]
+    },
+    "action": {
+      "type": "string",
+      "enum": ["reply", "no_reply"]
+    },
+    "reply": {
+      "type": "string"
+    },
+    "handled": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "execution": {
+      "type": "string",
+      "enum": ["read_only", "small_change", "plan_large_change", "approved_plan"]
+    },
+    "need_more_context": {
+      "type": "boolean"
+    },
+    "validation": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}

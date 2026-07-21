@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# DWS chat agent local state
+.env
+.env.*
+!.env.example
+state/
+.DS_Store
