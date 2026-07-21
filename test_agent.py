@@ -1392,8 +1392,11 @@ class DashboardTests(unittest.TestCase):
             'error: ["处理失败", "danger"]',
         ):
             self.assertIn(mapping, dashboard)
-        self.assertIn('"--success-ink"', theme)
-        self.assertIn('"--info-ink"', theme)
+        for token in ('"--normal"', '"--attention"', '"--urgent"'):
+            self.assertIn(token, theme)
+        self.assertEqual(theme.count(" normal:"), 21)
+        self.assertEqual(theme.count(" attention:"), 21)
+        self.assertEqual(theme.count(" urgent:"), 21)
         self.assertNotIn(".metric:nth-child", dashboard)
         self.assertNotIn(".step:nth-child", dashboard)
 

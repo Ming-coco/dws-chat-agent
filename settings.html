@@ -22,22 +22,25 @@
       --accent-text: #101416;
       --accent-soft: rgba(78,214,192,.1);
       --accent-border: rgba(78,214,192,.34);
-      --accent-2: #f5bd4f;
-      --accent-2-ink: #f5bd4f;
-      --accent-2-soft: rgba(245,189,79,.09);
-      --accent-2-border: rgba(245,189,79,.4);
-      --accent-3: #e85332;
-      --accent-3-ink: #ff7659;
-      --accent-3-soft: rgba(232,83,50,.09);
-      --accent-3-border: rgba(232,83,50,.4);
-      --success: #49d3a5;
-      --success-ink: #49d3a5;
-      --success-soft: rgba(73,211,165,.12);
-      --success-border: rgba(73,211,165,.42);
-      --info: #79a9ff;
-      --info-ink: #91b9ff;
-      --info-soft: rgba(121,169,255,.12);
-      --info-border: rgba(121,169,255,.42);
+      --accent-2: #56c596;
+      --accent-2-ink: #56c596;
+      --accent-2-soft: rgba(86,197,150,.09);
+      --accent-2-border: rgba(86,197,150,.4);
+      --accent-3: #f5bd4f;
+      --accent-3-ink: #f5bd4f;
+      --accent-3-soft: rgba(245,189,79,.09);
+      --accent-3-border: rgba(245,189,79,.4);
+      --normal: #56c596;
+      --attention: #f5bd4f;
+      --urgent: #e85332;
+      --success: #56c596;
+      --success-ink: #56c596;
+      --success-soft: rgba(86,197,150,.12);
+      --success-border: rgba(86,197,150,.42);
+      --info: #4ed6c0;
+      --info-ink: #4ed6c0;
+      --info-soft: rgba(78,214,192,.12);
+      --info-border: rgba(78,214,192,.42);
       --warning: #f5bd4f;
       --warning-ink: #f5bd4f;
       --warning-soft: rgba(245,189,79,.12);
@@ -133,8 +136,8 @@
     .theme-choice.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
     .theme-choice strong { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .theme-choice small { display: block; margin-top: 5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .swatches { display: grid; grid-template-columns: repeat(5, 1fr); height: 10px; margin-top: 9px; overflow: hidden; border: 1px solid var(--line); border-radius: 4px; }
-    .custom-theme { display: grid; grid-template-columns: repeat(5, minmax(110px, 1fr)) auto; align-items: end; gap: 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+    .swatches { display: grid; grid-template-columns: repeat(4, 1fr); height: 10px; margin-top: 9px; overflow: hidden; border: 1px solid var(--line); border-radius: 4px; }
+    .custom-theme { display: grid; grid-template-columns: repeat(6, minmax(100px, 1fr)) auto; align-items: end; gap: 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
     .color-field { display: grid; grid-template-columns: 38px minmax(0, 1fr); align-items: center; gap: 8px; }
     .color-field span { grid-column: 1 / -1; color: var(--muted); font-size: 11px; }
     .color-field input[type="color"] { width: 38px; height: 38px; padding: 3px; cursor: pointer; }
@@ -187,7 +190,7 @@
 
     <section class="panel" aria-labelledby="appearanceTitle">
       <div class="section-head">
-        <div><h2 id="appearanceTitle">外观主题</h2><p>主题色用于品牌与背景；成功、处理中、等待和失败使用固定语义色。</p></div>
+        <div><h2 id="appearanceTitle">外观主题</h2><p>每套主题包含主色、正常、注意和紧急色，切换时会一起更新。</p></div>
         <span id="themeStatus" class="config-status" role="status" aria-live="polite"></span>
       </div>
       <div class="theme-group"><h3>深色</h3><div id="darkThemes" class="theme-strip"></div></div>
@@ -196,8 +199,9 @@
         <label class="color-field"><span>背景色</span><input id="customBackground" type="color"><output id="customBackgroundValue"></output></label>
         <label class="color-field"><span>卡片色</span><input id="customSurface" type="color"><output id="customSurfaceValue"></output></label>
         <label class="color-field"><span>主色</span><input id="customAccent" type="color"><output id="customAccentValue"></output></label>
-        <label class="color-field"><span>背景装饰 A</span><input id="customSecondary" type="color"><output id="customSecondaryValue"></output></label>
-        <label class="color-field"><span>背景装饰 B</span><input id="customTertiary" type="color"><output id="customTertiaryValue"></output></label>
+        <label class="color-field"><span>正常</span><input id="customNormal" type="color"><output id="customNormalValue"></output></label>
+        <label class="color-field"><span>注意</span><input id="customAttention" type="color"><output id="customAttentionValue"></output></label>
+        <label class="color-field"><span>紧急</span><input id="customUrgent" type="color"><output id="customUrgentValue"></output></label>
         <button id="saveCustomTheme" type="button">保存自定义</button>
       </div>
     </section>
@@ -234,15 +238,17 @@
       background: document.getElementById("customBackground"),
       surface: document.getElementById("customSurface"),
       accent: document.getElementById("customAccent"),
-      secondary: document.getElementById("customSecondary"),
-      tertiary: document.getElementById("customTertiary")
+      normal: document.getElementById("customNormal"),
+      attention: document.getElementById("customAttention"),
+      urgent: document.getElementById("customUrgent")
     };
     const themeOutputs = {
       background: document.getElementById("customBackgroundValue"),
       surface: document.getElementById("customSurfaceValue"),
       accent: document.getElementById("customAccentValue"),
-      secondary: document.getElementById("customSecondaryValue"),
-      tertiary: document.getElementById("customTertiaryValue")
+      normal: document.getElementById("customNormalValue"),
+      attention: document.getElementById("customAttentionValue"),
+      urgent: document.getElementById("customUrgentValue")
     };
     const themeMessage = text => { document.getElementById("themeStatus").textContent = text || ""; };
 
@@ -251,8 +257,9 @@
         background: themeInputs.background.value,
         surface: themeInputs.surface.value,
         accent: themeInputs.accent.value,
-        secondary: themeInputs.secondary.value,
-        tertiary: themeInputs.tertiary.value
+        normal: themeInputs.normal.value,
+        attention: themeInputs.attention.value,
+        urgent: themeInputs.urgent.value
       };
     }
 
@@ -269,9 +276,11 @@
       button.setAttribute("aria-pressed", String(theme.id === selectedId));
       button.append(node("strong", "", theme.name), node("small", "", theme.note));
       const swatches = node("span", "swatches");
-      [theme.background, theme.surface, theme.accent, theme.secondary, theme.tertiary].forEach(value => {
+      [["主色", theme.accent], ["正常", theme.normal], ["注意", theme.attention], ["紧急", theme.urgent]].forEach(([label, value]) => {
         const swatch = node("span");
         swatch.style.background = value;
+        swatch.title = `${label} ${value}`;
+        swatch.setAttribute("aria-label", `${label} ${value}`);
         swatches.append(swatch);
       });
       button.append(swatches);
