@@ -77,6 +77,8 @@ The front profile must be `read_only: true`; the worker must be `read_only: fals
 
 Keep the initial workflow as the supplied `front -> worker` scaffold. Configure messages received during a run with `supplement_strategy: "steer"`; preserve `prompts/supplement.md` so new messages enter the live session instead of becoming detached development requests.
 
+In the settings page, disable the automatic acknowledgement with `auto_messages.ack_enabled: false` (or clear its text). Disable DingTalk's message AI tag with `dws.ai_tag: false`; both settings apply to subsequent sessions.
+
 Prompts are ordinary UTF-8 files. Edit them only when the user requests different behavior, and keep chat data inside the marked untrusted sections. The settings page must display the active profiles, launch commands, protocols, models, and prompt templates without displaying environment values. Theme selection and custom colors are browser-local and do not modify the Agent configuration.
 
 ## 5. Validate before starting

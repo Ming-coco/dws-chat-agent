@@ -832,15 +832,16 @@ class ModelRoutingTests(unittest.TestCase):
         self.assertIn("recent_context", prompt)
         self.assertIn("已按 `time` 升序", prompt)
         self.assertIn("短句不能脱离时间线判断", prompt)
-        self.assertIn("模糊闲聊不得用 `need_more_context=true` 兜底", prompt)
+        self.assertIn("任务本身不明确时用 `route=reply` 追问", prompt)
         self.assertIn("闲聊、玩笑、确认、泛化聊天或普通只读问答时必须 `need_more_context=false`", prompt)
         self.assertIn("前置 Agent 直接 `route=reply` 拒绝", prompt)
         self.assertIn("URL、镜像 tag、CID、接口路径、配置值、文件、产品约束", prompt)
         self.assertIn("“看看、改改、搞下、弄一下、拿来试试、继续”等短句不能脱离时间线判断", prompt)
         self.assertIn("当前消息若是“已经提测了”“你试试”“还需要吗”等状态、测试或前一动作回执，必须结合上一条", prompt)
         self.assertIn("需要给接口增加字段/入参、保存详情、删除生成中记录", prompt)
+        self.assertIn("企业当前/近期业务事实、线上环境状态、接口实时结果或外部检索结果", prompt)
         self.assertIn("没有实际读取附件、图片或代码证据", prompt)
-        self.assertIn("若连真实任务意图都不明确，不得因“上下文不足”升级 worker", prompt)
+        self.assertIn("若真实任务意图本身不明确，必须 `route=reply` 先自然澄清", prompt)
 
     def test_followup_context_is_shared_and_can_expand_for_sol(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

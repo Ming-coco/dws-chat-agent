@@ -479,12 +479,15 @@
           field("前置显示名", textControl(activePreset.front?.label, value => { activePreset.front.label = value; })),
           field("后置显示名", textControl(activePreset.worker?.label, value => { activePreset.worker.label = value; })),
           field("补充消息策略", selectControl([["steer", "Steer 当前会话"], ["restart_with_context", "带上下文重启"]], activePreset.supplement_strategy, value => { activePreset.supplement_strategy = value; })),
+          checkboxControl(activePreset.auto_messages?.ack_enabled !== false, "发送“收到，开始处理”提示", value => { activePreset.auto_messages.ack_enabled = value; }),
           field("处理中回复", textControl(activePreset.auto_messages?.ack, value => { activePreset.auto_messages.ack = value; }), true),
           field("进度回复模板", textControl(activePreset.auto_messages?.progress, value => { activePreset.auto_messages.progress = value; }), true),
           field("进度间隔（秒）", numberControl(activePreset.auto_messages?.progress_interval_seconds, value => { activePreset.auto_messages.progress_interval_seconds = value; }, 0)),
           field("最多进度条数", numberControl(activePreset.auto_messages?.max_progress_updates, value => { activePreset.auto_messages.max_progress_updates = value; }, 0)),
           checkboxControl(activePreset.auto_messages?.progress_enabled, "允许自动发送具体进度", value => { activePreset.auto_messages.progress_enabled = value; })
         );
+        const dws = agentConfig.dws || (agentConfig.dws = {});
+        workflowForm.append(checkboxControl(dws.ai_tag, "发送钉钉 AI tag", value => { dws.ai_tag = value; }));
       }
       workflowCard.append(workflowForm);
       if (activePreset) {

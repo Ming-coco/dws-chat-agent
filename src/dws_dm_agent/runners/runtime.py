@@ -738,10 +738,14 @@ class AgentRuntime:
         )
 
     def render_auto_message(self, name: str, variables: Mapping[str, Any]) -> str:
+        if name == "ack" and not bool(self._auto_messages.get("ack_enabled", True)):
+            return ""
         return _render_text(str(self._auto_messages.get(name) or ""), variables)
 
     @property
     def ack_message(self) -> str:
+        if not bool(self._auto_messages.get("ack_enabled", True)):
+            return ""
         return str(self._auto_messages.get("ack") or "")
 
     def prepare(

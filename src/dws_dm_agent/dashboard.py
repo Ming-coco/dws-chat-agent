@@ -48,6 +48,7 @@ _PROFILE_FIELDS = {
 }
 _STAGE_FIELDS = {"label", "agent", "prompt", "schema"}
 _AUTO_FIELDS = {
+    "ack_enabled",
     "ack",
     "progress",
     "progress_enabled",
@@ -124,6 +125,11 @@ class AgentConfigStore:
             "supportedProtocols": list(SUPPORTED_PROTOCOLS),
             "agents": agents,
             "workflows": workflows,
+            "dws": {
+                "ai_tag": bool(raw.get("dws", {}).get("ai_tag", False))
+                if isinstance(raw.get("dws"), Mapping)
+                else False,
+            },
             "prompts": prompts,
             "lockedPrompts": locked_prompts,
         }
@@ -147,6 +153,9 @@ class AgentConfigStore:
             )
             candidate["workflows"] = self._merge_workflows(
                 current.get("workflows", {}), payload.get("workflows")
+            )
+            candidate["dws"] = self._merge_dws(
+                current.get("dws", {}), payload.get("dws")
             )
             prompt_updates = self._validated_prompt_updates(
                 candidate["workflows"], payload.get("prompts", {})
@@ -212,6 +221,14 @@ class AgentConfigStore:
                 }
             public["presets"][str(raw_name)] = preset
         return public
+
+    @staticmethod
+    def _merge_dws(current: Any, submitted: Any) -> dict[str, Any]:
+        current = current if isinstance(current, Mapping) else {}
+        merged = copy.deepcopy(dict(current))
+        if isinstance(submitted, Mapping) and "ai_tag" in submitted:
+            merged["ai_tag"] = bool(submitted["ai_tag"])
+        return merged
 
     @staticmethod
     def _merge_agents(current: Any, submitted: Any) -> dict[str, Any]:

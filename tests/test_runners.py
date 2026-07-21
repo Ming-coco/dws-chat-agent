@@ -96,6 +96,7 @@ class AgentRuntimeTests(unittest.TestCase):
                         "supplement_strategy": "steer",
                         "supplement_prompt": "prompts/supplement.md",
                         "auto_messages": {
+                            "ack_enabled": True,
                             "ack": "收到，我在处理 {{request_count}} 条消息。",
                             "progress_enabled": True,
                             "progress_interval_seconds": 90,
@@ -121,7 +122,8 @@ class AgentRuntimeTests(unittest.TestCase):
 
     def test_workflow_renders_prompts_and_exposes_safe_dashboard_description(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            runtime = self._runtime(Path(directory), "codex")
+            root = Path(directory)
+            runtime = self._runtime(root, "codex")
 
             rendered = runtime.render(
                 "front", {"self_name": "Operator", "agent_name": "Fast"}
@@ -145,6 +147,10 @@ class AgentRuntimeTests(unittest.TestCase):
                 runtime.render_auto_message("ack", {"request_count": 2}),
                 "收到，我在处理 2 条消息。",
             )
+            raw = json.loads((root / "config.json").read_text(encoding="utf-8"))
+            raw["workflows"]["presets"]["dm-default"]["auto_messages"]["ack_enabled"] = False
+            runtime = AgentRuntime.from_config(raw, root / "config.json", root)
+            self.assertEqual(runtime.render_auto_message("ack", {"request_count": 2}), "")
             self.assertEqual(description["autoMessages"]["ack"], "收到，我在处理 {{request_count}} 条消息。")
             self.assertNotIn("RUNTIME_TEST", json.dumps(description))
 
@@ -477,6 +483,8 @@ class AgentConfigStoreTests(unittest.TestCase):
             )
 
             view = store.snapshot()
+            self.assertIn("dws", view)
+            view["dws"]["ai_tag"] = True
             self.assertNotIn(
                 "environment", json.dumps(view["agents"], ensure_ascii=False)
             )
@@ -493,6 +501,7 @@ class AgentConfigStoreTests(unittest.TestCase):
             raw = json.loads((root / "config.json").read_text(encoding="utf-8"))
             self.assertEqual(raw["agents"]["worker-agent"]["command"], ["ccr", "code"])
             self.assertEqual(raw["agents"]["worker-agent"]["environment"], {"RUNTIME_TEST": "1"})
+            self.assertTrue(raw["dws"]["ai_tag"])
             self.assertEqual(
                 raw["workflows"]["presets"]["dm-default"]["auto_messages"]["ack"],
                 "收到，正在定位具体代码。",

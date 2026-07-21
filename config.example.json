@@ -69,6 +69,7 @@
         "supplement_strategy": "steer",
         "supplement_prompt": "prompts/supplement.md",
         "auto_messages": {
+          "ack_enabled": true,
           "ack": "已收到消息，正在处理中。",
           "progress": "{{progress}}",
           "progress_enabled": true,
