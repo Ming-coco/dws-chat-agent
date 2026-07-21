@@ -16,7 +16,7 @@
   "properties": {
     "route": {
       "type": "string",
-      "enum": ["reply", "sol"]
+      "enum": ["reply", "worker"]
     },
     "action": {
       "type": "string",

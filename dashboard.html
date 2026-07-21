@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>DWS × Codex 值班台</title>
+  <title>DWS Agent 值班台</title>
   <style>
     :root {
       color-scheme: dark;
@@ -67,7 +67,7 @@
     .badge.refused { color: var(--purple); border-color: rgba(179,156,255,.35); }
     .badge.quiet { color: var(--muted); }
     .badge.replan { color: var(--amber); border-color: rgba(245,198,111,.35); }
-    .steps { display: grid; grid-template-columns: repeat(8, 1fr); gap: 5px; }
+    .steps { display: grid; grid-template-columns: repeat(9, 1fr); gap: 5px; }
     .step { min-width: 0; }
     .step-line { height: 4px; border-radius: 999px; background: #2a3334; margin-bottom: 7px; }
     .step.done .step-line, .step.current .step-line { background: var(--lime); }
@@ -95,10 +95,15 @@
     .chips { display: flex; flex-wrap: wrap; gap: 6px; }
     .chip { max-width: 100%; overflow-wrap: anywhere; border: 1px solid #323d3e; background: #171d1e; border-radius: 8px; padding: 4px 8px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
     .code-change { border-left: 2px solid var(--cyan); padding-left: 12px; }
+    .workflow { margin-bottom: 14px; }
+    .workflow-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+    .workflow-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .prompt { margin: 0; padding: 14px; max-height: 480px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #0c1011; border-radius: 10px; color: #cfd9d6; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
     footer { color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 12px; margin-top: 14px; }
     @media (max-width: 900px) {
       .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .workbench { grid-template-columns: 1fr; }
+      .workflow-grid { grid-template-columns: 1fr; }
       .steps { grid-template-columns: repeat(4, 1fr); }
       header { align-items: flex-start; flex-direction: column; }
     }
@@ -108,8 +113,8 @@
   <main class="shell">
     <header>
       <div class="brand">
-        <div class="mark">D×C</div>
-        <div><div class="eyebrow">Private-message operations</div><h1>DWS × Codex 值班台</h1></div>
+        <div class="mark">D×A</div>
+        <div><div class="eyebrow">Private-message operations</div><h1>DWS Agent 值班台</h1></div>
       </div>
       <div class="service-state"><span id="pulse" class="pulse"></span><span id="serviceText">正在连接本地代理…</span></div>
     </header>
@@ -127,6 +132,14 @@
       </aside>
     </section>
 
+    <section class="panel workflow">
+      <div class="panel-head">
+        <div><h2>当前处理流程</h2><span class="hint">模型、协议、提示词与自动回复策略</span></div>
+        <span id="workflowName" class="badge"></span>
+      </div>
+      <div id="workflow"></div>
+    </section>
+
     <section class="panel">
       <div class="panel-head">
         <div><h2>处理时间线</h2><span class="hint">点击展开代码、验证与告警</span></div>
@@ -142,8 +155,9 @@
 
   <script>
     const PHASES = [
-      ["stabilizing", "合并消息"], ["screening", "规则检查"], ["routing", "Luna"],
-      ["acknowledged", "已确认"], ["codex", "Sol"], ["verifying", "代码核验"], ["freshness", "发送前复查"], ["sending", "发送"]
+      ["stabilizing", "合并消息"], ["screening", "规则检查"], ["routing", "前置 Agent"],
+      ["acknowledged", "已确认"], ["worker", "后置 Agent"], ["steering", "补充已 Steer"],
+      ["verifying", "代码核验"], ["freshness", "发送前复查"], ["sending", "发送"]
     ];
     const STATUS = {
       sent: ["已回复", "sent"], shadow: ["影子回复", "sent"], no_reply: ["无需回复", "quiet"],
@@ -153,6 +167,7 @@
     };
     let snapshot = null;
     const openRuns = new Set();
+    const openPrompts = new Set();
 
     const node = (tag, cls, text) => {
       const value = document.createElement(tag);
@@ -171,13 +186,62 @@
       const [label, cls] = STATUS[status] || [status || "未知", "quiet"];
       return node("span", `badge ${cls}`, label);
     };
-    const modelLane = sessionId => {
+    const modelLane = (sessionId, workflow = snapshot?.workflow) => {
       if (!sessionId?.startsWith("dm-")) return "";
+      const stage = (workflow?.stages || []).find(item => {
+        const slug = String(item.agent || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+        return slug && sessionId.includes(`-${slug}-`);
+      });
+      if (stage) return stage.label || stage.agent;
       if (sessionId.includes("-luna-sol-")) return "Luna → Sol";
       if (sessionId.includes("-luna-")) return "Luna";
       if (sessionId.includes("-sol-")) return "Sol";
       return "Codex（旧）";
     };
+
+    function renderWorkflow(workflow) {
+      const box = document.getElementById("workflow"); clear(box);
+      document.getElementById("workflowName").textContent = workflow?.name || "未加载";
+      if (!workflow?.stages?.length) { box.append(node("div", "empty", "服务尚未提供流程配置")); return; }
+      const summary = node("div", "workflow-summary");
+      summary.append(node("span", "badge", `补充消息：${workflow.supplementStrategy || "—"}`));
+      const auto = workflow.autoMessages || {};
+      summary.append(node("span", "badge", `进度：${auto.progressEnabled ? `${auto.progressIntervalSeconds}s` : "关闭"}`));
+      if (auto.ack) summary.append(node("span", "badge", `处理中：${auto.ack}`));
+      box.append(summary);
+      const grid = node("div", "workflow-grid");
+      workflow.stages.forEach(stage => {
+        const key = `stage:${stage.id}`; const details = node("details", "run"); const head = node("summary");
+        const top = node("div", "run-top"); const title = node("div", "run-title");
+        const line = node("div"); line.append(node("strong", "", stage.label || stage.id), node("span", "badge", stage.agent));
+        const launch = Array.isArray(stage.launchCommand) ? stage.launchCommand.join(" ") : stage.driver;
+        title.append(
+          line,
+          node("p", "", `${stage.driver} · ${stage.protocol} · ${stage.model || "默认模型"} · ${stage.readOnly ? "运行时只读" : "完整权限"}`),
+          node("p", "", `启动：${launch || "—"}`)
+        );
+        top.append(title, node("span", "run-time", stage.reasoningEffort || "默认推理")); head.append(top); details.append(head);
+        const body = node("div", "run-body"); addBlock(body, "提示词文件", stage.promptPath); const pre = node("pre", "prompt", stage.prompt || ""); body.append(pre); details.append(body);
+        details.open = openPrompts.has(key); details.addEventListener("toggle", () => details.open ? openPrompts.add(key) : openPrompts.delete(key)); grid.append(details);
+      });
+      if (workflow.supplementPrompt) {
+        const key = "supplement"; const details = node("details", "run"); const head = node("summary");
+        const title = node("div", "run-title"); title.append(node("strong", "", "处理中补充消息"), node("p", "", workflow.supplementPromptPath || "supplement prompt")); head.append(title); details.append(head);
+        const body = node("div", "run-body"); body.append(node("pre", "prompt", workflow.supplementPrompt)); details.append(body);
+        details.open = openPrompts.has(key); details.addEventListener("toggle", () => details.open ? openPrompts.add(key) : openPrompts.delete(key)); grid.append(details);
+      }
+      if (workflow.availableAgents?.length) {
+        const key = "agent-profiles"; const details = node("details", "run"); const head = node("summary");
+        const title = node("div", "run-title"); title.append(node("strong", "", "可用 Agent profiles"), node("p", "", `${workflow.availableAgents.length} 个，可在 config.json 的 workflow 中选择`)); head.append(title); details.append(head);
+        const body = node("div", "run-body");
+        workflow.availableAgents.forEach(agent => {
+          const launch = Array.isArray(agent.launchCommand) ? agent.launchCommand.join(" ") : agent.driver;
+          body.append(node("p", "", `${agent.active ? "使用中" : "可选"} · ${agent.name} · ${agent.protocol} · ${agent.model || "默认模型"} · ${agent.readOnly ? "只读" : "完整权限"} · ${launch || "—"}`));
+        });
+        details.append(body); details.open = openPrompts.has(key); details.addEventListener("toggle", () => details.open ? openPrompts.add(key) : openPrompts.delete(key)); grid.append(details);
+      }
+      box.append(grid);
+    }
 
     function renderMetrics(data) {
       const box = document.getElementById("metrics"); clear(box);
@@ -266,7 +330,7 @@
         snapshot = await response.json(); const heartbeat = snapshot.service.heartbeatAt ? Date.now() - new Date(snapshot.service.heartbeatAt).getTime() : Infinity;
         const healthy = snapshot.service.running && heartbeat < 15000; document.getElementById("pulse").classList.toggle("live", healthy);
         document.getElementById("serviceText").textContent = healthy ? `${String(snapshot.service.mode).toUpperCase()} · 代理运行中 · PID ${snapshot.service.pid}` : "状态可能已过期";
-        renderMetrics(snapshot); renderActive(snapshot.active); renderQueue(snapshot.queue); populateFilters(snapshot); renderRecent();
+        renderMetrics(snapshot); renderActive(snapshot.active); renderQueue(snapshot.queue); renderWorkflow(snapshot.workflow); populateFilters(snapshot); renderRecent();
         document.getElementById("updated").textContent = `更新于 ${time(snapshot.generatedAt)}`;
       } catch (error) {
         document.getElementById("pulse").classList.remove("live"); document.getElementById("serviceText").textContent = "无法读取本地代理";

@@ -3,12 +3,11 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, tzinfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from socketserver import TCPServer
 from typing import Any, Mapping
-from zoneinfo import ZoneInfo
 
 
 class LocalThreadingHTTPServer(ThreadingHTTPServer):
@@ -27,7 +26,7 @@ class DashboardServer:
         runtime_state: Path,
         html: Path,
         contacts: Mapping[str, str],
-        timezone: ZoneInfo,
+        timezone: tzinfo,
         *,
         host: str = "127.0.0.1",
         port: int = 8765,
@@ -123,6 +122,7 @@ class DashboardServer:
         return {
             "generatedAt": datetime.now(self.timezone).isoformat(),
             "service": service,
+            "workflow": runtime.get("workflow", {}),
             "summary": summary,
             "active": active,
             "queue": queued,

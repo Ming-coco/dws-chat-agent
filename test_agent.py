@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from agent_core import (
     AuditStore,
@@ -30,6 +30,7 @@ from dm_agent import (
     AgentService,
     DwsClient,
     _find_dws_error_code,
+    _load_timezone,
     build_change_archive,
     load_settings,
 )
@@ -41,6 +42,14 @@ CONTACT = Contact("teammate", "Teammate", "u-1", "open-contact")
 
 
 class SettingsTests(unittest.TestCase):
+    def test_asia_shanghai_has_a_stdlib_fallback_on_windows(self) -> None:
+        with patch(
+            "dm_agent.ZoneInfo", side_effect=ZoneInfoNotFoundError("Asia/Shanghai")
+        ):
+            timezone = _load_timezone("Asia/Shanghai")
+
+        self.assertEqual(timezone.utcoffset(None), timedelta(hours=8))
+
     def test_env_file_resolves_private_values_and_json_types(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -423,6 +432,21 @@ class DwsSendTests(unittest.TestCase):
 
         self.assertEqual(client._json_command.await_count, 1)
 
+    def test_text_send_uses_open_id_when_no_user_id_is_available(self) -> None:
+        client = object.__new__(DwsClient)
+        client.ai_tag = True
+        client._json_command = AsyncMock(
+            return_value={"result": {"messageId": "message-1"}}
+        )
+        recipient = Contact("summary", "Operator", "", "self-open-id")
+
+        asyncio.run(client.send(recipient, "日报", "summary-uuid"))
+
+        arguments = client._json_command.await_args.args[0]
+        self.assertIn("--open-dingtalk-id", arguments)
+        self.assertIn("self-open-id", arguments)
+        self.assertNotIn("--user", arguments)
+
 
 class FailureAuditTests(unittest.TestCase):
     def test_successful_send_is_distinguished_from_outgoing_audit_failure(self) -> None:
@@ -477,6 +501,7 @@ class FailureAuditTests(unittest.TestCase):
             service.global_slots = asyncio.Semaphore(1)
             service.runtime_states = {}
             service.runtime_path = root / "runtime.json"
+            service.agent_runtime = SimpleNamespace(describe=lambda: {})
             queue: asyncio.Queue[IncomingEvent] = asyncio.Queue()
             queue.put_nowait(event)
             service.queues = {event.conversation_id: queue}
@@ -535,23 +560,31 @@ class FailureAuditTests(unittest.TestCase):
                 finished_at=event.created_at + timedelta(seconds=30),
                 manual_takeover=False,
                 supplements=[],
+                consumed_supplements=[],
                 error="",
                 workspace_drift=[],
             )
             service = object.__new__(AgentService)
-            service.settings = SimpleNamespace(raw={"max_replans": 1}, timezone=TZ)
+            service.settings = SimpleNamespace(
+                raw={"max_replans": 1}, timezone=TZ, self_name="Operator"
+            )
             service.store = store
+            service.agent_runtime = SimpleNamespace(
+                render_auto_message=lambda name, variables: (
+                    "收到，我在处理中。" if name == "ack" else variables.get("progress", "")
+                )
+            )
             service.gate = SimpleNamespace(
                 inspect=lambda _: SimpleNamespace(action="pass")
             )
             service._set_runtime = lambda *args, **kwargs: None
             service._stabilize = AsyncMock(return_value=([event], [], None))
             service._human_owns_conversation = lambda *args: False
-            service._codex_rate_limited = lambda _: False
+            service._agent_rate_limited = lambda _: False
             service._freshness_state = AsyncMock(return_value=("fresh", []))
             service._send_supervisor_text = AsyncMock()
             service._workspace_snapshot = AsyncMock(return_value={})
-            service._run_codex = AsyncMock(return_value=result)
+            service._run_agent = AsyncMock(return_value=result)
             service._workspace_drift = AsyncMock(return_value=[])
             service._discover_session_changes = AsyncMock(return_value=[])
             service._verify_changes = AsyncMock(return_value=[])
@@ -601,11 +634,17 @@ class ModelRoutingTests(unittest.TestCase):
             worktree_root=root / "worktrees",
         )
         service.store = store
+        service.agent_runtime = SimpleNamespace(
+            profile_name=lambda stage: f"test-{stage}",
+            render_auto_message=lambda name, variables: (
+                "收到，我在处理中。" if name == "ack" else variables.get("progress", "")
+            )
+        )
         service.gate = SimpleNamespace(inspect=lambda _: SimpleNamespace(action="pass"))
         service._set_runtime = lambda *args, **kwargs: None
         service._stabilize = AsyncMock(side_effect=lambda batch: (batch, [], None))
         service._human_owns_conversation = lambda *args: False
-        service._codex_rate_limited = lambda _: False
+        service._agent_rate_limited = lambda _: False
         service._freshness_state = AsyncMock(return_value=("fresh", []))
         service._send_supervisor_text = AsyncMock()
         service._workspace_snapshot = AsyncMock(return_value={})
@@ -614,7 +653,7 @@ class ModelRoutingTests(unittest.TestCase):
         service._verify_changes = AsyncMock(return_value=[])
         service._external_call_warnings = lambda _: []
         service._send_after_freshness_check = AsyncMock(return_value="sent")
-        service._run_codex = AsyncMock(side_effect=results)
+        service._run_agent = AsyncMock(side_effect=results)
         return service, store
 
     @staticmethod
@@ -631,6 +670,7 @@ class ModelRoutingTests(unittest.TestCase):
             finished_at=event.created_at + timedelta(seconds=10),
             manual_takeover=False,
             supplements=[],
+            consumed_supplements=[],
             error="",
             workspace_drift=[],
         )
@@ -664,8 +704,8 @@ class ModelRoutingTests(unittest.TestCase):
 
             asyncio.run(service._handle_batch([event]))
 
-            self.assertEqual(service._run_codex.await_count, 1)
-            self.assertTrue(service._run_codex.await_args.kwargs["front"])
+            self.assertEqual(service._run_agent.await_count, 1)
+            self.assertTrue(service._run_agent.await_args.kwargs["front"])
             sent_decision = service._send_after_freshness_check.await_args.args[1]
             self.assertEqual(sent_decision["reply"], front.decision["reply"])
             self.assertEqual(sent_decision["delivery"], "none")
@@ -686,7 +726,7 @@ class ModelRoutingTests(unittest.TestCase):
                 event,
                 "dm-20260721-luna-route",
                 {
-                    "route": "sol",
+                    "route": "worker",
                     "action": "no_reply",
                     "reply": "",
                     "handled": "需要执行分支合并",
@@ -716,8 +756,8 @@ class ModelRoutingTests(unittest.TestCase):
 
             asyncio.run(service._handle_batch([event]))
 
-            self.assertEqual(service._run_codex.await_count, 2)
-            calls = service._run_codex.await_args_list
+            self.assertEqual(service._run_agent.await_count, 2)
+            calls = service._run_agent.await_args_list
             self.assertTrue(calls[0].kwargs["front"])
             self.assertFalse(calls[1].kwargs["front"])
             self.assertTrue(calls[1].kwargs["escalated"])
@@ -808,33 +848,18 @@ class ModelRoutingTests(unittest.TestCase):
 
             asyncio.run(service._handle_batch([event]))
 
-            self.assertEqual(service._run_codex.await_count, 2)
-            self.assertTrue(service._run_codex.await_args_list[0].kwargs["front"])
-            self.assertTrue(service._run_codex.await_args_list[1].kwargs["front"])
+            self.assertEqual(service._run_agent.await_count, 2)
+            self.assertTrue(service._run_agent.await_args_list[0].kwargs["front"])
+            self.assertTrue(service._run_agent.await_args_list[1].kwargs["front"])
             service._send_supervisor_text.assert_not_awaited()
             store.close()
 
     def test_front_prompt_includes_real_read_only_code_examples(self) -> None:
-        service = object.__new__(AgentService)
-        service.settings = SimpleNamespace(
-            raw={"security": {}},
-            timezone=TZ,
-            workspace_root=Path("/workspace"),
-            self_name="Operator",
+        prompt = (Path(__file__).parent / "prompts" / "front.md").read_text(
+            encoding="utf-8"
         )
-        event = IncomingEvent(
-            "event-prompt",
-            "message-prompt",
-            "conversation-prompt",
-            CONTACT,
-            "关注企业的接口发我一下，还有入参",
-            datetime(2026, 7, 21, 14, 6, tzinfo=TZ),
-        )
-
-        prompt = service._build_front_prompt("dm-luna", [event], "")
-
         self.assertIn("代码定位、读代码解释、表名、接口和入参", prompt)
-        self.assertIn("route=sol", prompt)
+        self.assertIn("route=worker", prompt)
         self.assertIn("禁止修改文件", prompt)
 
     def test_followup_context_is_shared_and_can_expand_for_sol(self) -> None:
@@ -910,7 +935,7 @@ class ModelRoutingTests(unittest.TestCase):
 
             asyncio.run(service._handle_batch([event]))
 
-            calls = service._run_codex.await_args_list
+            calls = service._run_agent.await_args_list
             front_context = calls[0].kwargs["recent_context"]
             sol_context = calls[1].kwargs["recent_context"]
             self.assertEqual(len(front_context), 6)
@@ -919,12 +944,17 @@ class ModelRoutingTests(unittest.TestCase):
                 self.assertIn(prior_user.content, [item["text"] for item in context])
                 self.assertIn(prior_agent.content, [item["text"] for item in context])
             self.assertFalse(calls[1].kwargs["allow_write"])
-            prompt = service._build_prompt(
-                sol.session_id, [event], "", sol_context,
-                allow_write=False, execution_mode="read_only",
+            variables = service._prompt_variables(
+                "worker",
+                sol.session_id,
+                [event],
+                "",
+                sol_context,
+                allow_write=False,
+                execution_mode="read_only",
             )
-            self.assertIn(event.content, prompt)
-            self.assertIn("禁止创建 worktree", prompt)
+            self.assertIn(event.content, variables["current_messages_json"])
+            self.assertIn("禁止修改文件", variables["execution_rule"])
             service._verify_changes.assert_awaited_once_with([])
             store.close()
 
@@ -957,6 +987,106 @@ class ModelRoutingTests(unittest.TestCase):
 
             self.assertTrue(follows_plan)
             store.close()
+
+
+class RunningSupplementTests(unittest.TestCase):
+    def test_new_message_is_steered_into_the_live_agent_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = IncomingEvent(
+                "event-first",
+                "message-first",
+                "conversation-steer",
+                CONTACT,
+                "先看一下这个接口",
+                datetime(2026, 7, 21, 17, 10, tzinfo=TZ),
+            )
+            supplement = IncomingEvent(
+                "event-more",
+                "message-more",
+                "conversation-steer",
+                CONTACT,
+                "补充：也看一下错误码",
+                datetime(2026, 7, 21, 17, 10, 5, tzinfo=TZ),
+            )
+
+            class FakeSession:
+                def __init__(self) -> None:
+                    self.done = False
+                    self.error = ""
+                    self.exit_code = 0
+                    self.latest_progress = ""
+                    self.prepared = SimpleNamespace(timeout_seconds=30)
+                    self.steered: list[str] = []
+
+                async def start(self) -> None:
+                    return None
+
+                async def wait(self, timeout: float) -> None:
+                    raise TimeoutError
+
+                async def steer(self, prompt: str) -> bool:
+                    self.steered.append(prompt)
+                    self.done = True
+                    return True
+
+                def decision(self) -> dict[str, object]:
+                    return {
+                        "route": "reply",
+                        "action": "reply",
+                        "reply": "接口和错误码都确认了。",
+                        "handled": "确认接口和错误码",
+                        "reason": "done",
+                        "execution": "read_only",
+                        "need_more_context": False,
+                        "validation": [],
+                        "warnings": [],
+                    }
+
+                async def abort(self) -> None:
+                    self.done = True
+
+                async def close(self) -> None:
+                    return None
+
+            fake_session = FakeSession()
+            runtime = SimpleNamespace(
+                profile_name=lambda stage: f"test-{stage}",
+                render=lambda stage, variables: "initial prompt",
+                open_session=lambda *args: fake_session,
+                supplement_strategy="steer",
+                render_supplement=lambda variables: variables[
+                    "supplement_messages_json"
+                ],
+                progress_enabled=False,
+                progress_interval_seconds=0,
+                max_progress_updates=0,
+            )
+            service = object.__new__(AgentService)
+            service.settings = SimpleNamespace(
+                raw={"monitor_interval_seconds": 0.001, "security": {}},
+                timezone=TZ,
+                state_dir=root / "state",
+                self_name="Operator",
+                workspace_root=root,
+                worktree_root=root / "worktrees",
+            )
+            service.agent_runtime = runtime
+            service.store = SimpleNamespace(claim_event=Mock(return_value=True))
+            service.dws = SimpleNamespace(history=AsyncMock(return_value=[]))
+            service._set_runtime = lambda *args, **kwargs: None
+            service._touch_runtime = lambda *args, **kwargs: None
+            service._register_manual_messages = lambda history: None
+            service._history_events = lambda *args, **kwargs: [supplement]
+
+            result = asyncio.run(
+                service._run_agent([first], "", front=True, recent_context=[])
+            )
+
+            self.assertEqual([item.message_id for item in result.consumed_supplements], [supplement.message_id])
+            self.assertFalse(result.supplements)
+            self.assertEqual(len(fake_session.steered), 1)
+            self.assertIn(supplement.content, fake_session.steered[0])
 
 
 class ChangeDiscoveryTests(unittest.TestCase):
@@ -1141,24 +1271,9 @@ class HumanTakeoverTests(unittest.TestCase):
 
 class DeliveryTests(unittest.TestCase):
     def test_prompt_defaults_code_delivery_through_dev_to_test(self) -> None:
-        service = object.__new__(AgentService)
-        service.settings = SimpleNamespace(
-            raw={"security": {}},
-            timezone=TZ,
-            workspace_root=Path("/workspace"),
-            worktree_root=Path("/worktrees"),
-            self_name="Operator",
+        prompt = (Path(__file__).parent / "prompts" / "worker.md").read_text(
+            encoding="utf-8"
         )
-        event = IncomingEvent(
-            event_id="event-1",
-            message_id="message-1",
-            conversation_id="conversation-1",
-            contact=Contact("teammate", "Teammate", "u-1", "open-contact"),
-            content="帮我合一下 feature/update-copy",
-            created_at=datetime(2026, 7, 21, 9, 0, tzinfo=TZ),
-        )
-
-        prompt = service._build_prompt("dm-test", [event], "")
 
         self.assertIn("只处理有充分证据归属于当前联系人的请求分支", prompt)
         self.assertIn("默认 delivery=test", prompt)
@@ -1347,12 +1462,30 @@ class DashboardTests(unittest.TestCase):
                         "contacts": 10,
                         "capacity": 2,
                         "heartbeatAt": "2026-07-20T10:00:05+08:00",
+                        "workflow": {
+                            "name": "codex-default",
+                            "supplementStrategy": "steer",
+                            "stages": [
+                                {
+                                    "id": "front",
+                                    "agent": "codex-front",
+                                    "protocol": "codex-app-server",
+                                    "prompt": "front prompt",
+                                },
+                                {
+                                    "id": "worker",
+                                    "agent": "codex-worker",
+                                    "protocol": "codex-app-server",
+                                    "prompt": "worker prompt",
+                                },
+                            ],
+                        },
                         "active": [
                             {
                                 "conversationId": "conversation-1",
                                 "contactName": CONTACT.display_name,
                                 "startedAt": "2026-07-20T10:00:00+08:00",
-                                "phase": "codex",
+                                "phase": "worker",
                                 "requestPreview": "检查测试环境",
                             }
                         ],
@@ -1374,51 +1507,11 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(snapshot["active"][0]["requestPreview"], "检查测试环境")
             self.assertEqual(snapshot["queue"][0]["requestPreview"], "再检查一下日志")
             self.assertEqual(snapshot["recent"][0]["requestPreview"], "检查测试环境")
-
-
-class CodexProgressTests(unittest.TestCase):
-    def test_latest_agent_message_is_used_for_progress(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "events.jsonl"
-            path.write_text(
-                "\n".join(
-                    [
-                        json.dumps(
-                            {
-                                "type": "item.completed",
-                                "item": {"type": "agent_message", "text": "正在检查服务配置。"},
-                            }
-                        ),
-                        "not-json",
-                        json.dumps(
-                            {
-                                "type": "item.completed",
-                                "item": {
-                                    "type": "agent_message",
-                                    "text": "镜像已经构建完，正在等待测试环境部署流水线。",
-                                },
-                            }
-                        ),
-                        json.dumps(
-                            {
-                                "type": "item.completed",
-                                "item": {
-                                    "type": "agent_message",
-                                    "text": json.dumps(
-                                        {"action": "reply", "reply": "已经完成。"},
-                                        ensure_ascii=False,
-                                    ),
-                                },
-                            }
-                        ),
-                    ]
-                ),
-                encoding="utf-8",
-            )
+            self.assertEqual(snapshot["workflow"]["name"], "codex-default")
             self.assertEqual(
-                AgentService._latest_codex_progress(path),
-                "镜像已经构建完，正在等待测试环境部署流水线。",
+                snapshot["workflow"]["stages"][1]["prompt"], "worker prompt"
             )
+
 
 if __name__ == "__main__":
     unittest.main()

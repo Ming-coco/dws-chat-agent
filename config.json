@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "mode": "${DWS_CHAT_AGENT_MODE}",
   "timezone": "Asia/Shanghai",
   "self": {
@@ -12,10 +12,6 @@
   "history_limit": 80,
   "recent_context_messages": 6,
   "monitor_interval_seconds": 5,
-  "progress_interval_seconds": 180,
-  "max_progress_updates": 60,
-  "front_timeout_seconds": 60,
-  "codex_timeout_seconds": 10800,
   "max_replans": 5,
   "max_parallel_conversations": 2,
   "max_reply_chars": 16000,
@@ -26,16 +22,143 @@
   "workspace_root": "${DWS_CHAT_AGENT_WORKSPACE_ROOT}",
   "worktree_root": "${DWS_CHAT_AGENT_WORKTREE_ROOT}",
   "state_dir": "state",
-  "codex": {
-    "binary": "${DWS_CHAT_AGENT_CODEX_BINARY}",
-    "sandbox": "workspace-write",
-    "network_access": true,
-    "writable_roots": "${DWS_CHAT_AGENT_WRITABLE_ROOTS_JSON}",
-    "front_model": "gpt-5.6-luna",
-    "front_reasoning_effort": "medium",
-    "model": "gpt-5.6-sol",
-    "reasoning_effort": "high",
-    "web_search": "disabled"
+  "agents": {
+    "codex-front": {
+      "driver": "codex",
+      "protocol": "codex-app-server",
+      "command": ["${DWS_CHAT_AGENT_CODEX_BINARY}"],
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "medium",
+      "read_only": true,
+      "timeout_seconds": 60,
+      "options": {
+        "web_search": "disabled"
+      }
+    },
+    "codex-worker": {
+      "driver": "codex",
+      "protocol": "codex-app-server",
+      "command": ["${DWS_CHAT_AGENT_CODEX_BINARY}"],
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "high",
+      "read_only": false,
+      "timeout_seconds": 10800,
+      "options": {
+        "sandbox": "danger-full-access",
+        "web_search": "disabled"
+      }
+    },
+    "claude-front": {
+      "driver": "claude",
+      "protocol": "claude-stream-json",
+      "command": ["claude"],
+      "model": "haiku",
+      "read_only": true,
+      "timeout_seconds": 60
+    },
+    "claude-worker": {
+      "driver": "claude",
+      "protocol": "claude-stream-json",
+      "command": ["claude"],
+      "model": "sonnet",
+      "read_only": false,
+      "timeout_seconds": 10800,
+      "options": {
+        "permission_mode": "bypassPermissions"
+      }
+    },
+    "pi-front": {
+      "driver": "pi",
+      "protocol": "pi-rpc",
+      "command": ["pi"],
+      "model": "",
+      "reasoning_effort": "medium",
+      "read_only": true,
+      "timeout_seconds": 60
+    },
+    "pi-worker": {
+      "driver": "pi",
+      "protocol": "pi-rpc",
+      "command": ["pi"],
+      "model": "",
+      "reasoning_effort": "high",
+      "read_only": false,
+      "timeout_seconds": 10800
+    }
+  },
+  "workflows": {
+    "active": "codex-default",
+    "presets": {
+      "codex-default": {
+        "supplement_strategy": "steer",
+        "supplement_prompt": "prompts/supplement.md",
+        "auto_messages": {
+          "ack": "收到，我在处理中。",
+          "progress": "{{progress}}",
+          "progress_enabled": true,
+          "progress_interval_seconds": 180,
+          "max_progress_updates": 60
+        },
+        "front": {
+          "label": "Codex 快速前台",
+          "agent": "codex-front",
+          "prompt": "prompts/front.md",
+          "schema": "front-decision.schema.json"
+        },
+        "worker": {
+          "label": "Codex 执行 Agent",
+          "agent": "codex-worker",
+          "prompt": "prompts/worker.md",
+          "schema": "decision.schema.json"
+        }
+      },
+      "claude-default": {
+        "supplement_strategy": "steer",
+        "supplement_prompt": "prompts/supplement.md",
+        "auto_messages": {
+          "ack": "收到，我在处理中。",
+          "progress": "{{progress}}",
+          "progress_enabled": true,
+          "progress_interval_seconds": 180,
+          "max_progress_updates": 60
+        },
+        "front": {
+          "label": "Claude 快速前台",
+          "agent": "claude-front",
+          "prompt": "prompts/front.md",
+          "schema": "front-decision.schema.json"
+        },
+        "worker": {
+          "label": "Claude 执行 Agent",
+          "agent": "claude-worker",
+          "prompt": "prompts/worker.md",
+          "schema": "decision.schema.json"
+        }
+      },
+      "pi-default": {
+        "supplement_strategy": "steer",
+        "supplement_prompt": "prompts/supplement.md",
+        "auto_messages": {
+          "ack": "收到，我在处理中。",
+          "progress": "{{progress}}",
+          "progress_enabled": true,
+          "progress_interval_seconds": 180,
+          "max_progress_updates": 60
+        },
+        "front": {
+          "label": "Pi 快速前台",
+          "agent": "pi-front",
+          "prompt": "prompts/front.md",
+          "schema": "front-decision.schema.json"
+        },
+        "worker": {
+          "label": "Pi 执行 Agent",
+          "agent": "pi-worker",
+          "prompt": "prompts/worker.md",
+          "schema": "decision.schema.json"
+        }
+      }
+    }
   },
   "dws": {
     "binary": "dws",
@@ -53,6 +176,7 @@
     ]
   },
   "daily_summary": {
+    "enabled": true,
     "time": "09:00",
     "recipient_user_id": null
   }

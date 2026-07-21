@@ -6,11 +6,10 @@ import json
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlparse
-from zoneinfo import ZoneInfo
 
 
 @dataclass(frozen=True)
@@ -111,7 +110,7 @@ def human_owns_conversation(
     return (earliest_incoming - latest_manual).total_seconds() < cooldown_seconds
 
 
-def parse_local_datetime(value: Any, timezone: ZoneInfo) -> datetime:
+def parse_local_datetime(value: Any, timezone: tzinfo) -> datetime:
     if isinstance(value, (int, float)):
         seconds = float(value)
         if seconds > 10_000_000_000:
@@ -176,7 +175,7 @@ def _extract_content(value: Any) -> str:
     return str(value).strip()
 
 
-def parse_dws_event(line: str, contact: Contact, timezone: ZoneInfo) -> IncomingEvent | None:
+def parse_dws_event(line: str, contact: Contact, timezone: tzinfo) -> IncomingEvent | None:
     try:
         outer = json.loads(line)
     except json.JSONDecodeError:
@@ -224,7 +223,7 @@ _URL = re.compile(r"https?://[^\s<>\]\[\"']+", re.IGNORECASE)
 
 
 class SecurityGate:
-    """Deterministic, zero-token gate. Uncertain business requests pass to Codex."""
+    """Deterministic, zero-token gate. Uncertain business requests pass to the agent."""
 
     def __init__(
         self,
@@ -629,7 +628,7 @@ class AuditStore:
         )
         self.connection.commit()
 
-    def runs_for_day(self, day: date, timezone: ZoneInfo) -> list[sqlite3.Row]:
+    def runs_for_day(self, day: date, timezone: tzinfo) -> list[sqlite3.Row]:
         start = datetime.combine(day, datetime.min.time(), timezone)
         end = start + timedelta(days=1)
         return list(
@@ -642,7 +641,7 @@ class AuditStore:
             ).fetchall()
         )
 
-    def codex_run_counts_since(
+    def agent_run_counts_since(
         self, since: datetime, contact_user_id: str
     ) -> tuple[int, int]:
         contact_row = self.connection.execute(
@@ -660,6 +659,9 @@ class AuditStore:
             (since.isoformat(),),
         ).fetchone()
         return int(contact_row["count"]), int(global_row["count"])
+
+    # Kept for callers that still read audit databases created by older releases.
+    codex_run_counts_since = agent_run_counts_since
 
 
 def normalize_decision(value: Mapping[str, Any]) -> dict[str, Any]:
