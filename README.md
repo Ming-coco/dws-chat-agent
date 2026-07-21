@@ -48,13 +48,16 @@ prompts/supplement.md        prompt used for messages received during a run
 docs/agent-config.md         copy-paste setup guide for another coding agent
 docs/custom-agent-protocol.md custom CLI stdin/stdout contract
 config.json                  public profiles, active workflow, and runtime policy
-dashboard.py/html            read-only localhost operations console
+dashboard.py/html            localhost monitoring console and HTTP API
+settings.html                visual Agent and workflow configuration page
+theme.js                     shared browser-local theme presets and custom colors
+favicon.svg                  Metropolis-inspired page mark
 start-macos.command          one-click macOS setup/start
 start-windows.cmd            one-click Windows setup/start
 manage.sh                    macOS LaunchAgent lifecycle
 ```
 
-The dashboard shows the active workflow, agents, models, protocols, full prompts, supplement strategy, acknowledgement text, and progress interval. It never exposes profile environment variables, auth files, or `.env` values.
+The main dashboard at [http://127.0.0.1:8765/](http://127.0.0.1:8765/) stays focused on active work, the queue, and the processing timeline. Use its gear button to open the separate settings page at [http://127.0.0.1:8765/settings](http://127.0.0.1:8765/settings). That page shows the current runtime flow, switches presets, edits Agent profiles and prompts, and offers Metropolis plus common editor themes and custom colors. Appearance is stored only in the current browser. Agent saves are revision-checked, schema-validated, blocked while work is active or queued, written atomically, and applied to subsequent sessions without restarting. The page never exposes or overwrites profile environment variables, provider options, auth files, contact IDs, or `.env` values.
 
 ## Requirements
 
@@ -104,7 +107,7 @@ Start in `shadow` mode until configuration is verified. Shadow mode performs ana
 
 ## Agent and workflow configuration
 
-`config.json` contains reusable profiles under `agents` and preset pipelines under `workflows.presets`. Change `workflows.active` to select a preset.
+`config.json` contains reusable profiles under `agents` and preset pipelines under `workflows.presets`. Use the dashboard gear to open `/settings` and edit the safe public fields, or change the file directly when the service is stopped. `workflows.active` selects a preset.
 
 ```json
 {
@@ -158,7 +161,7 @@ The bundled protocols are `codex-app-server`, `claude-stream-json`, and `pi-rpc`
 
 Future custom flows can be introduced as additional presets without turning the current pipeline into a general DAG engine.
 
-Prompt text is stored in normal UTF-8 files and the active files are shown verbatim in the localhost dashboard. A stage prompt may use `{{self_name}}`, `{{agent_name}}`, `{{worker_name}}`, `{{contact_name}}`, `{{contact_alias}}`, `{{contact_user_id}}`, `{{session_id}}`, `{{prior_attempt}}`, `{{workspace_root}}`, `{{worktree_root}}`, `{{recent_context_json}}`, `{{current_messages_json}}`, `{{execution_domains_json}}`, `{{reference_domains_json}}`, `{{execution_mode}}`, `{{execution_rule}}`, and `{{now}}`. The supplement prompt receives `{{supplement_messages_json}}`, `{{session_id}}`, contact identity fields, and `{{self_name}}`. Unknown or missing variables fail validation instead of silently producing a broken prompt.
+Prompt text is stored in normal UTF-8 files and the active files are shown verbatim on the localhost settings page. A stage prompt may use `{{self_name}}`, `{{agent_name}}`, `{{worker_name}}`, `{{contact_name}}`, `{{contact_alias}}`, `{{contact_user_id}}`, `{{session_id}}`, `{{prior_attempt}}`, `{{workspace_root}}`, `{{worktree_root}}`, `{{recent_context_json}}`, `{{current_messages_json}}`, `{{execution_domains_json}}`, `{{reference_domains_json}}`, `{{execution_mode}}`, `{{execution_rule}}`, and `{{now}}`. The supplement prompt receives `{{supplement_messages_json}}`, `{{session_id}}`, contact identity fields, and `{{self_name}}`. Unknown or missing variables fail validation instead of silently producing a broken prompt.
 
 Only the front profile must set `read_only: true`. The worker has normal coding-agent permissions; planning-only behavior for large changes is enforced in the worker prompt and requires the other person's explicit approval before implementation.
 

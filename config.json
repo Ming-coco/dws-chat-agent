@@ -26,7 +26,9 @@
     "codex-front": {
       "driver": "codex",
       "protocol": "codex-app-server",
-      "command": ["${DWS_CHAT_AGENT_CODEX_BINARY}"],
+      "command": [
+        "${DWS_CHAT_AGENT_CODEX_BINARY}"
+      ],
       "model": "gpt-5.6-luna",
       "reasoning_effort": "medium",
       "read_only": true,
@@ -38,7 +40,9 @@
     "codex-worker": {
       "driver": "codex",
       "protocol": "codex-app-server",
-      "command": ["${DWS_CHAT_AGENT_CODEX_BINARY}"],
+      "command": [
+        "${DWS_CHAT_AGENT_CODEX_BINARY}"
+      ],
       "model": "gpt-5.6-sol",
       "reasoning_effort": "high",
       "read_only": false,
@@ -51,26 +55,34 @@
     "claude-front": {
       "driver": "claude",
       "protocol": "claude-stream-json",
-      "command": ["claude"],
+      "command": [
+        "claude"
+      ],
       "model": "haiku",
       "read_only": true,
-      "timeout_seconds": 60
+      "timeout_seconds": 60,
+      "reasoning_effort": ""
     },
     "claude-worker": {
       "driver": "claude",
       "protocol": "claude-stream-json",
-      "command": ["claude"],
+      "command": [
+        "claude"
+      ],
       "model": "sonnet",
       "read_only": false,
       "timeout_seconds": 10800,
       "options": {
         "permission_mode": "bypassPermissions"
-      }
+      },
+      "reasoning_effort": ""
     },
     "pi-front": {
       "driver": "pi",
       "protocol": "pi-rpc",
-      "command": ["pi"],
+      "command": [
+        "pi"
+      ],
       "model": "",
       "reasoning_effort": "medium",
       "read_only": true,
@@ -79,7 +91,9 @@
     "pi-worker": {
       "driver": "pi",
       "protocol": "pi-rpc",
-      "command": ["pi"],
+      "command": [
+        "pi"
+      ],
       "model": "",
       "reasoning_effort": "high",
       "read_only": false,
@@ -93,7 +107,7 @@
         "supplement_strategy": "steer",
         "supplement_prompt": "prompts/supplement.md",
         "auto_messages": {
-          "ack": "收到，我在处理中。",
+          "ack": "已收到消息，正在处理中。",
           "progress": "{{progress}}",
           "progress_enabled": true,
           "progress_interval_seconds": 180,
@@ -174,10 +188,5 @@
       "openai.com",
       "platform.openai.com"
     ]
-  },
-  "daily_summary": {
-    "enabled": true,
-    "time": "09:00",
-    "recipient_user_id": null
   }
 }

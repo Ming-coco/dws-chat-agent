@@ -57,7 +57,9 @@ Never echo discovered private values back. Confirm monitored people by display n
 
 If `.env` is absent, copy `.env.example` to `.env`; never overwrite it. On macOS/Linux set mode `0600`. Fill private values in `.env` without displaying the file afterward.
 
-Configure reusable profiles under `agents` and choose them from a preset under `workflows.presets`. Each profile must define:
+If the service is already running and idle, open the gear on the localhost dashboard, or go directly to `http://127.0.0.1:8765/settings`. This separate page can safely edit public profile, workflow, automatic-message, and prompt fields and applies them to subsequent sessions immediately. It deliberately does not expose `.env`, contact IDs, provider options, or profile environment variables.
+
+For an initial installation, or when the service cannot start, configure reusable profiles under `agents` and choose them from a preset under `workflows.presets`. Each profile must define:
 
 ```json
 {
@@ -75,7 +77,7 @@ The front profile must be `read_only: true`; the worker must be `read_only: fals
 
 Keep the initial workflow as the supplied `front -> worker` scaffold. Configure messages received during a run with `supplement_strategy: "steer"`; preserve `prompts/supplement.md` so new messages enter the live session instead of becoming detached development requests.
 
-Prompts are ordinary UTF-8 files. Edit them only when the user requests different behavior, and keep chat data inside the marked untrusted sections. The dashboard must display the active profiles, launch commands, protocols, models, and prompt templates without displaying environment values.
+Prompts are ordinary UTF-8 files. Edit them only when the user requests different behavior, and keep chat data inside the marked untrusted sections. The settings page must display the active profiles, launch commands, protocols, models, and prompt templates without displaying environment values. Theme selection and custom colors are browser-local and do not modify the Agent configuration.
 
 ## 5. Validate before starting
 
@@ -90,7 +92,7 @@ On Windows use `py -3` if that is the installed Python launcher. Fix every faile
 
 For a first installation, start in `shadow` mode and open `http://127.0.0.1:8765/`. Confirm:
 
-- the dashboard reports the intended workflow and agent commands
+- the settings page reports the intended workflow and agent commands
 - all intended contacts, and no others, are monitored
 - active and queued counts are visible
 - recent request text and concrete progress are visible
@@ -106,7 +108,7 @@ Before updating, inspect the current service status, active/queued work, Git sta
 - If tracked files have local changes, identify whether they are intentional configuration or unfinished code. Do not reset them. Commit, migrate, or ask the user before integrating upstream changes.
 - Use a fast-forward update only when the checkout is clean and the branch relationship is clear; otherwise use a normal reviewable Git integration.
 - Re-run the full tests and `doctor` after updating.
-- Restart only after active and queued counts are both zero, then verify the health endpoint/dashboard and current workflow.
+- For code updates, restart only after active and queued counts are both zero, then verify the dashboard and the current workflow on `/settings`. Agent settings saved through the settings page do not require a service restart.
 
 ## Completion report
 

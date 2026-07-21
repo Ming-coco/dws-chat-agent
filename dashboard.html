@@ -7,17 +7,39 @@
   <style>
     :root {
       color-scheme: dark;
-      --bg: #090c0d;
-      --panel: #111617;
-      --panel-2: #161c1d;
-      --line: #263031;
-      --text: #edf4f2;
-      --muted: #8f9e9a;
-      --lime: #c7f36b;
-      --cyan: #64d8cb;
-      --red: #ff776f;
-      --amber: #f5c66f;
-      --purple: #b39cff;
+      --bg: #06151d;
+      --panel: #102431;
+      --panel-2: #1b2e3a;
+      --control: #0c1d27;
+      --control-deep: #051219;
+      --line: #30434d;
+      --line-strong: #465962;
+      --text: #f2f6f5;
+      --text-secondary: #c9d2d1;
+      --muted: #8e9c9e;
+      --accent: #4ed6c0;
+      --accent-ink: #4ed6c0;
+      --accent-text: #101416;
+      --accent-soft: rgba(78,214,192,.1);
+      --accent-border: rgba(78,214,192,.34);
+      --accent-2: #f5bd4f;
+      --accent-2-ink: #f5bd4f;
+      --accent-2-soft: rgba(245,189,79,.09);
+      --accent-2-border: rgba(245,189,79,.4);
+      --accent-3: #e85332;
+      --accent-3-ink: #ff7659;
+      --accent-3-soft: rgba(232,83,50,.09);
+      --accent-3-border: rgba(232,83,50,.4);
+      --warning: #f5bd4f;
+      --warning-border: rgba(245,189,79,.38);
+      --danger: #e85332;
+      --danger-soft: rgba(232,83,50,.12);
+      --danger-border: rgba(232,83,50,.4);
+      --lime: var(--accent);
+      --cyan: var(--accent);
+      --red: var(--danger);
+      --amber: var(--warning);
+      --purple: var(--accent);
       --radius: 18px;
     }
     * { box-sizing: border-box; }
@@ -25,98 +47,124 @@
       margin: 0;
       min-height: 100vh;
       background:
-        radial-gradient(circle at 8% 0%, rgba(100,216,203,.08), transparent 28rem),
-        radial-gradient(circle at 95% 12%, rgba(199,243,107,.05), transparent 25rem),
+        radial-gradient(circle at 8% 0%, var(--accent-soft), transparent 28rem),
+        radial-gradient(circle at 95% 12%, var(--accent-2-soft), transparent 25rem),
+        radial-gradient(circle at 55% 100%, var(--accent-3-soft), transparent 32rem),
         var(--bg);
       color: var(--text);
       font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
-    button, select { font: inherit; }
+    select { font: inherit; }
     .shell { width: min(1480px, calc(100% - 40px)); margin: 0 auto; padding: 28px 0 48px; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
     .brand { display: flex; align-items: center; gap: 14px; }
     .mark {
-      width: 44px; height: 44px; display: grid; place-items: center;
-      border: 1px solid #354243; border-radius: 13px; background: #151b1c;
-      font-weight: 800; letter-spacing: -.04em; color: var(--lime);
+      width: 46px; height: 46px; display: grid; place-items: center; overflow: hidden;
+      border: 1px solid var(--line-strong); border-radius: 14px; background: var(--control-deep);
     }
+    .mark svg { width: 38px; height: 38px; display: block; }
+    .mark .route-main { stroke: var(--accent); }
+    .mark .route-warm { stroke: var(--accent-2); }
+    .mark .route-hot { stroke: var(--accent-3); }
+    .mark .station { fill: var(--control-deep); stroke: var(--text); }
     h1 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
     .eyebrow { color: var(--muted); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
     .service-state { display: flex; align-items: center; gap: 10px; color: var(--muted); }
-    .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--red); box-shadow: 0 0 0 5px rgba(255,119,111,.1); }
-    .pulse.live { background: var(--lime); box-shadow: 0 0 0 5px rgba(199,243,107,.1); }
+    .header-actions { display: flex; align-items: center; gap: 12px; }
+    .settings-link {
+      width: 38px; height: 38px; display: grid; place-items: center;
+      color: var(--text); text-decoration: none; font-size: 20px; line-height: 1;
+      background: var(--control); border: 1px solid var(--line); border-radius: 11px;
+    }
+    .settings-link:hover, .settings-link:focus-visible { color: var(--lime); border-color: var(--cyan); outline: none; }
+    .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 0 5px var(--danger-soft); }
+    .pulse.live { background: var(--accent); box-shadow: 0 0 0 5px var(--accent-soft); }
     .metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
-    .metric, .panel { border: 1px solid var(--line); background: rgba(17,22,23,.92); border-radius: var(--radius); }
+    .metric, .panel { border: 1px solid var(--line); background: var(--panel); border-radius: var(--radius); }
     .metric { padding: 16px 18px; }
     .metric span { display: block; color: var(--muted); font-size: 12px; }
     .metric strong { display: block; margin-top: 4px; font-size: 25px; letter-spacing: -.04em; }
     .metric strong.accent { color: var(--lime); }
+    .metric:nth-child(2) strong { color: var(--accent-2-ink); }
+    .metric:nth-child(3) strong { color: var(--accent-3-ink); }
+    .metric:nth-child(4) strong { color: var(--accent-ink); }
+    .metric:nth-child(5) strong { color: var(--danger); }
     .workbench { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(280px, .7fr); gap: 14px; margin-bottom: 14px; }
     .panel { padding: 20px; min-width: 0; }
     .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
     .panel h2 { margin: 0; font-size: 14px; letter-spacing: .02em; }
     .hint { color: var(--muted); font-size: 12px; }
     .active-list, .queue-list, .recent-list { display: grid; gap: 10px; }
-    .active-card { background: var(--panel-2); border: 1px solid #31403f; border-radius: 15px; padding: 18px; }
+    .active-card { background: var(--panel-2); border: 1px solid var(--line-strong); border-radius: 15px; padding: 18px; }
     .active-top, .run-top { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
     .person { font-size: 17px; font-weight: 700; }
-    .request { color: #ced8d5; margin: 9px 0 16px; max-width: 78ch; white-space: pre-wrap; }
-    .badge { display: inline-flex; align-items: center; min-height: 25px; padding: 2px 9px; border: 1px solid #3a4746; border-radius: 999px; color: var(--cyan); font-size: 12px; white-space: nowrap; }
-    .badge.sent { color: var(--lime); border-color: rgba(199,243,107,.3); }
-    .badge.error { color: var(--red); border-color: rgba(255,119,111,.35); }
-    .badge.refused { color: var(--purple); border-color: rgba(179,156,255,.35); }
+    .request { color: var(--text-secondary); margin: 9px 0 16px; max-width: 78ch; white-space: pre-wrap; }
+    .badge { display: inline-flex; align-items: center; min-height: 25px; padding: 2px 9px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--accent-ink); font-size: 12px; white-space: nowrap; }
+    .badge.sent { color: var(--accent-ink); border-color: var(--accent-border); }
+    .badge.error { color: var(--danger); border-color: var(--danger-border); }
+    .badge.refused { color: var(--accent-3-ink); border-color: var(--accent-3-border); }
     .badge.quiet { color: var(--muted); }
-    .badge.replan { color: var(--amber); border-color: rgba(245,198,111,.35); }
+    .badge.replan { color: var(--accent-2-ink); border-color: var(--accent-2-border); }
     .steps { display: grid; grid-template-columns: repeat(9, 1fr); gap: 5px; }
     .step { min-width: 0; }
-    .step-line { height: 4px; border-radius: 999px; background: #2a3334; margin-bottom: 7px; }
-    .step.done .step-line, .step.current .step-line { background: var(--lime); }
-    .step.current .step-line { box-shadow: 0 0 12px rgba(199,243,107,.35); }
+    .step-line { height: 4px; border-radius: 999px; background: var(--line); margin-bottom: 7px; }
+    .step:nth-child(3n+1) { --phase-color: var(--accent); --phase-border: var(--accent-border); }
+    .step:nth-child(3n+2) { --phase-color: var(--accent-2); --phase-border: var(--accent-2-border); }
+    .step:nth-child(3n) { --phase-color: var(--accent-3); --phase-border: var(--accent-3-border); }
+    .step.done .step-line, .step.current .step-line { background: var(--phase-color); }
+    .step.current .step-line { box-shadow: 0 0 0 1px var(--phase-border); }
     .step-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10px; }
     .step.current .step-label { color: var(--text); }
     .meta { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--muted); font-size: 12px; margin-top: 14px; }
-    .queue-item { padding: 13px 14px; border: 1px solid var(--line); border-radius: 13px; background: #131819; }
+    .queue-item { padding: 13px 14px; border: 1px solid var(--line); border-radius: 13px; background: var(--panel-2); }
     .queue-item strong { display: block; }
     .queue-item .request { margin: 6px 0 8px; }
-    .empty { display: grid; place-items: center; min-height: 130px; color: var(--muted); border: 1px dashed #2c3637; border-radius: 14px; text-align: center; padding: 20px; }
+    .empty { display: grid; place-items: center; min-height: 130px; color: var(--muted); border: 1px dashed var(--line); border-radius: 14px; text-align: center; padding: 20px; }
     .filters { display: flex; gap: 8px; flex-wrap: wrap; }
-    select { color: var(--text); background: #151b1c; border: 1px solid #303a3b; border-radius: 10px; padding: 7px 30px 7px 10px; }
-    .run { border: 1px solid var(--line); border-radius: 14px; background: #121718; overflow: hidden; }
+    select { color: var(--text); background: var(--control); border: 1px solid var(--line); border-radius: 10px; padding: 7px 30px 7px 10px; }
+    .run { border: 1px solid var(--line); border-radius: 14px; background: var(--panel-2); overflow: hidden; }
     .run summary { list-style: none; cursor: pointer; padding: 15px 16px; }
     .run summary::-webkit-details-marker { display: none; }
-    .run:hover { border-color: #3b4748; }
+    .run:hover { border-color: var(--line-strong); }
     .run-title { min-width: 0; }
     .run-title strong { margin-right: 10px; }
-    .run-title p { margin: 5px 0 0; color: #c6d0cd; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .run-title p { margin: 5px 0 0; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .run-time { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
-    .run-body { border-top: 1px solid var(--line); padding: 16px; display: grid; gap: 14px; color: #c8d2cf; }
+    .run-body { border-top: 1px solid var(--line); padding: 16px; display: grid; gap: 14px; color: var(--text-secondary); }
     .detail-block h3 { margin: 0 0 6px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
     .detail-block p { margin: 0; white-space: pre-wrap; }
     .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-    .chip { max-width: 100%; overflow-wrap: anywhere; border: 1px solid #323d3e; background: #171d1e; border-radius: 8px; padding: 4px 8px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .chip { max-width: 100%; overflow-wrap: anywhere; border: 1px solid var(--line); background: var(--control); border-radius: 8px; padding: 4px 8px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
     .code-change { border-left: 2px solid var(--cyan); padding-left: 12px; }
-    .workflow { margin-bottom: 14px; }
-    .workflow-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-    .workflow-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-    .prompt { margin: 0; padding: 14px; max-height: 480px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #0c1011; border-radius: 10px; color: #cfd9d6; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
     footer { color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 12px; margin-top: 14px; }
     @media (max-width: 900px) {
       .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .workbench { grid-template-columns: 1fr; }
-      .workflow-grid { grid-template-columns: 1fr; }
       .steps { grid-template-columns: repeat(4, 1fr); }
       header { align-items: flex-start; flex-direction: column; }
     }
   </style>
+  <link rel="icon" href="/favicon.svg?v=2" type="image/svg+xml">
+  <script src="/theme.js"></script>
 </head>
 <body>
   <main class="shell">
     <header>
       <div class="brand">
-        <div class="mark">D×A</div>
-        <div><div class="eyebrow">Private-message operations</div><h1>DWS Agent 值班台</h1></div>
+        <div class="mark" aria-hidden="true">
+          <svg viewBox="0 0 48 48" focusable="false">
+            <path class="route-warm" d="M5 13h13c6 0 8 8 14 8h11" fill="none" stroke-width="4" stroke-linecap="round"/>
+            <path class="route-main" d="M5 24h38" fill="none" stroke-width="4" stroke-linecap="round"/>
+            <path class="route-hot" d="M5 35h13c7 0 8-8 15-8h10" fill="none" stroke-width="4" stroke-linecap="round"/>
+            <circle class="station" cx="24" cy="24" r="5" stroke-width="3"/>
+          </svg>
+        </div>
+        <div><div class="eyebrow">钉钉代理值班台</div><h1>DWS Chat Agent</h1></div>
       </div>
-      <div class="service-state"><span id="pulse" class="pulse"></span><span id="serviceText">正在连接本地代理…</span></div>
+      <div class="header-actions">
+        <div class="service-state"><span id="pulse" class="pulse"></span><span id="serviceText">正在连接本地代理…</span></div>
+        <a class="settings-link" href="/settings" aria-label="打开 Agent 配置" title="Agent 配置">⚙</a>
+      </div>
     </header>
 
     <section id="metrics" class="metrics"></section>
@@ -132,14 +180,6 @@
       </aside>
     </section>
 
-    <section class="panel workflow">
-      <div class="panel-head">
-        <div><h2>当前处理流程</h2><span class="hint">模型、协议、提示词与自动回复策略</span></div>
-        <span id="workflowName" class="badge"></span>
-      </div>
-      <div id="workflow"></div>
-    </section>
-
     <section class="panel">
       <div class="panel-head">
         <div><h2>处理时间线</h2><span class="hint">点击展开代码、验证与告警</span></div>
@@ -150,7 +190,7 @@
       </div>
       <div id="recent" class="recent-list"></div>
     </section>
-    <footer><span>只读 · 仅监听 127.0.0.1 · 每 3 秒刷新</span><span id="updated"></span></footer>
+    <footer><span>本机控制台 · 仅监听 127.0.0.1 · 状态每 3 秒刷新</span><span id="updated"></span></footer>
   </main>
 
   <script>
@@ -167,7 +207,6 @@
     };
     let snapshot = null;
     const openRuns = new Set();
-    const openPrompts = new Set();
 
     const node = (tag, cls, text) => {
       const value = document.createElement(tag);
@@ -176,7 +215,7 @@
       return value;
     };
     const clear = value => { while (value.firstChild) value.removeChild(value.firstChild); };
-    const time = value => value ? new Intl.DateTimeFormat("zh-CN", {hour:"2-digit", minute:"2-digit", second:"2-digit"}).format(new Date(value)) : "—";
+    const time = value => value ? new Intl.DateTimeFormat("zh-CN", {hour:"2-digit", minute:"2-digit", second:"2-digit"}).format(new Date(value)) : "-";
     const duration = (start, end = Date.now()) => {
       const seconds = Math.max(0, Math.floor((new Date(end).getTime() - new Date(start).getTime()) / 1000));
       if (seconds < 60) return `${seconds}s`;
@@ -198,50 +237,6 @@
       if (sessionId.includes("-sol-")) return "Sol";
       return "Codex（旧）";
     };
-
-    function renderWorkflow(workflow) {
-      const box = document.getElementById("workflow"); clear(box);
-      document.getElementById("workflowName").textContent = workflow?.name || "未加载";
-      if (!workflow?.stages?.length) { box.append(node("div", "empty", "服务尚未提供流程配置")); return; }
-      const summary = node("div", "workflow-summary");
-      summary.append(node("span", "badge", `补充消息：${workflow.supplementStrategy || "—"}`));
-      const auto = workflow.autoMessages || {};
-      summary.append(node("span", "badge", `进度：${auto.progressEnabled ? `${auto.progressIntervalSeconds}s` : "关闭"}`));
-      if (auto.ack) summary.append(node("span", "badge", `处理中：${auto.ack}`));
-      box.append(summary);
-      const grid = node("div", "workflow-grid");
-      workflow.stages.forEach(stage => {
-        const key = `stage:${stage.id}`; const details = node("details", "run"); const head = node("summary");
-        const top = node("div", "run-top"); const title = node("div", "run-title");
-        const line = node("div"); line.append(node("strong", "", stage.label || stage.id), node("span", "badge", stage.agent));
-        const launch = Array.isArray(stage.launchCommand) ? stage.launchCommand.join(" ") : stage.driver;
-        title.append(
-          line,
-          node("p", "", `${stage.driver} · ${stage.protocol} · ${stage.model || "默认模型"} · ${stage.readOnly ? "运行时只读" : "完整权限"}`),
-          node("p", "", `启动：${launch || "—"}`)
-        );
-        top.append(title, node("span", "run-time", stage.reasoningEffort || "默认推理")); head.append(top); details.append(head);
-        const body = node("div", "run-body"); addBlock(body, "提示词文件", stage.promptPath); const pre = node("pre", "prompt", stage.prompt || ""); body.append(pre); details.append(body);
-        details.open = openPrompts.has(key); details.addEventListener("toggle", () => details.open ? openPrompts.add(key) : openPrompts.delete(key)); grid.append(details);
-      });
-      if (workflow.supplementPrompt) {
-        const key = "supplement"; const details = node("details", "run"); const head = node("summary");
-        const title = node("div", "run-title"); title.append(node("strong", "", "处理中补充消息"), node("p", "", workflow.supplementPromptPath || "supplement prompt")); head.append(title); details.append(head);
-        const body = node("div", "run-body"); body.append(node("pre", "prompt", workflow.supplementPrompt)); details.append(body);
-        details.open = openPrompts.has(key); details.addEventListener("toggle", () => details.open ? openPrompts.add(key) : openPrompts.delete(key)); grid.append(details);
-      }
-      if (workflow.availableAgents?.length) {
-        const key = "agent-profiles"; const details = node("details", "run"); const head = node("summary");
-        const title = node("div", "run-title"); title.append(node("strong", "", "可用 Agent profiles"), node("p", "", `${workflow.availableAgents.length} 个，可在 config.json 的 workflow 中选择`)); head.append(title); details.append(head);
-        const body = node("div", "run-body");
-        workflow.availableAgents.forEach(agent => {
-          const launch = Array.isArray(agent.launchCommand) ? agent.launchCommand.join(" ") : agent.driver;
-          body.append(node("p", "", `${agent.active ? "使用中" : "可选"} · ${agent.name} · ${agent.protocol} · ${agent.model || "默认模型"} · ${agent.readOnly ? "只读" : "完整权限"} · ${launch || "—"}`));
-        });
-        details.append(body); details.open = openPrompts.has(key); details.addEventListener("toggle", () => details.open ? openPrompts.add(key) : openPrompts.delete(key)); grid.append(details);
-      }
-      box.append(grid);
-    }
 
     function renderMetrics(data) {
       const box = document.getElementById("metrics"); clear(box);
@@ -330,7 +325,7 @@
         snapshot = await response.json(); const heartbeat = snapshot.service.heartbeatAt ? Date.now() - new Date(snapshot.service.heartbeatAt).getTime() : Infinity;
         const healthy = snapshot.service.running && heartbeat < 15000; document.getElementById("pulse").classList.toggle("live", healthy);
         document.getElementById("serviceText").textContent = healthy ? `${String(snapshot.service.mode).toUpperCase()} · 代理运行中 · PID ${snapshot.service.pid}` : "状态可能已过期";
-        renderMetrics(snapshot); renderActive(snapshot.active); renderQueue(snapshot.queue); renderWorkflow(snapshot.workflow); populateFilters(snapshot); renderRecent();
+        renderMetrics(snapshot); renderActive(snapshot.active); renderQueue(snapshot.queue); populateFilters(snapshot); renderRecent();
         document.getElementById("updated").textContent = `更新于 ${time(snapshot.generatedAt)}`;
       } catch (error) {
         document.getElementById("pulse").classList.remove("live"); document.getElementById("serviceText").textContent = "无法读取本地代理";

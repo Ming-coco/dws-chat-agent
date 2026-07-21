@@ -222,4 +222,5 @@ __marimo__/
 .env.*
 !.env.example
 state/
+.playwright-cli/
 .DS_Store

@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import sys
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import timezone
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 from agent_runtime import AgentRuntime, AgentSession
+from dashboard import (
+    AgentConfigStore,
+    ConfigBusyError,
+    ConfigConflictError,
+    DashboardServer,
+)
 
 
 class AgentRuntimeTests(unittest.TestCase):
@@ -105,7 +115,9 @@ class AgentRuntimeTests(unittest.TestCase):
                 },
             },
         }
-        return AgentRuntime.from_config(raw, root / "config.json", root)
+        config_path = root / "config.json"
+        config_path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        return AgentRuntime.from_config(raw, config_path, root)
 
     def test_workflow_renders_prompts_and_exposes_safe_dashboard_description(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -320,6 +332,7 @@ for line in sys.stdin:
             finally:
                 await session.close()
 
+
     async def test_pi_rpc_uses_native_streaming_steer_without_a_plugin(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -448,6 +461,136 @@ for line in sys.stdin:
                     await asyncio.wait_for(session.start(), timeout=1)
             finally:
                 await session.close()
+
+
+class AgentConfigStoreTests(unittest.TestCase):
+    def test_safe_agent_workflow_and_prompt_fields_are_saved_and_applied(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            AgentRuntimeTests()._runtime(root, "codex")
+            applied: list[dict[str, object]] = []
+            store = AgentConfigStore(
+                root / "config.json",
+                root,
+                on_apply=lambda raw: applied.append(copy.deepcopy(raw)),
+                is_idle=lambda: True,
+            )
+
+            view = store.snapshot()
+            self.assertNotIn(
+                "environment", json.dumps(view["agents"], ensure_ascii=False)
+            )
+            view["agents"]["worker-agent"]["command"] = ["ccr", "code"]
+            view["agents"]["worker-agent"]["protocol"] = "claude-stream-json"
+            view["agents"]["worker-agent"]["driver"] = "claude"
+            view["workflows"]["presets"]["dm-default"]["auto_messages"][
+                "ack"
+            ] = "收到，正在定位具体代码。"
+            view["prompts"]["prompts/worker.md"] = "worker {{self_name}} updated"
+
+            saved = store.save(view)
+
+            raw = json.loads((root / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(raw["agents"]["worker-agent"]["command"], ["ccr", "code"])
+            self.assertEqual(raw["agents"]["worker-agent"]["environment"], {"RUNTIME_TEST": "1"})
+            self.assertEqual(
+                raw["workflows"]["presets"]["dm-default"]["auto_messages"]["ack"],
+                "收到，正在定位具体代码。",
+            )
+            self.assertEqual(
+                (root / "prompts" / "worker.md").read_text(encoding="utf-8"),
+                "worker {{self_name}} updated",
+            )
+            self.assertEqual(len(applied), 1)
+            self.assertNotEqual(saved["revision"], view["revision"])
+
+    def test_save_rejects_busy_runtime_stale_revision_and_invalid_front(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            AgentRuntimeTests()._runtime(root, "codex")
+            busy = AgentConfigStore(root / "config.json", root, is_idle=lambda: False)
+            with self.assertRaises(ConfigBusyError):
+                busy.save(busy.snapshot())
+
+            store = AgentConfigStore(root / "config.json", root, is_idle=lambda: True)
+            stale = store.snapshot()
+            changed = store.snapshot()
+            changed["agents"]["front-agent"]["model"] = "new-fast-model"
+            store.save(changed)
+            with self.assertRaises(ConfigConflictError):
+                store.save(stale)
+
+            invalid = store.snapshot()
+            invalid["agents"]["front-agent"]["read_only"] = False
+            before = (root / "config.json").read_bytes()
+            with self.assertRaisesRegex(ValueError, "front agent"):
+                store.save(invalid)
+            self.assertEqual((root / "config.json").read_bytes(), before)
+
+    def test_dashboard_config_http_endpoint_reads_and_saves_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            AgentRuntimeTests()._runtime(root, "codex")
+            html = root / "dashboard.html"
+            html.write_text("<!doctype html><title>test</title>", encoding="utf-8")
+            settings_html = root / "settings.html"
+            settings_html.write_text(
+                "<!doctype html><title>settings test</title>", encoding="utf-8"
+            )
+            (root / "theme.js").write_text("window.themeTest = true;", encoding="utf-8")
+            (root / "favicon.svg").write_text("<svg></svg>", encoding="utf-8")
+            store = AgentConfigStore(root / "config.json", root)
+            server = DashboardServer(
+                root / "audit.sqlite3",
+                root / "runtime.json",
+                html,
+                {},
+                timezone.utc,
+                port=0,
+                config_store=store,
+            )
+            server.start()
+            try:
+                assert server.server is not None
+                base = f"http://127.0.0.1:{server.server.server_port}"
+                with urlopen(f"{base}/settings", timeout=2) as response:
+                    settings_page = response.read().decode("utf-8")
+                self.assertIn("settings test", settings_page)
+                with urlopen(f"{base}/theme.js", timeout=2) as response:
+                    self.assertEqual(response.headers.get_content_type(), "text/javascript")
+                    self.assertIn("themeTest", response.read().decode("utf-8"))
+                with urlopen(f"{base}/favicon.ico", timeout=2) as response:
+                    self.assertEqual(response.headers.get_content_type(), "image/svg+xml")
+                with urlopen(f"{base}/api/config", timeout=2) as response:
+                    payload = json.load(response)
+                payload["agents"]["front-agent"]["model"] = "updated-fast-model"
+                request = Request(
+                    f"{base}/api/config",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request, timeout=2) as response:
+                    saved = json.load(response)
+                self.assertEqual(
+                    saved["agents"]["front-agent"]["model"],
+                    "updated-fast-model",
+                )
+
+                blocked = Request(
+                    f"{base}/api/config",
+                    data=json.dumps(saved).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Origin": "https://outside.example",
+                    },
+                    method="POST",
+                )
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(blocked, timeout=2)
+                self.assertEqual(raised.exception.code, 403)
+            finally:
+                server.stop()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Agent 配置 · DWS Agent</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #06151d;
+      --panel: #102431;
+      --panel-2: #1b2e3a;
+      --control: #0c1d27;
+      --control-deep: #051219;
+      --line: #30434d;
+      --line-strong: #465962;
+      --text: #f2f6f5;
+      --text-secondary: #c9d2d1;
+      --muted: #8e9c9e;
+      --accent: #4ed6c0;
+      --accent-ink: #4ed6c0;
+      --accent-text: #101416;
+      --accent-soft: rgba(78,214,192,.1);
+      --accent-border: rgba(78,214,192,.34);
+      --accent-2: #f5bd4f;
+      --accent-2-ink: #f5bd4f;
+      --accent-2-soft: rgba(245,189,79,.09);
+      --accent-2-border: rgba(245,189,79,.4);
+      --accent-3: #e85332;
+      --accent-3-ink: #ff7659;
+      --accent-3-soft: rgba(232,83,50,.09);
+      --accent-3-border: rgba(232,83,50,.4);
+      --warning: #f5bd4f;
+      --danger: #e85332;
+      --danger-border: rgba(232,83,50,.4);
+      --lime: var(--accent);
+      --cyan: var(--accent);
+      --red: var(--danger);
+      --radius: 18px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 8% 0%, var(--accent-soft), transparent 28rem),
+        radial-gradient(circle at 95% 12%, var(--accent-2-soft), transparent 25rem),
+        radial-gradient(circle at 55% 100%, var(--accent-3-soft), transparent 32rem),
+        var(--bg);
+      color: var(--text);
+      font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    button, select, input, textarea { font: inherit; }
+    .shell { width: min(1280px, calc(100% - 40px)); margin: 0 auto; padding: 28px 0 72px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
+    .brand { display: flex; align-items: center; gap: 14px; }
+    .back-link {
+      width: 44px; height: 44px; display: grid; place-items: center;
+      color: var(--text); text-decoration: none; font-size: 21px;
+      border: 1px solid var(--line-strong); border-radius: 13px; background: var(--control);
+    }
+    .back-link:hover, .back-link:focus-visible { color: var(--lime); border-color: var(--cyan); outline: none; }
+    h1 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
+    .eyebrow { color: var(--muted); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
+    .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    button {
+      color: var(--text); background: var(--control); border: 1px solid var(--line-strong);
+      border-radius: 10px; padding: 8px 13px; cursor: pointer;
+    }
+    button:hover { border-color: var(--cyan); }
+    button:active { transform: translateY(1px); }
+    button.primary { color: var(--accent-text); background: var(--accent); border-color: var(--accent); font-weight: 750; }
+    button.danger { color: var(--red); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .notice {
+      display: flex; justify-content: space-between; align-items: center; gap: 20px;
+      margin-bottom: 14px; padding: 15px 18px; color: var(--text-secondary);
+      border: 1px solid var(--line); border-radius: 14px; background: var(--panel);
+    }
+    .notice strong { color: var(--lime); }
+    .config-status { min-height: 22px; color: var(--muted); text-align: right; }
+    .config-status.ok { color: var(--lime); }
+    .config-status.error { color: var(--red); }
+    .config-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .config-card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: 18px; min-width: 0; }
+    .config-card .config-card { background: var(--panel-2); border-radius: 14px; }
+    .config-card.wide { grid-column: 1 / -1; }
+    .config-card h2, .config-card h3 { margin: 0 0 13px; font-size: 14px; }
+    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
+    .field { display: grid; gap: 5px; min-width: 0; }
+    .field.wide { grid-column: 1 / -1; }
+    .field > span { color: var(--muted); font-size: 11px; letter-spacing: .03em; }
+    input, textarea, select {
+      width: 100%; color: var(--text); background: var(--control-deep); border: 1px solid var(--line);
+      border-radius: 10px; padding: 9px 10px;
+    }
+    select { padding-right: 30px; }
+    input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent-border); border-color: var(--accent); }
+    textarea { min-height: 92px; resize: vertical; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    textarea.prompt-editor { min-height: 360px; }
+    .check-field { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); align-self: end; min-height: 40px; }
+    .check-field input { width: auto; }
+    .profiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .profile-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
+    .profile-head strong { overflow-wrap: anywhere; }
+    .inline-add { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 10px; }
+    .config-note { color: var(--muted); font-size: 12px; margin: 10px 0 0; }
+    .panel { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: 18px; margin-bottom: 14px; min-width: 0; }
+    .section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+    .section-head h2 { margin: 0; font-size: 14px; }
+    .section-head p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+    .theme-group + .theme-group { margin-top: 14px; }
+    .theme-group h3 { margin: 0 0 8px; color: var(--muted); font-size: 11px; font-weight: 650; }
+    .theme-strip {
+      display: grid; grid-auto-flow: column; grid-auto-columns: minmax(176px, 1fr);
+      gap: 8px; overflow-x: auto; padding: 1px 1px 8px; scroll-snap-type: x proximity;
+      scrollbar-color: var(--line-strong) transparent;
+    }
+    .theme-choice { min-height: 84px; padding: 11px; text-align: left; scroll-snap-align: start; background: var(--panel-2); }
+    .theme-choice.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+    .theme-choice strong { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .theme-choice small { display: block; margin-top: 5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .swatches { display: grid; grid-template-columns: repeat(5, 1fr); height: 10px; margin-top: 9px; overflow: hidden; border: 1px solid var(--line); border-radius: 4px; }
+    .custom-theme { display: grid; grid-template-columns: repeat(5, minmax(110px, 1fr)) auto; align-items: end; gap: 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+    .color-field { display: grid; grid-template-columns: 38px minmax(0, 1fr); align-items: center; gap: 8px; }
+    .color-field span { grid-column: 1 / -1; color: var(--muted); font-size: 11px; }
+    .color-field input[type="color"] { width: 38px; height: 38px; padding: 3px; cursor: pointer; }
+    .color-field output { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text-secondary); }
+    .runtime-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+    .badge { display: inline-flex; align-items: center; min-height: 25px; padding: 2px 9px; border: 1px solid var(--accent-border); border-radius: 999px; color: var(--accent-ink); font-size: 12px; white-space: nowrap; }
+    .runtime-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .runtime-card { border: 1px solid var(--line); border-radius: 14px; background: var(--panel-2); overflow: hidden; }
+    .runtime-summary .badge:nth-child(2), .runtime-card:nth-child(3n+2) .badge { color: var(--accent-2-ink); border-color: var(--accent-2-border); }
+    .runtime-summary .badge:nth-child(3), .runtime-card:nth-child(3n) .badge { color: var(--accent-3-ink); border-color: var(--accent-3-border); }
+    .runtime-card summary { list-style: none; cursor: pointer; padding: 14px; }
+    .runtime-card summary::-webkit-details-marker { display: none; }
+    .runtime-card:hover { border-color: var(--line-strong); }
+    .runtime-top { display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; }
+    .runtime-title { min-width: 0; }
+    .runtime-title strong { margin-right: 8px; }
+    .runtime-title p { margin: 5px 0 0; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .runtime-meta { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .runtime-body { border-top: 1px solid var(--line); padding: 14px; display: grid; gap: 10px; color: var(--text-secondary); }
+    .runtime-body p { margin: 0; overflow-wrap: anywhere; }
+    .runtime-prompt { margin: 0; padding: 12px; max-height: 420px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--control-deep); border-radius: 10px; color: var(--text-secondary); font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .empty { display: grid; place-items: center; min-height: 180px; color: var(--muted); border: 1px dashed var(--line); border-radius: 14px; text-align: center; padding: 20px; }
+    footer { color: var(--muted); font-size: 12px; margin-top: 14px; }
+    @media (max-width: 900px) {
+      .config-grid, .form-grid, .profiles, .runtime-grid { grid-template-columns: 1fr; }
+      .config-card.wide, .field.wide { grid-column: auto; }
+      header, .notice { align-items: flex-start; flex-direction: column; }
+      .custom-theme { grid-template-columns: 1fr; }
+      .config-status { text-align: left; }
+      .toolbar { width: 100%; }
+      .toolbar button { flex: 1; }
+    }
+  </style>
+  <link rel="icon" href="/favicon.svg?v=2" type="image/svg+xml">
+  <script src="/theme.js"></script>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="brand">
+        <a class="back-link" href="/" aria-label="返回值班台" title="返回值班台">←</a>
+        <div><div class="eyebrow">Local agent settings</div><h1>Agent 配置</h1></div>
+      </div>
+      <div class="toolbar">
+        <button id="reloadConfig" type="button">重新读取</button>
+        <button id="saveConfig" class="primary" type="button">保存并应用</button>
+      </div>
+    </header>
+
+    <section class="panel" aria-labelledby="appearanceTitle">
+      <div class="section-head">
+        <div><h2 id="appearanceTitle">外观主题</h2><p>主题仅保存在当前浏览器，选择后会立即同步到值班台。</p></div>
+        <span id="themeStatus" class="config-status" role="status" aria-live="polite"></span>
+      </div>
+      <div class="theme-group"><h3>深色</h3><div id="darkThemes" class="theme-strip"></div></div>
+      <div class="theme-group"><h3>浅色</h3><div id="lightThemes" class="theme-strip"></div></div>
+      <div class="custom-theme">
+        <label class="color-field"><span>背景色</span><input id="customBackground" type="color"><output id="customBackgroundValue"></output></label>
+        <label class="color-field"><span>卡片色</span><input id="customSurface" type="color"><output id="customSurfaceValue"></output></label>
+        <label class="color-field"><span>主色</span><input id="customAccent" type="color"><output id="customAccentValue"></output></label>
+        <label class="color-field"><span>辅助色</span><input id="customSecondary" type="color"><output id="customSecondaryValue"></output></label>
+        <label class="color-field"><span>重点色</span><input id="customTertiary" type="color"><output id="customTertiaryValue"></output></label>
+        <button id="saveCustomTheme" type="button">保存自定义</button>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="runtimeTitle">
+      <div class="section-head">
+        <div><h2 id="runtimeTitle">当前处理流程</h2><p>当前服务实际使用的模型、协议、启动方式和提示词。</p></div>
+        <span id="runtimeWorkflowName" class="badge">正在读取</span>
+      </div>
+      <div id="runtimeWorkflow" class="empty">正在读取运行中配置…</div>
+    </section>
+
+    <section class="notice">
+      <span><strong>只编辑公开配置。</strong> 私密环境变量、联系人 ID、登录态和 provider 私有参数不会下发到这个页面。</span>
+      <span id="configStatus" class="config-status" role="status" aria-live="polite"></span>
+    </section>
+
+    <div id="configEditor" class="empty">正在读取 Agent 配置…</div>
+    <footer>保存前会检查当前没有执行中或排队会话；保存成功后只影响后续会话，不需要重启服务。</footer>
+  </main>
+
+  <script>
+    let agentConfig = null;
+    let configDirty = false;
+
+    const node = (tag, cls, text) => {
+      const value = document.createElement(tag);
+      if (cls) value.className = cls;
+      if (text !== undefined && text !== null) value.textContent = String(text);
+      return value;
+    };
+    const clear = value => { while (value.firstChild) value.removeChild(value.firstChild); };
+    const themeInputs = {
+      background: document.getElementById("customBackground"),
+      surface: document.getElementById("customSurface"),
+      accent: document.getElementById("customAccent"),
+      secondary: document.getElementById("customSecondary"),
+      tertiary: document.getElementById("customTertiary")
+    };
+    const themeOutputs = {
+      background: document.getElementById("customBackgroundValue"),
+      surface: document.getElementById("customSurfaceValue"),
+      accent: document.getElementById("customAccentValue"),
+      secondary: document.getElementById("customSecondaryValue"),
+      tertiary: document.getElementById("customTertiaryValue")
+    };
+    const themeMessage = text => { document.getElementById("themeStatus").textContent = text || ""; };
+
+    function customThemeValue() {
+      return {
+        background: themeInputs.background.value,
+        surface: themeInputs.surface.value,
+        accent: themeInputs.accent.value,
+        secondary: themeInputs.secondary.value,
+        tertiary: themeInputs.tertiary.value
+      };
+    }
+
+    function syncThemeInputs(theme) {
+      Object.keys(themeInputs).forEach(key => {
+        themeInputs[key].value = theme[key];
+        themeOutputs[key].textContent = theme[key].toUpperCase();
+      });
+    }
+
+    function themeChoice(theme, selectedId) {
+      const button = node("button", `theme-choice ${theme.id === selectedId ? "selected" : ""}`.trim());
+      button.type = "button";
+      button.setAttribute("aria-pressed", String(theme.id === selectedId));
+      button.append(node("strong", "", theme.name), node("small", "", theme.note));
+      const swatches = node("span", "swatches");
+      [theme.background, theme.surface, theme.accent, theme.secondary, theme.tertiary].forEach(value => {
+        const swatch = node("span");
+        swatch.style.background = value;
+        swatches.append(swatch);
+      });
+      button.append(swatches);
+      button.addEventListener("click", () => {
+        const applied = window.DwsTheme.select(theme.id);
+        syncThemeInputs(applied);
+        renderThemePicker();
+        themeMessage(`已应用 ${applied.name}`);
+      });
+      return button;
+    }
+
+    function renderThemePicker() {
+      const selection = window.DwsTheme.current();
+      const dark = document.getElementById("darkThemes");
+      const light = document.getElementById("lightThemes");
+      clear(dark); clear(light);
+      window.DwsTheme.themes.forEach(theme => {
+        (theme.mode === "dark" ? dark : light).append(themeChoice(theme, selection.id));
+      });
+      syncThemeInputs(selection.theme);
+      themeMessage(`当前：${selection.theme.name}`);
+    }
+
+    function previewCustomTheme() {
+      const preview = window.DwsTheme.previewCustom(customThemeValue());
+      syncThemeInputs(preview);
+      themeMessage("正在预览自定义配色，保存后才会用于其他页面");
+    }
+
+    function renderRuntimeWorkflow(workflow) {
+      const box = document.getElementById("runtimeWorkflow");
+      const name = document.getElementById("runtimeWorkflowName");
+      clear(box);
+      name.textContent = workflow?.name || "未加载";
+      if (!workflow?.stages?.length) {
+        box.className = "empty";
+        box.textContent = "服务尚未提供运行中配置";
+        return;
+      }
+      box.className = "";
+      const summary = node("div", "runtime-summary");
+      summary.append(node("span", "badge", `补充消息：${workflow.supplementStrategy || "-"}`));
+      const auto = workflow.autoMessages || {};
+      summary.append(node("span", "badge", `进度：${auto.progressEnabled ? `${auto.progressIntervalSeconds}s` : "关闭"}`));
+      if (auto.ack) summary.append(node("span", "badge", `处理中：${auto.ack}`));
+      box.append(summary);
+
+      const grid = node("div", "runtime-grid");
+      workflow.stages.forEach(stage => {
+        const details = node("details", "runtime-card");
+        const head = node("summary");
+        const top = node("div", "runtime-top");
+        const title = node("div", "runtime-title");
+        const first = node("div");
+        first.append(node("strong", "", stage.label || stage.id), node("span", "badge", stage.agent));
+        const launch = Array.isArray(stage.launchCommand) ? stage.launchCommand.join(" ") : stage.driver;
+        title.append(
+          first,
+          node("p", "", `${stage.driver} / ${stage.protocol} / ${stage.model || "默认模型"} / ${stage.readOnly ? "运行时只读" : "完整权限"}`),
+          node("p", "", `启动：${launch || "-"}`)
+        );
+        top.append(title, node("span", "runtime-meta", stage.reasoningEffort || "默认推理"));
+        head.append(top);
+        details.append(head);
+        const body = node("div", "runtime-body");
+        body.append(node("p", "", `提示词文件：${stage.promptPath || "-"}`));
+        body.append(node("pre", "runtime-prompt", stage.prompt || ""));
+        details.append(body);
+        grid.append(details);
+      });
+      if (workflow.supplementPrompt) {
+        const details = node("details", "runtime-card");
+        const head = node("summary");
+        const title = node("div", "runtime-title");
+        title.append(node("strong", "", "处理中补充消息"), node("p", "", workflow.supplementPromptPath || "supplement prompt"));
+        head.append(title);
+        details.append(head);
+        const body = node("div", "runtime-body");
+        body.append(node("pre", "runtime-prompt", workflow.supplementPrompt));
+        details.append(body);
+        grid.append(details);
+      }
+      if (workflow.availableAgents?.length) {
+        const details = node("details", "runtime-card");
+        const head = node("summary");
+        const title = node("div", "runtime-title");
+        title.append(node("strong", "", "可用 Agent profiles"), node("p", "", `${workflow.availableAgents.length} 个可选 profile`));
+        head.append(title);
+        details.append(head);
+        const body = node("div", "runtime-body");
+        workflow.availableAgents.forEach(agent => {
+          const launch = Array.isArray(agent.launchCommand) ? agent.launchCommand.join(" ") : agent.driver;
+          body.append(node("p", "", `${agent.active ? "使用中" : "可选"} / ${agent.name} / ${agent.protocol} / ${agent.model || "默认模型"} / ${agent.readOnly ? "只读" : "完整权限"} / ${launch || "-"}`));
+        });
+        details.append(body);
+        grid.append(details);
+      }
+      box.append(grid);
+    }
+
+    async function loadRuntimeWorkflow() {
+      try {
+        const response = await fetch("/api/snapshot", {cache:"no-store"});
+        const data = await response.json();
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        renderRuntimeWorkflow(data.workflow);
+      } catch (error) {
+        document.getElementById("runtimeWorkflowName").textContent = "读取失败";
+        const box = document.getElementById("runtimeWorkflow");
+        box.className = "empty";
+        box.textContent = `无法读取运行中配置：${error.message}`;
+      }
+    }
+
+    const configMessage = (text, kind = "") => {
+      const status = document.getElementById("configStatus");
+      status.textContent = text || "";
+      status.className = `config-status ${kind}`.trim();
+    };
+    const dirtyConfig = () => {
+      configDirty = true;
+      configMessage("有未保存的改动", "");
+    };
+    const field = (label, control, wide = false) => {
+      const wrapper = node("label", `field ${wide ? "wide" : ""}`.trim());
+      wrapper.append(node("span", "", label), control);
+      return wrapper;
+    };
+    const textControl = (value, onValue, multiline = false) => {
+      const control = node(multiline ? "textarea" : "input");
+      if (!multiline) control.type = "text";
+      control.value = value ?? "";
+      control.addEventListener("input", () => { onValue(control.value); dirtyConfig(); });
+      return control;
+    };
+    const numberControl = (value, onValue, minimum = 0) => {
+      const control = node("input");
+      control.type = "number";
+      control.min = String(minimum);
+      control.value = value ?? 0;
+      control.addEventListener("input", () => { onValue(Number(control.value)); dirtyConfig(); });
+      return control;
+    };
+    const selectControl = (values, selected, onValue) => {
+      const control = node("select");
+      values.forEach(([value, label]) => control.append(new Option(label, value)));
+      control.value = selected ?? "";
+      control.addEventListener("change", () => { onValue(control.value); dirtyConfig(); });
+      return control;
+    };
+    const checkboxControl = (checked, label, onValue) => {
+      const wrapper = node("label", "check-field");
+      const control = node("input");
+      control.type = "checkbox";
+      control.checked = Boolean(checked);
+      control.addEventListener("change", () => { onValue(control.checked); dirtyConfig(); });
+      wrapper.append(control, node("span", "", label));
+      return wrapper;
+    };
+
+    function renderConfig() {
+      const editor = document.getElementById("configEditor");
+      clear(editor);
+      if (!agentConfig) {
+        editor.className = "empty";
+        editor.textContent = "尚未读取配置";
+        return;
+      }
+      editor.className = "config-grid";
+      const workflows = agentConfig.workflows || {active:"", presets:{}};
+      const presets = workflows.presets || {};
+      const presetNames = Object.keys(presets);
+      const activePreset = presets[workflows.active];
+      const agentNames = Object.keys(agentConfig.agents || {});
+
+      const workflowCard = node("section", "config-card wide");
+      workflowCard.append(node("h2", "", "工作流"));
+      const workflowForm = node("div", "form-grid");
+      const activeSelect = selectControl(presetNames.map(name => [name, name]), workflows.active, value => {
+        workflows.active = value;
+        renderConfig();
+        dirtyConfig();
+      });
+      workflowForm.append(field("当前 preset", activeSelect));
+      if (activePreset) {
+        const agentOptions = agentNames.map(name => [name, name]);
+        workflowForm.append(
+          field("前置 Agent", selectControl(agentOptions, activePreset.front?.agent, value => { activePreset.front.agent = value; })),
+          field("后置 Agent", selectControl(agentOptions, activePreset.worker?.agent, value => { activePreset.worker.agent = value; })),
+          field("前置显示名", textControl(activePreset.front?.label, value => { activePreset.front.label = value; })),
+          field("后置显示名", textControl(activePreset.worker?.label, value => { activePreset.worker.label = value; })),
+          field("补充消息策略", selectControl([["steer", "Steer 当前会话"], ["restart_with_context", "带上下文重启"]], activePreset.supplement_strategy, value => { activePreset.supplement_strategy = value; })),
+          field("处理中回复", textControl(activePreset.auto_messages?.ack, value => { activePreset.auto_messages.ack = value; }), true),
+          field("进度回复模板", textControl(activePreset.auto_messages?.progress, value => { activePreset.auto_messages.progress = value; }), true),
+          field("进度间隔（秒）", numberControl(activePreset.auto_messages?.progress_interval_seconds, value => { activePreset.auto_messages.progress_interval_seconds = value; }, 0)),
+          field("最多进度条数", numberControl(activePreset.auto_messages?.max_progress_updates, value => { activePreset.auto_messages.max_progress_updates = value; }, 0)),
+          checkboxControl(activePreset.auto_messages?.progress_enabled, "允许自动发送具体进度", value => { activePreset.auto_messages.progress_enabled = value; })
+        );
+      }
+      workflowCard.append(workflowForm);
+      if (activePreset) {
+        workflowCard.append(node("p", "config-note", `提示词文件：${activePreset.front?.prompt || "-"} / ${activePreset.worker?.prompt || "-"} / ${activePreset.supplement_prompt || "-"}`));
+      }
+      const presetRow = node("div", "inline-add");
+      const presetName = node("input");
+      presetName.placeholder = "复制为新 preset，例如 ccr-default";
+      const clonePreset = node("button", "", "复制当前 preset");
+      clonePreset.type = "button";
+      clonePreset.disabled = !activePreset;
+      clonePreset.addEventListener("click", () => {
+        const name = presetName.value.trim();
+        if (!name || presets[name]) {
+          configMessage("请输入未使用的 preset 名称。", "error");
+          return;
+        }
+        presets[name] = JSON.parse(JSON.stringify(activePreset));
+        workflows.active = name;
+        renderConfig();
+        dirtyConfig();
+      });
+      presetRow.append(presetName, clonePreset);
+      workflowCard.append(presetRow);
+      if (presetNames.length > 1) {
+        const removePreset = node("button", "danger", "删除当前 preset");
+        removePreset.type = "button";
+        removePreset.addEventListener("click", () => {
+          delete presets[workflows.active];
+          workflows.active = Object.keys(presets)[0];
+          renderConfig();
+          dirtyConfig();
+        });
+        workflowCard.append(removePreset);
+      }
+      editor.append(workflowCard);
+
+      const profilesCard = node("section", "config-card wide");
+      profilesCard.append(node("h2", "", "Agent profiles"));
+      const profiles = node("div", "profiles");
+      const referenced = new Set(Object.values(presets).flatMap(preset => [preset.front?.agent, preset.worker?.agent]));
+      agentNames.forEach(name => {
+        const profile = agentConfig.agents[name];
+        const card = node("article", "config-card");
+        const head = node("div", "profile-head");
+        head.append(node("strong", "", name));
+        const remove = node("button", "danger", "删除");
+        remove.type = "button";
+        remove.disabled = referenced.has(name);
+        remove.addEventListener("click", () => {
+          delete agentConfig.agents[name];
+          renderConfig();
+          dirtyConfig();
+        });
+        head.append(remove);
+        card.append(head);
+        const form = node("div", "form-grid");
+        const protocolOptions = (agentConfig.supportedProtocols || []).map(value => [value, value]);
+        const command = Array.isArray(profile.command) ? profile.command.join("\n") : "";
+        form.append(
+          field("类型 / Driver", textControl(profile.driver, value => { profile.driver = value; })),
+          field("会话协议", selectControl(protocolOptions, profile.protocol, value => { profile.protocol = value; })),
+          field("启动命令（每行一个参数）", textControl(command, value => { profile.command = value.split("\n").map(item => item.trim()).filter(Boolean); }, true), true),
+          field("模型", textControl(profile.model, value => { profile.model = value; })),
+          field("推理强度", textControl(profile.reasoning_effort, value => { profile.reasoning_effort = value; })),
+          field("超时（秒）", numberControl(profile.timeout_seconds, value => { profile.timeout_seconds = value; }, 1)),
+          checkboxControl(profile.read_only, "运行时只读（当前 active 前置必须开启，后置必须关闭）", value => { profile.read_only = value; })
+        );
+        card.append(form);
+        profiles.append(card);
+      });
+      const addRow = node("div", "inline-add");
+      const addName = node("input");
+      addName.placeholder = "新 profile 名称，例如 ccr-worker";
+      const addButton = node("button", "", "新增 profile");
+      addButton.type = "button";
+      addButton.addEventListener("click", () => {
+        const name = addName.value.trim();
+        if (!name || agentConfig.agents[name]) {
+          configMessage("请输入未使用的 profile 名称。", "error");
+          return;
+        }
+        agentConfig.agents[name] = {
+          driver:"custom", protocol:"custom-jsonl-v1", command:["my-agent"], model:"",
+          reasoning_effort:"medium", read_only:false, timeout_seconds:10800
+        };
+        renderConfig();
+        dirtyConfig();
+      });
+      addRow.append(addName, addButton);
+      profilesCard.append(
+        profiles,
+        addRow,
+        node("p", "config-note", "environment、登录态和 provider 私密选项不会在控制台读取或覆盖。代理命令按参数数组直接启动，不经过 shell。")
+      );
+      editor.append(profilesCard);
+
+      Object.entries(agentConfig.prompts || {}).forEach(([path, content]) => {
+        const card = node("section", "config-card wide");
+        card.append(node("h2", "", path));
+        const area = textControl(content, value => { agentConfig.prompts[path] = value; }, true);
+        area.classList.add("prompt-editor");
+        card.append(area);
+        editor.append(card);
+      });
+      (agentConfig.lockedPrompts || []).forEach(path => {
+        editor.append(node("div", "config-card wide", `提示词位于配置目录外，控制台只读：${path}`));
+      });
+    }
+
+    async function loadConfig(force = false) {
+      if (force && configDirty && !window.confirm("放弃尚未保存的 Agent 配置改动？")) return;
+      configMessage("正在读取配置…");
+      try {
+        const response = await fetch("/api/config", {cache:"no-store"});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        agentConfig = data;
+        configDirty = false;
+        renderConfig();
+        configMessage("配置已载入", "ok");
+      } catch (error) {
+        configMessage(`读取失败：${error.message}`, "error");
+      }
+    }
+
+    async function saveAgentConfig() {
+      if (!agentConfig) return;
+      const button = document.getElementById("saveConfig");
+      button.disabled = true;
+      configMessage("正在校验并保存…");
+      try {
+        const response = await fetch("/api/config", {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify(agentConfig)
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        agentConfig = data;
+        configDirty = false;
+        renderConfig();
+        configMessage("已保存并应用到后续会话", "ok");
+        await loadRuntimeWorkflow();
+      } catch (error) {
+        configMessage(`保存失败：${error.message}`, "error");
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    document.getElementById("reloadConfig").addEventListener("click", () => loadConfig(true));
+    document.getElementById("saveConfig").addEventListener("click", saveAgentConfig);
+    Object.values(themeInputs).forEach(input => input.addEventListener("input", previewCustomTheme));
+    document.getElementById("saveCustomTheme").addEventListener("click", () => {
+      const applied = window.DwsTheme.selectCustom(customThemeValue());
+      syncThemeInputs(applied);
+      renderThemePicker();
+      themeMessage("已保存自定义主题");
+    });
+    window.addEventListener("beforeunload", event => {
+      if (!configDirty) return;
+      event.preventDefault();
+      event.returnValue = "";
+    });
+    renderThemePicker();
+    loadRuntimeWorkflow();
+    loadConfig();
+  </script>
+</body>
+</html>

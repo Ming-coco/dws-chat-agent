@@ -19,7 +19,6 @@ from agent_core import (
     HistoryMessage,
     IncomingEvent,
     SecurityGate,
-    build_daily_summary,
     human_owns_conversation,
     normalize_decision,
     parse_dws_event,
@@ -326,37 +325,6 @@ class AuditStoreTests(unittest.TestCase):
         self.assertEqual(rows["text-uuid"], "text-message")
         self.assertEqual(rows["file-uuid"], "file-message")
 
-    def test_daily_summary_lists_changed_files(self) -> None:
-        at = datetime(2026, 7, 20, 9, 30, tzinfo=TZ)
-        self.store.record_run(
-            session_id="session-1",
-            conversation_id="conversation-1",
-            contact=CONTACT,
-            started_at=at,
-            finished_at=at,
-            action="reply",
-            status="sent",
-            handled="修复接口",
-            reason="done",
-            changes=[
-                {
-                    "repo": "service-a",
-                    "branch": "codex/fix",
-                    "head_sha": "abcdef1234567890",
-                    "files": ["src/api.py"],
-                }
-            ],
-            validation=["pytest passed"],
-            external_calls=[],
-            warnings=[],
-            codex_exit_code=0,
-        )
-        report = build_daily_summary(self.store.runs_for_day(at.date(), TZ), at.date())
-        self.assertIn("service-a:src/api.py", report)
-        self.assertIn("完成回复 1", report)
-        contact_count, global_count = self.store.codex_run_counts_since(at, CONTACT.user_id)
-        self.assertEqual((contact_count, global_count), (0, 0))
-
     def test_codex_rate_counter_only_counts_dm_sessions(self) -> None:
         at = datetime(2026, 7, 20, 9, 30, tzinfo=TZ)
         for session_id in ("dm-20260720-abc", "code-abc"):
@@ -440,7 +408,7 @@ class DwsSendTests(unittest.TestCase):
         )
         recipient = Contact("summary", "Operator", "", "self-open-id")
 
-        asyncio.run(client.send(recipient, "日报", "summary-uuid"))
+        asyncio.run(client.send(recipient, "控制台验证", "self-send-uuid"))
 
         arguments = client._json_command.await_args.args[0]
         self.assertIn("--open-dingtalk-id", arguments)

@@ -12,12 +12,13 @@ import shutil
 import signal
 import sys
 import tempfile
+import threading
 import uuid
 import webbrowser
 import zipfile
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone as fixed_timezone, tzinfo
+from datetime import datetime, timedelta, timezone as fixed_timezone, tzinfo
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
@@ -37,7 +38,6 @@ from agent_core import (
     HistoryMessage,
     IncomingEvent,
     SecurityGate,
-    build_daily_summary,
     evidence_to_mapping,
     human_owns_conversation,
     normalize_decision,
@@ -47,7 +47,7 @@ from agent_core import (
     sanitize_text,
     sha256_text,
 )
-from dashboard import DashboardServer
+from dashboard import AgentConfigStore, DashboardServer
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -63,6 +63,7 @@ _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 class Settings:
     raw: dict[str, Any]
     config_path: Path
+    env_path: Path
     timezone: tzinfo
     contacts: tuple[Contact, ...]
     state_dir: Path
@@ -175,6 +176,7 @@ def load_settings(path: Path, env_path: Path = DEFAULT_ENV) -> Settings:
     return Settings(
         raw=raw,
         config_path=path.resolve(),
+        env_path=env_path.resolve(),
         timezone=timezone,
         contacts=contacts,
         state_dir=state_dir.resolve(),
@@ -486,19 +488,28 @@ class AgentService:
         self.workers: dict[str, asyncio.Task[None]] = {}
         self.listeners: list[asyncio.Task[None]] = []
         self.runtime_heartbeat: asyncio.Task[None] | None = None
-        self.daily_summary_task: asyncio.Task[None] | None = None
         self.listener_processes: set[asyncio.subprocess.Process] = set()
         self.stop_event = asyncio.Event()
         self.capacity = int(settings.raw.get("max_parallel_conversations", 2))
         self.global_slots = asyncio.Semaphore(self.capacity)
         self.runtime_path = settings.state_dir / "runtime.json"
         self.runtime_states: dict[str, dict[str, Any]] = {}
+        # Ponytail ceiling: this lock only covers idle-check/config-swap/enqueue;
+        # move config application onto the event loop if those operations grow.
+        self.configuration_lock = threading.RLock()
         self.dashboard = DashboardServer(
             settings.state_dir / "audit.sqlite3",
             self.runtime_path,
             APP_DIR / "dashboard.html",
             {item.user_id: item.display_name for item in settings.contacts},
             settings.timezone,
+            config_store=AgentConfigStore(
+                settings.config_path,
+                settings.workspace_root,
+                on_apply=self._apply_agent_configuration,
+                is_idle=self._configuration_is_idle,
+                mutation_lock=self.configuration_lock,
+            ),
         )
         self.main_repo_roots = tuple(
             child.resolve()
@@ -533,9 +544,6 @@ class AgentService:
         self.runtime_heartbeat = asyncio.create_task(
             self._keep_runtime_alive(), name="runtime-heartbeat"
         )
-        self.daily_summary_task = asyncio.create_task(
-            self._daily_summary_loop(), name="daily-summary"
-        )
         await self.stop_event.wait()
         LOG.info("stopping listeners gracefully")
         for task in self.listeners:
@@ -543,12 +551,10 @@ class AgentService:
         for task in self.workers.values():
             task.cancel()
         self.runtime_heartbeat.cancel()
-        self.daily_summary_task.cancel()
         await asyncio.gather(
             *self.listeners,
             *self.workers.values(),
             self.runtime_heartbeat,
-            self.daily_summary_task,
             return_exceptions=True,
         )
 
@@ -597,101 +603,41 @@ class AgentService:
             await asyncio.sleep(5)
             self._write_runtime()
 
-    async def _daily_summary_loop(self) -> None:
-        config = self.settings.raw.get("daily_summary", {})
-        if not config.get("enabled", True):
-            return
-        match = re.fullmatch(r"(\d{1,2}):(\d{2})", str(config.get("time", "09:00")))
-        if not match:
-            LOG.error("daily summary disabled because time is invalid")
-            return
-        hour, minute = (int(value) for value in match.groups())
-        if hour > 23 or minute > 59:
-            LOG.error("daily summary disabled because time is invalid")
-            return
-        marker_path = self.settings.state_dir / "daily-summary.json"
-        if not marker_path.exists():
-            now = datetime.now(self.settings.timezone)
-            scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            initial_day = now.date() - timedelta(days=1 if now >= scheduled else 2)
-            marker_path.write_text(
-                json.dumps(
-                    {
-                        "reportedDay": initial_day.isoformat(),
-                        "initializedAt": now.isoformat(),
-                    },
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
+    def _configuration_is_idle(self) -> bool:
+        with self.configuration_lock:
+            return not self.runtime_states and all(
+                queue.empty() for queue in self.queues.values()
             )
-        while True:
-            now = datetime.now(self.settings.timezone)
-            scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            target_day = now.date() - timedelta(days=1)
-            marker = ""
-            try:
-                marker_value = json.loads(marker_path.read_text(encoding="utf-8"))
-                marker = str(marker_value.get("reportedDay") or "")
-            except (OSError, AttributeError, json.JSONDecodeError):
-                pass
-            if now >= scheduled and marker != target_day.isoformat():
-                if self.mode == "live":
-                    try:
-                        await self._send_scheduled_summary(target_day)
-                        temporary = marker_path.with_suffix(".tmp")
-                        temporary.write_text(
-                            json.dumps(
-                                {
-                                    "reportedDay": target_day.isoformat(),
-                                    "sentAt": datetime.now(self.settings.timezone).isoformat(),
-                                },
-                                ensure_ascii=False,
-                            ),
-                            encoding="utf-8",
-                        )
-                        os.replace(temporary, marker_path)
-                    except Exception as exc:
-                        LOG.error("daily summary failed error=%s", sanitize_text(exc, 500))
-                        await asyncio.sleep(300)
-                        continue
-                else:
-                    LOG.info("daily summary skipped in shadow mode day=%s", target_day)
-                    temporary = marker_path.with_suffix(".tmp")
-                    temporary.write_text(
-                        json.dumps(
-                            {
-                                "reportedDay": target_day.isoformat(),
-                                "skippedAt": datetime.now(
-                                    self.settings.timezone
-                                ).isoformat(),
-                            },
-                            ensure_ascii=False,
-                        ),
-                        encoding="utf-8",
-                    )
-                    os.replace(temporary, marker_path)
-            next_run = scheduled if now < scheduled else scheduled + timedelta(days=1)
-            await asyncio.sleep(max(1.0, (next_run - now).total_seconds()))
 
-    async def _send_scheduled_summary(self, day: date) -> None:
-        report = build_daily_summary(
-            self.store.runs_for_day(day, self.settings.timezone), day
+    def _apply_agent_configuration(self, raw: Mapping[str, Any]) -> None:
+        env = _read_env_file(self.settings.env_path)
+        env.update(os.environ)
+        candidate = dict(self.settings.raw)
+        candidate["agents"] = _resolve_env(raw.get("agents", {}), env)
+        candidate["workflows"] = _resolve_env(raw.get("workflows", {}), env)
+        runtime = AgentRuntime.from_config(
+            candidate, self.settings.config_path, self.settings.workspace_root
         )
-        config = self.settings.raw.get("daily_summary", {})
-        user_id = str(config.get("recipient_user_id") or "")
-        open_id = str(config.get("recipient_open_dingtalk_id") or "")
-        contact = next(
-            (item for item in self.settings.contacts if item.user_id == user_id), None
-        )
-        if contact is None:
-            contact = Contact(
-                "daily-summary",
-                self.settings.self_name,
-                user_id,
-                open_id or self.settings.self_open_id,
-            )
-        await self.dws.send(contact, report, str(uuid.uuid4()))
-        LOG.info("daily summary sent day=%s", day)
+        missing = [
+            f"{name}: {binary}"
+            for name, binary in runtime.required_binaries().items()
+            if shutil.which(binary) is None
+        ]
+        if missing:
+            raise ValueError(f"active agent launcher not found: {', '.join(missing)}")
+        previous_agents = self.settings.raw.get("agents")
+        previous_workflows = self.settings.raw.get("workflows")
+        previous_runtime = self.agent_runtime
+        try:
+            self.settings.raw["agents"] = candidate["agents"]
+            self.settings.raw["workflows"] = candidate["workflows"]
+            self.agent_runtime = runtime
+            self._write_runtime()
+        except Exception:
+            self.settings.raw["agents"] = previous_agents
+            self.settings.raw["workflows"] = previous_workflows
+            self.agent_runtime = previous_runtime
+            raise
 
     def _write_runtime(self) -> None:
         payload = {
@@ -856,13 +802,17 @@ class AgentService:
                 )
 
     def _enqueue(self, event: IncomingEvent) -> None:
-        queue = self.queues.setdefault(event.conversation_id, asyncio.Queue())
-        queue.put_nowait(event)
-        if event.conversation_id not in self.workers or self.workers[event.conversation_id].done():
-            self.workers[event.conversation_id] = asyncio.create_task(
-                self._conversation_worker(event.conversation_id),
-                name=f"conversation:{sha256_text(event.conversation_id)[:8]}",
-            )
+        with self.configuration_lock:
+            queue = self.queues.setdefault(event.conversation_id, asyncio.Queue())
+            queue.put_nowait(event)
+            if (
+                event.conversation_id not in self.workers
+                or self.workers[event.conversation_id].done()
+            ):
+                self.workers[event.conversation_id] = asyncio.create_task(
+                    self._conversation_worker(event.conversation_id),
+                    name=f"conversation:{sha256_text(event.conversation_id)[:8]}",
+                )
 
     async def _conversation_worker(self, conversation_id: str) -> None:
         queue = self.queues[conversation_id]
@@ -1240,7 +1190,7 @@ class AgentService:
                         "validation": [],
                         "external_calls": [],
                         "warnings": [
-                            "被中止的 session worktree 如存在需在日报中复核",
+                            "被中止的 session worktree 如存在需在控制台复核",
                             *self._workspace_drift_warnings(result.workspace_drift),
                         ],
                     },
@@ -2402,36 +2352,6 @@ async def _doctor(settings: Settings) -> int:
     return 0 if all(item[1] for item in checks) else 1
 
 
-def _parse_day(value: str, timezone: tzinfo) -> date:
-    today = datetime.now(timezone).date()
-    if value == "today":
-        return today
-    if value == "yesterday":
-        return today - timedelta(days=1)
-    return date.fromisoformat(value)
-
-
-async def _daily_summary(
-    settings: Settings, day_value: str, send_user: str | None
-) -> int:
-    store = AuditStore(settings.state_dir / "audit.sqlite3")
-    try:
-        day = _parse_day(day_value, settings.timezone)
-        report = build_daily_summary(store.runs_for_day(day, settings.timezone), day)
-    finally:
-        store.close()
-    print(report)
-    recipient = send_user or settings.raw.get("daily_summary", {}).get("recipient_user_id")
-    if recipient:
-        contact = next((item for item in settings.contacts if item.user_id == recipient), None)
-        if contact is None:
-            contact = Contact("日报接收人", "日报接收人", str(recipient), "")
-        client = DwsClient(settings)
-        await client.send(contact, report, str(uuid.uuid4()))
-        print("日报已发送到配置的钉钉接收人。")
-    return 0
-
-
 def _acquire_single_instance(state_dir: Path):
     state_dir.mkdir(parents=True, exist_ok=True)
     lock_path = state_dir / "agent.lock"
@@ -2484,9 +2404,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--open-dashboard", action="store_true", help="open the local dashboard"
     )
     subparsers.add_parser("doctor", help="validate local runtime without sending")
-    summary_parser = subparsers.add_parser("daily-summary", help="summarize audit records")
-    summary_parser.add_argument("--date", default="yesterday")
-    summary_parser.add_argument("--send-user")
     gate_parser = subparsers.add_parser("probe-gate", help="run the zero-token gate")
     gate_parser.add_argument("text")
     return parser
@@ -2501,8 +2418,6 @@ async def async_main(arguments: argparse.Namespace) -> int:
     configure_logging(settings.state_dir, arguments.verbose)
     if arguments.command == "doctor":
         return await _doctor(settings)
-    if arguments.command == "daily-summary":
-        return await _daily_summary(settings, arguments.date, arguments.send_user)
     if arguments.command == "probe-gate":
         security = settings.raw.get("security", {})
         gate = SecurityGate(

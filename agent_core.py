@@ -6,7 +6,7 @@ import json
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, tzinfo
+from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlparse
@@ -628,19 +628,6 @@ class AuditStore:
         )
         self.connection.commit()
 
-    def runs_for_day(self, day: date, timezone: tzinfo) -> list[sqlite3.Row]:
-        start = datetime.combine(day, datetime.min.time(), timezone)
-        end = start + timedelta(days=1)
-        return list(
-            self.connection.execute(
-                """
-                SELECT * FROM runs WHERE finished_at >= ? AND finished_at < ?
-                ORDER BY finished_at ASC
-                """,
-                (start.isoformat(), end.isoformat()),
-            ).fetchall()
-        )
-
     def agent_run_counts_since(
         self, since: datetime, contact_user_id: str
     ) -> tuple[int, int]:
@@ -729,47 +716,3 @@ def evidence_to_mapping(evidence: ChangeEvidence) -> dict[str, Any]:
 
 def render_reply(decision: Mapping[str, Any], changes: Sequence[ChangeEvidence]) -> str:
     return sanitize_text(decision.get("reply"), 6000)
-
-
-def build_daily_summary(rows: Sequence[sqlite3.Row], day: date) -> str:
-    counts: dict[str, int] = {}
-    for row in rows:
-        counts[row["status"]] = counts.get(row["status"], 0) + 1
-    sent = counts.get("sent", 0) + counts.get("shadow", 0)
-    no_reply = counts.get("no_reply", 0) + counts.get("human_cooldown", 0)
-    refused = counts.get("refused", 0)
-    failed = counts.get("error", 0)
-    lines = [
-        f"钉钉代办日报｜{day.isoformat()}",
-        f"完成回复 {sent}；无需回复/人工接管 {no_reply}；安全拒绝 {refused}；失败 {failed}",
-    ]
-    visible = []
-    for row in rows:
-        try:
-            has_changes = bool(json.loads(row["changes_json"]))
-        except (TypeError, json.JSONDecodeError):
-            has_changes = False
-        if row["status"] in {"sent", "shadow", "refused", "error", "human_cooldown"} or has_changes:
-            visible.append(row)
-    if not visible:
-        lines.append("当天没有需要汇总的处理记录。")
-        return "\n".join(lines)
-    for row in visible:
-        handled = row["handled"] or row["reason"] or row["status"]
-        lines.append(f"- {row['contact_name']}｜{row['status']}｜{handled}")
-        try:
-            changes = json.loads(row["changes_json"])
-        except (TypeError, json.JSONDecodeError):
-            changes = []
-        if not changes:
-            lines.append("  改动文件：无")
-            continue
-        files: list[str] = []
-        for change in changes:
-            repo = change.get("repo") or "未知仓库"
-            branch = change.get("branch") or "未知分支"
-            head = str(change.get("head_sha") or "")[:12] or "无提交"
-            lines.append(f"  代码：{repo}｜{branch}｜{head}")
-            files.extend(f"{repo}:{path}" for path in change.get("files", []))
-        lines.append(f"  改动文件：{', '.join(files) if files else '无'}")
-    return "\n".join(lines)
