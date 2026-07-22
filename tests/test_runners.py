@@ -338,6 +338,80 @@ for line in sys.stdin:
             finally:
                 await session.close()
 
+    async def test_codex_app_server_accepts_large_jsonl_events(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "fake_codex.py"
+            script.write_text(
+                """import json, sys
+for line in sys.stdin:
+    value = json.loads(line)
+    method = value.get('method')
+    if method == 'initialize':
+        print(json.dumps({'id': value['id'], 'result': {'ok': True}}), flush=True)
+    elif method == 'thread/start':
+        print(json.dumps({'id': value['id'], 'result': {'thread': {'id': 'thread-1'}}}), flush=True)
+    elif method == 'turn/start':
+        print(json.dumps({'id': value['id'], 'result': {'turn': {'id': 'turn-1'}}}), flush=True)
+        print(json.dumps({'method': 'item/completed', 'params': {'item': {'type': 'commandExecution', 'aggregatedOutput': 'x' * 70000}}}), flush=True)
+        print(json.dumps({'method': 'item/completed', 'params': {'item': {'type': 'agentMessage', 'phase': 'final_answer', 'text': '{\"action\":\"reply\"}'}}}), flush=True)
+        print(json.dumps({'method': 'turn/completed', 'params': {'turn': {'id': 'turn-1', 'status': 'completed'}}}), flush=True)
+""",
+                encoding="utf-8",
+            )
+            prepared = self._runtime(root, "codex").prepare(
+                "worker", "session", "initial", root / "run"
+            )
+            session = AgentSession(
+                replace(prepared, argv=(sys.executable, str(script))), "session"
+            )
+            try:
+                await session.start()
+                await session.wait(timeout=2)
+                self.assertEqual(session.error, "")
+                self.assertEqual(session.decision()["action"], "reply")
+            finally:
+                await session.close()
+
+    async def test_codex_app_server_sends_local_images_as_multimodal_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / "screenshot.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\n")
+            script = root / "fake_codex.py"
+            script.write_text(
+                """import json, sys
+for line in sys.stdin:
+    value = json.loads(line)
+    method = value.get('method')
+    if method == 'initialize':
+        print(json.dumps({'id': value['id'], 'result': {'ok': True}}), flush=True)
+    elif method == 'thread/start':
+        print(json.dumps({'id': value['id'], 'result': {'thread': {'id': 'thread-1'}}}), flush=True)
+    elif method == 'turn/start':
+        inputs = value['params']['input']
+        path = next(item['path'] for item in inputs if item['type'] == 'localImage')
+        print(json.dumps({'id': value['id'], 'result': {'turn': {'id': 'turn-1'}}}), flush=True)
+        print(json.dumps({'method': 'item/completed', 'params': {'item': {'type': 'agentMessage', 'phase': 'final_answer', 'text': json.dumps({'action': 'reply', 'image_path': path})}}}), flush=True)
+        print(json.dumps({'method': 'turn/completed', 'params': {'turn': {'id': 'turn-1', 'status': 'completed'}}}), flush=True)
+""",
+                encoding="utf-8",
+            )
+            prepared = self._runtime(root, "codex").prepare(
+                "worker", "session", "describe image", root / "run", [image]
+            )
+            session = AgentSession(
+                replace(prepared, argv=(sys.executable, str(script))), "session"
+            )
+            try:
+                await session.start()
+                await session.wait(timeout=2)
+                self.assertEqual(
+                    session.decision()["image_path"], str(image.resolve())
+                )
+            finally:
+                await session.close()
+
 
     async def test_pi_rpc_uses_native_streaming_steer_without_a_plugin(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

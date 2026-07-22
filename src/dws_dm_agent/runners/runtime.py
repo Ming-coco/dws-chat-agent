@@ -9,7 +9,7 @@ import subprocess
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from ..core import sanitize_text
 from ..prompts import (
@@ -22,6 +22,7 @@ from . import claude, codex, custom, pi
 
 
 _STAGE_ORDER = ("front", "worker")
+_EVENT_STREAM_LIMIT = 8 * 1024 * 1024
 _DRIVER_PROTOCOLS = {
     "codex": "codex-app-server",
     "claude": "claude-stream-json",
@@ -76,6 +77,7 @@ class PreparedAgent:
     events_path: Path
     stderr_path: Path
     prompt_path: Path
+    local_image_paths: tuple[Path, ...] = ()
 
     @property
     def timeout_seconds(self) -> float:
@@ -159,6 +161,7 @@ class AgentSession:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=_EVENT_STREAM_LIMIT,
             env=dict(self.prepared.environment),
             **kwargs,
         )
@@ -190,11 +193,18 @@ class AgentSession:
                 )
                 if not self.thread_id:
                     raise RuntimeError("Codex app-server did not return a thread id")
+                inputs: list[dict[str, str]] = [
+                    {"type": "text", "text": self.prepared.prompt}
+                ]
+                inputs.extend(
+                    {"type": "localImage", "path": str(path.resolve())}
+                    for path in self.prepared.local_image_paths
+                )
                 turn = await self._jsonrpc_call(
                     "turn/start",
                     {
                         "threadId": self.thread_id,
-                        "input": [{"type": "text", "text": self.prepared.prompt}],
+                        "input": inputs,
                         "effort": self.prepared.stage.profile.reasoning_effort or None,
                         "outputSchema": dict(self.prepared.output_schema),
                     },
@@ -754,6 +764,7 @@ class AgentRuntime:
         session_id: str,
         prompt: str,
         session_dir: Path,
+        local_images: Sequence[Path] = (),
     ) -> PreparedAgent:
         stage = self._stage(stage_name)
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -773,6 +784,8 @@ class AgentRuntime:
             )
         prompt_path.write_text(input_prompt, encoding="utf-8")
         protocol = stage.profile.protocol
+        if local_images and protocol != "codex-app-server":
+            raise ValueError("local images require the Codex app-server protocol")
         argv = _command(stage.profile, schema)
         return PreparedAgent(
             stage=stage,
@@ -787,6 +800,7 @@ class AgentRuntime:
             events_path=events_path,
             stderr_path=stderr_path,
             prompt_path=prompt_path,
+            local_image_paths=tuple(local_images),
         )
 
     def open_session(
@@ -795,9 +809,11 @@ class AgentRuntime:
         session_id: str,
         prompt: str,
         session_dir: Path,
+        local_images: Sequence[Path] = (),
     ) -> AgentSession:
         return AgentSession(
-            self.prepare(stage_name, session_id, prompt, session_dir), session_id
+            self.prepare(stage_name, session_id, prompt, session_dir, local_images),
+            session_id,
         )
 
     def profile_name(self, stage_name: str) -> str:

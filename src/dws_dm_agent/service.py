@@ -54,6 +54,37 @@ from .dws import DwsClient, _find_dws_error_code
 
 
 LOG = logging.getLogger("dws-chat-agent")
+_IMAGE_MEDIA_ID = re.compile(r"\[图片消息\]\(mediaId=([^)\s]+)\)")
+_MAX_IMAGES = 4
+_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+
+def _image_resources(
+    batch: Sequence[IncomingEvent],
+) -> list[tuple[IncomingEvent, str]]:
+    resources: list[tuple[IncomingEvent, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for event in batch:
+        for media_id in _IMAGE_MEDIA_ID.findall(event.content):
+            key = (event.message_id, media_id)
+            if key not in seen:
+                seen.add(key)
+                resources.append((event, media_id))
+    return resources
+
+
+def _image_suffix(path: Path) -> str:
+    with path.open("rb") as stream:
+        header = stream.read(12)
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if header.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if header.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+        return ".webp"
+    raise RuntimeError("media_download_failed: unsupported image format")
 
 
 @dataclass
@@ -712,6 +743,7 @@ class AgentService:
                 return
 
             workspace_before = await self._workspace_snapshot()
+            has_images = bool(_image_resources(batch))
             run_sol = front_attempted
             front_started_at: datetime | None = None
             if not front_attempted:
@@ -728,7 +760,7 @@ class AgentService:
                 front_value = result.decision or {}
                 execution_mode = str(front_value.get("execution", "read_only"))
                 requested_more_context = bool(front_value.get("need_more_context"))
-                if requested_more_context and not expanded_context:
+                if requested_more_context and not expanded_context and not has_images:
                     expanded_context = True
                     recent_context, follows_plan = self._recent_context(
                         history,
@@ -741,7 +773,11 @@ class AgentService:
                     # short continuation into an unnecessary worker run.
                     front_attempted = False
                     continue
-                force_sol = requested_more_context or execution_mode != "read_only"
+                force_sol = (
+                    has_images
+                    or requested_more_context
+                    or execution_mode != "read_only"
+                )
                 front_decision = (
                     None if force_sol else self._front_reply_decision(result.decision)
                 )
@@ -1287,9 +1323,23 @@ class AgentService:
                 execution_mode=execution_mode,
             ),
         )
-        session = self.agent_runtime.open_session(
-            stage, session_id, prompt, session_dir
-        )
+        try:
+            local_images = (
+                () if front else await self._download_images(batch, session_dir)
+            )
+            session = self.agent_runtime.open_session(
+                stage, session_id, prompt, session_dir, local_images
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            shutil.rmtree(session_dir, ignore_errors=True)
+            return AgentResult(
+                session_id,
+                None,
+                None,
+                started_at,
+                datetime.now(self.settings.timezone),
+                error=f"{type(exc).__name__}: {exc}",
+            )
         supplements: dict[str, IncomingEvent] = {}
         consumed: dict[str, IncomingEvent] = {}
         try:
@@ -1384,7 +1434,8 @@ class AgentService:
                         }
                     )
                     steered = (
-                        self.agent_runtime.supplement_strategy == "steer"
+                        not _image_resources(new_supplements)
+                        and self.agent_runtime.supplement_strategy == "steer"
                         and await session.steer(steer_prompt)
                     )
                     if steered:
@@ -1490,6 +1541,29 @@ class AgentService:
         finally:
             await session.close()
             shutil.rmtree(session_dir, ignore_errors=True)
+
+    async def _download_images(
+        self, batch: Sequence[IncomingEvent], session_dir: Path
+    ) -> tuple[Path, ...]:
+        resources = _image_resources(batch)
+        if len(resources) > _MAX_IMAGES:
+            raise RuntimeError(
+                f"media_download_failed: at most {_MAX_IMAGES} images are supported"
+            )
+        images: list[Path] = []
+        for index, (event, media_id) in enumerate(resources, 1):
+            downloaded = session_dir / f"image-{index}.download"
+            await self.dws.download_media(
+                media_id, event.message_id, event.conversation_id, downloaded
+            )
+            if downloaded.stat().st_size > _MAX_IMAGE_BYTES:
+                raise RuntimeError(
+                    f"media_download_failed: image exceeds {_MAX_IMAGE_BYTES} bytes"
+                )
+            image = downloaded.with_suffix(_image_suffix(downloaded))
+            downloaded.replace(image)
+            images.append(image)
+        return tuple(images)
 
     async def _workspace_snapshot(self) -> dict[str, str]:
         async def signature(root: Path) -> tuple[str, str]:

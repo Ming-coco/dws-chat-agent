@@ -66,7 +66,13 @@ class DwsClient:
     def _global_flags(self) -> list[str]:
         return ["--profile", str(self.profile)] if self.profile else []
 
-    async def _json_command(self, arguments: Sequence[str], timeout: float = 45) -> Any:
+    async def _json_command(
+        self,
+        arguments: Sequence[str],
+        timeout: float = 45,
+        *,
+        expect_json: bool = True,
+    ) -> Any:
         command = [self.binary, *arguments, *self._global_flags(), "--format", "json"]
         process = await asyncio.create_subprocess_exec(
             *command,
@@ -87,6 +93,8 @@ class DwsClient:
             raise RuntimeError(
                 f"DWS command failed ({process.returncode}): {operation}{error_code}"
             )
+        if not expect_json:
+            return stdout.decode("utf-8", errors="replace")
         try:
             return json.loads(stdout.decode("utf-8"))
         except json.JSONDecodeError as exc:
@@ -167,3 +175,33 @@ class DwsClient:
             timeout=180,
         )
         return _find_message_id(payload), payload
+
+    async def download_media(
+        self,
+        resource_id: str,
+        message_id: str,
+        conversation_id: str,
+        output: Path,
+    ) -> Path:
+        await self._json_command(
+            [
+                "chat",
+                "message",
+                "download-media",
+                "--type",
+                "mediaId",
+                "--resource-id",
+                resource_id,
+                "--message-id",
+                message_id,
+                "--open-conversation-id",
+                conversation_id,
+                "--output",
+                str(output),
+            ],
+            timeout=90,
+            expect_json=False,
+        )
+        if not output.is_file():
+            raise RuntimeError("media_download_failed: DWS did not create the output file")
+        return output

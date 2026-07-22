@@ -415,6 +415,35 @@ class DwsSendTests(unittest.TestCase):
         self.assertIn("self-open-id", arguments)
         self.assertNotIn("--user", arguments)
 
+    def test_media_download_binds_resource_to_message_and_conversation(self) -> None:
+        client = object.__new__(DwsClient)
+
+        async def download(
+            arguments: list[str],
+            timeout: float = 45,
+            *,
+            expect_json: bool = True,
+        ) -> str:
+            self.assertFalse(expect_json)
+            output = Path(arguments[arguments.index("--output") + 1])
+            output.write_bytes(b"\x89PNG\r\n\x1a\n")
+            return "downloaded"
+
+        client._json_command = AsyncMock(side_effect=download)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "image.download"
+            result = asyncio.run(
+                client.download_media(
+                    "@media-1", "message-1", "conversation-1", output
+                )
+            )
+
+        arguments = client._json_command.await_args.args[0]
+        self.assertEqual(result, output)
+        self.assertIn("@media-1", arguments)
+        self.assertIn("message-1", arguments)
+        self.assertIn("conversation-1", arguments)
+
 
 class FailureAuditTests(unittest.TestCase):
     def test_successful_send_is_distinguished_from_outgoing_audit_failure(self) -> None:
@@ -735,6 +764,57 @@ class ModelRoutingTests(unittest.TestCase):
             self.assertEqual(sent_decision["reply"], sol.decision["reply"])
             store.close()
 
+    def test_image_message_cannot_be_answered_directly_by_luna(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            event = IncomingEvent(
+                "event-image",
+                "message-image",
+                "conversation-image",
+                CONTACT,
+                "帮我对比这张图 [图片消息](mediaId=@media-1)",
+                datetime(2026, 7, 22, 10, 0, tzinfo=TZ),
+            )
+            front = self._result(
+                event,
+                "dm-20260722-luna-image",
+                {
+                    "route": "reply",
+                    "action": "reply",
+                    "reply": "图片不可读。",
+                    "handled": "未读取图片",
+                    "reason": "只有 mediaId",
+                    "execution": "read_only",
+                    "need_more_context": False,
+                    "validation": [],
+                    "warnings": [],
+                },
+            )
+            sol = self._result(
+                event,
+                "dm-20260722-sol-image",
+                {
+                    "action": "reply",
+                    "delivery": "none",
+                    "reply": "图片内容已经核对。",
+                    "handled": "读取并核对图片",
+                    "reason": "done",
+                    "changes": [],
+                    "validation": ["读取钉钉原图"],
+                    "external_calls": [],
+                    "warnings": [],
+                },
+            )
+            service, store = self._service(Path(directory), event, [front, sol])
+
+            asyncio.run(service._handle_batch([event]))
+
+            self.assertEqual(service._run_agent.await_count, 2)
+            self.assertTrue(service._run_agent.await_args_list[0].kwargs["front"])
+            self.assertFalse(service._run_agent.await_args_list[1].kwargs["front"])
+            decision = service._send_after_freshness_check.await_args.args[1]
+            self.assertEqual(decision["reply"], "图片内容已经核对。")
+            store.close()
+
     def test_luna_no_reply_sends_no_acknowledgement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             event = IncomingEvent(
@@ -984,6 +1064,60 @@ class ModelRoutingTests(unittest.TestCase):
 
             self.assertTrue(follows_plan)
             store.close()
+
+
+class MultimodalImageTests(unittest.TestCase):
+    def test_downloaded_images_are_validated_and_renamed(self) -> None:
+        event = IncomingEvent(
+            "event-image",
+            "message-image",
+            "conversation-image",
+            CONTACT,
+            "[图片消息](mediaId=@media-1)",
+            datetime(2026, 7, 22, 10, 0, tzinfo=TZ),
+        )
+        service = object.__new__(AgentService)
+
+        async def download_media(
+            resource_id: str,
+            message_id: str,
+            conversation_id: str,
+            output: Path,
+        ) -> Path:
+            self.assertEqual(
+                (resource_id, message_id, conversation_id),
+                ("@media-1", "message-image", "conversation-image"),
+            )
+            output.write_bytes(b"\x89PNG\r\n\x1a\n" + b"image")
+            return output
+
+        service.dws = SimpleNamespace(download_media=AsyncMock(side_effect=download_media))
+        with tempfile.TemporaryDirectory() as directory:
+            images = asyncio.run(service._download_images([event], Path(directory)))
+            self.assertEqual([path.suffix for path in images], [".png"])
+            self.assertTrue(images[0].is_file())
+
+    def test_non_image_download_is_rejected(self) -> None:
+        event = IncomingEvent(
+            "event-image",
+            "message-image",
+            "conversation-image",
+            CONTACT,
+            "[图片消息](mediaId=@media-1)",
+            datetime(2026, 7, 22, 10, 0, tzinfo=TZ),
+        )
+        service = object.__new__(AgentService)
+
+        async def download_media(*args: object) -> Path:
+            output = args[-1]
+            assert isinstance(output, Path)
+            output.write_bytes(b"not an image")
+            return output
+
+        service.dws = SimpleNamespace(download_media=download_media)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RuntimeError, "unsupported image format"):
+                asyncio.run(service._download_images([event], Path(directory)))
 
 
 class RunningSupplementTests(unittest.TestCase):
