@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -147,6 +148,7 @@ class DwsClient:
         self, contact: Contact, content: str, send_uuid: str, *,
         dry_run: bool = False, retry_network: bool = False,
     ) -> tuple[str | None, Any]:
+        content = re.sub(r"\$(?=\d+\.\d)", "USD ", content)
         if contact.user_id:
             target = ["--user", contact.user_id]
         elif contact.open_dingtalk_id:

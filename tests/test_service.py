@@ -415,6 +415,28 @@ class DwsSendTests(unittest.TestCase):
         self.assertIn("self-open-id", arguments)
         self.assertNotIn("--user", arguments)
 
+    def test_currency_dollar_signs_do_not_trigger_dingtalk_math_markdown(self) -> None:
+        client = object.__new__(DwsClient)
+        client.ai_tag = True
+        client._json_command = AsyncMock(
+            return_value={"result": {"messageId": "message-1"}}
+        )
+
+        asyncio.run(
+            client.send(
+                CONTACT,
+                "缓存命中 $0.027753；配置仍是 $HOME，脚本参数是 $1",
+                "currency-send-uuid",
+            )
+        )
+
+        arguments = client._json_command.await_args.args[0]
+        content = arguments[arguments.index("--text") + 1]
+        self.assertEqual(
+            content,
+            "缓存命中 USD 0.027753；配置仍是 $HOME，脚本参数是 $1",
+        )
+
     def test_media_download_binds_resource_to_message_and_conversation(self) -> None:
         client = object.__new__(DwsClient)
 
