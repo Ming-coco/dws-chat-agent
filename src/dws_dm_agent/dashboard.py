@@ -12,7 +12,8 @@ from datetime import datetime, tzinfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from socketserver import TCPServer
-from typing import Any, Callable, ContextManager, Mapping
+from typing import Any, Callable, ContextManager, Mapping, Sequence
+from urllib.parse import parse_qs, urlsplit
 
 from .prompts import (
     STAGE_PROMPT_VARIABLES,
@@ -72,12 +73,14 @@ class AgentConfigStore:
         on_apply: Callable[[Mapping[str, Any]], None] | None = None,
         is_idle: Callable[[], bool] | None = None,
         mutation_lock: ContextManager[None] | None = None,
+        contacts: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         self.config_path = config_path.resolve()
         self.config_dir = self.config_path.parent
         self.workspace_root = workspace_root.resolve()
         self.on_apply = on_apply
         self.is_idle = is_idle or (lambda: True)
+        self._contacts = self._merge_contacts(contacts, allow_empty=True)
         self._lock = threading.Lock()
         self._mutation_lock = mutation_lock or threading.RLock()
 
@@ -109,6 +112,11 @@ class AgentConfigStore:
                 "timeout_seconds": float(raw_profile.get("timeout_seconds", 60)),
             }
         workflows = self._public_workflows(raw.get("workflows", {}))
+        raw_contacts = raw.get("contacts")
+        contacts = self._merge_contacts(
+            raw_contacts if isinstance(raw_contacts, list) else self._contacts,
+            allow_empty=True,
+        )
         prompts: dict[str, str] = {}
         locked_prompts: list[str] = []
         for text_path in sorted(self._prompt_kinds(workflows)):
@@ -130,6 +138,7 @@ class AgentConfigStore:
                 if isinstance(raw.get("dws"), Mapping)
                 else False,
             },
+            "contacts": contacts,
             "prompts": prompts,
             "lockedPrompts": locked_prompts,
         }
@@ -157,6 +166,7 @@ class AgentConfigStore:
             candidate["dws"] = self._merge_dws(
                 current.get("dws", {}), payload.get("dws")
             )
+            candidate["contacts"] = self._merge_contacts(payload.get("contacts"))
             prompt_updates = self._validated_prompt_updates(
                 candidate["workflows"], payload.get("prompts", {})
             )
@@ -229,6 +239,46 @@ class AgentConfigStore:
         if isinstance(submitted, Mapping) and "ai_tag" in submitted:
             merged["ai_tag"] = bool(submitted["ai_tag"])
         return merged
+
+    @staticmethod
+    def _merge_contacts(
+        submitted: Any, *, allow_empty: bool = False
+    ) -> list[dict[str, str]]:
+        if not isinstance(submitted, Sequence) or isinstance(submitted, (str, bytes)):
+            raise ValueError("contacts must be a list")
+        contacts: list[dict[str, str]] = []
+        for item in submitted:
+            if not isinstance(item, Mapping):
+                raise ValueError("contact must be an object")
+            contact = {
+                "alias": str(item.get("alias") or "").strip(),
+                "display_name": str(item.get("display_name") or "").strip(),
+                "user_id": str(item.get("user_id") or "").strip(),
+                "open_dingtalk_id": str(item.get("open_dingtalk_id") or "").strip(),
+            }
+            limits = {
+                "alias": 80,
+                "display_name": 120,
+                "user_id": 512,
+                "open_dingtalk_id": 512,
+            }
+            if any(
+                not value
+                or len(value) > limits[key]
+                or any(ord(char) < 32 for char in value)
+                for key, value in contact.items()
+            ):
+                raise ValueError("contact fields are missing or invalid")
+            contacts.append(contact)
+        if not contacts and not allow_empty:
+            raise ValueError("at least one whitelist contact is required")
+        if len(contacts) > 100:
+            raise ValueError("contact whitelist cannot exceed 100 users")
+        for key in ("alias", "user_id", "open_dingtalk_id"):
+            values = [item[key] for item in contacts]
+            if len(values) != len(set(values)):
+                raise ValueError(f"duplicate contact {key}")
+        return contacts
 
     @staticmethod
     def _merge_agents(current: Any, submitted: Any) -> dict[str, Any]:
@@ -449,11 +499,15 @@ class DashboardServer:
         host: str = "127.0.0.1",
         port: int = 8765,
         config_store: AgentConfigStore | None = None,
+        contact_search: Callable[[str], list[dict[str, Any]]] | None = None,
     ) -> None:
         self.database = database.resolve()
         self.runtime_state = runtime_state.resolve()
         self.html = html.resolve()
         self.settings_html = self.html.with_name("settings.html")
+        self.diamond_html = self.html.with_name("diamond-preview.html")
+        self.diamond_css = self.html.with_name("diamond-preview.css")
+        self.diamond_favicon = self.html.with_name("diamond-favicon.svg")
         self.theme_js = self.html.with_name("theme.js")
         self.app_css = self.html.with_name("app.css")
         self.favicon = self.html.with_name("favicon.svg")
@@ -462,6 +516,7 @@ class DashboardServer:
         self.host = host
         self.port = port
         self.config_store = config_store
+        self.contact_search = contact_search
         self.server: LocalThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
 
@@ -474,13 +529,24 @@ class DashboardServer:
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
-                path = self.path.split("?", 1)[0]
+                request_url = urlsplit(self.path)
+                path = request_url.path
                 if path in {"/favicon.ico", "/favicon.svg"}:
                     if not dashboard.favicon.is_file():
                         self.send_error(404)
                         return
                     self._send(
                         dashboard.favicon.read_bytes(),
+                        "image/svg+xml",
+                        cache_control="public, max-age=86400",
+                    )
+                    return
+                if path == "/diamond-favicon.svg":
+                    if not dashboard.diamond_favicon.is_file():
+                        self.send_error(404)
+                        return
+                    self._send(
+                        dashboard.diamond_favicon.read_bytes(),
                         "image/svg+xml",
                         cache_control="public, max-age=86400",
                     )
@@ -503,8 +569,32 @@ class DashboardServer:
                         "text/css; charset=utf-8",
                     )
                     return
+                if path == "/diamond-preview.css":
+                    if not dashboard.diamond_css.is_file():
+                        self.send_error(404)
+                        return
+                    self._send(
+                        dashboard.diamond_css.read_bytes(),
+                        "text/css; charset=utf-8",
+                    )
+                    return
                 if path == "/":
                     self._send(dashboard.html.read_bytes(), "text/html; charset=utf-8")
+                    return
+                if path in {"/diamond-preview", "/diamond-preview.html"}:
+                    if not dashboard.diamond_html.is_file():
+                        self.send_error(404)
+                        return
+                    self._send(
+                        dashboard.diamond_html.read_bytes(),
+                        "text/html; charset=utf-8",
+                        content_security_policy=(
+                            "default-src 'self'; "
+                            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+                            "font-src 'self' https://fonts.gstatic.com; "
+                            "script-src 'self' 'unsafe-inline'; connect-src 'self'"
+                        ),
+                    )
                     return
                 if path in {"/settings", "/settings.html"}:
                     if not dashboard.settings_html.is_file():
@@ -534,6 +624,21 @@ class DashboardServer:
                         )
                         return
                     self._send(payload, "application/json; charset=utf-8")
+                    return
+                if path == "/api/contacts/search" and dashboard.contact_search is not None:
+                    query = parse_qs(request_url.query).get("q", [""])[0].strip()
+                    if not query or len(query) > 80 or any(ord(char) < 32 for char in query):
+                        self._send_json({"error": "请输入 1–80 个字符的搜索词"}, status=400)
+                        return
+                    try:
+                        results = dashboard.contact_search(query)
+                    except ValueError as exc:
+                        self._send_json({"error": str(exc)}, status=400)
+                        return
+                    except Exception as exc:
+                        self._send_json({"error": f"钉钉用户搜索失败：{exc}"}, status=502)
+                        return
+                    self._send_json({"results": results})
                     return
                 self.send_error(404)
 
@@ -592,6 +697,7 @@ class DashboardServer:
                 *,
                 status: int = 200,
                 cache_control: str = "no-store",
+                content_security_policy: str | None = None,
             ) -> None:
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
@@ -600,8 +706,11 @@ class DashboardServer:
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header(
                     "Content-Security-Policy",
-                    "default-src 'self'; style-src 'self' 'unsafe-inline'; "
-                    "script-src 'self' 'unsafe-inline'; connect-src 'self'",
+                    content_security_policy
+                    or (
+                        "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+                        "script-src 'self' 'unsafe-inline'; connect-src 'self'"
+                    ),
                 )
                 self.end_headers()
                 self.wfile.write(payload)

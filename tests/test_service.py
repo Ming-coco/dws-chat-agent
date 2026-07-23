@@ -467,6 +467,45 @@ class DwsSendTests(unittest.TestCase):
         self.assertIn("conversation-1", arguments)
 
 
+class LiveConfigurationTests(unittest.TestCase):
+    def test_apply_refreshes_runtime_and_dws_settings(self) -> None:
+        service = object.__new__(AgentService)
+        service.settings = SimpleNamespace(
+            raw={
+                "agents": {"old": {}},
+                "workflows": {"active": "old"},
+                "dws": {"ai_tag": True},
+            },
+            env_path=Path("/missing/.env"),
+            config_path=Path("/config.json"),
+            workspace_root=Path("/workspace"),
+        )
+        service.dws = SimpleNamespace(ai_tag=True)
+        old_runtime = SimpleNamespace(name="old")
+        new_runtime = SimpleNamespace(required_binaries=lambda: {})
+        service.agent_runtime = old_runtime
+        service._write_runtime = Mock()
+        raw = {
+            "agents": {"codex-front": {"model": "gpt-5.6-terra"}},
+            "workflows": {"active": "codex-default"},
+            "dws": {"ai_tag": False},
+        }
+
+        with patch(
+            "dws_dm_agent.service.AgentRuntime.from_config", return_value=new_runtime
+        ):
+            service._apply_agent_configuration(raw)
+
+        self.assertIs(service.agent_runtime, new_runtime)
+        self.assertEqual(
+            service.settings.raw["agents"]["codex-front"]["model"],
+            "gpt-5.6-terra",
+        )
+        self.assertFalse(service.settings.raw["dws"]["ai_tag"])
+        self.assertFalse(service.dws.ai_tag)
+        service._write_runtime.assert_called_once_with()
+
+
 class FailureAuditTests(unittest.TestCase):
     def test_successful_send_is_distinguished_from_outgoing_audit_failure(self) -> None:
         service = object.__new__(AgentService)
@@ -1579,9 +1618,9 @@ class DashboardTests(unittest.TestCase):
             self.assertIn(mapping, dashboard)
         for token in ('"--normal"', '"--attention"', '"--urgent"'):
             self.assertIn(token, theme)
-        self.assertEqual(theme.count(" normal:"), 21)
-        self.assertEqual(theme.count(" attention:"), 21)
-        self.assertEqual(theme.count(" urgent:"), 21)
+        self.assertEqual(theme.count(" normal:"), 22)
+        self.assertEqual(theme.count(" attention:"), 22)
+        self.assertEqual(theme.count(" urgent:"), 22)
         self.assertNotIn(".metric:nth-child", dashboard)
         self.assertNotIn(".step:nth-child", dashboard)
 

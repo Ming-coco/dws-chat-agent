@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="zh-CN" data-ark-theme="ark" data-ark-depth="complex">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>PROJECT D.I.A.M.O.N.D. · DIAMOND Network</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Oxanium:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+  <link rel="icon" href="/diamond-favicon.svg?v=3" type="image/svg+xml">
+  <link rel="stylesheet" href="/diamond-preview.css?v=1">
+  <script src="/theme.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#mainContent">跳到主要内容</a>
+  <div class="network-shell">
+    <aside class="network-rail" aria-label="DIAMOND Network 导航">
+      <a class="diamond-mark" href="#network" aria-label="返回 DIAMOND Network 顶部">
+        <svg viewBox="0 0 64 64" aria-hidden="true">
+          <path d="M32 6 58 32 32 58 6 32 32 6Z"/>
+          <path d="m32 24 8 8-8 8-8-8 8-8Z"/>
+        </svg>
+      </a>
+      <nav>
+        <a class="rail-link active" href="#network"><span>01</span><strong>Network</strong></a>
+        <a class="rail-link" href="#operations"><span>02</span><strong>Operations</strong></a>
+        <a class="rail-link" href="#channels"><span>03</span><strong>Channels</strong></a>
+      </nav>
+      <a class="rail-link rail-settings" href="/settings"><span>04</span><strong>Settings</strong></a>
+    </aside>
+
+    <header class="network-topbar">
+      <div class="project-lockup">
+        <div class="project-index">D.I.A.M.O.N.D. / LOCAL NODE</div>
+        <div><strong>PROJECT D.I.A.M.O.N.D.</strong><span>DingTalk-Integrated Agent for Messaging, Orchestration &amp; Networked Delegation</span></div>
+      </div>
+      <div class="topbar-actions">
+        <a class="theme-link" href="/settings#appearanceTitle">设置 / SETTINGS</a>
+        <div class="service-state"><span id="pulse" class="pulse"></span><span id="serviceText">正在连接本地代理…</span></div>
+      </div>
+    </header>
+
+    <main id="mainContent" class="network-main">
+      <section id="network" class="network-stage" data-network-state="booting" aria-labelledby="networkTitle">
+        <div class="dot-field" aria-hidden="true"></div>
+        <div class="tactical-plane" aria-hidden="true"></div>
+        <div class="scan-arc" aria-hidden="true"></div>
+        <div class="boot-corners" aria-hidden="true">
+          <i class="corner-nw"></i><i class="corner-ne"></i><i class="corner-se"></i><i class="corner-sw"></i>
+        </div>
+        <div class="red-calibration" aria-hidden="true">
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+        </div>
+        <div class="refresh-band" aria-hidden="true"></div>
+        <div class="stable-signal" aria-hidden="true"></div>
+        <div class="scan-beam" aria-hidden="true"></div>
+        <header class="stage-heading">
+          <p>MANAGEMENT SURFACE / 01</p>
+          <h1 id="networkTitle">DIAMOND <span>Network</span></h1>
+          <div class="stage-rule"><span></span><b id="networkMode">LOCAL / CONNECTING</b></div>
+        </header>
+
+        <div class="topology" aria-label="diamond-unit 工作流拓扑">
+          <div class="topology-axis" aria-hidden="true"><span></span><i></i><i></i><i></i><span></span></div>
+          <div id="workflowNodes" class="workflow-nodes"></div>
+        </div>
+
+        <aside class="status-dossier" aria-labelledby="statusTitle">
+          <div class="dossier-head"><p>AGENT STATUS / LIVE</p><h2 id="statusTitle">节点状态</h2></div>
+          <dl id="agentStatus"></dl>
+        </aside>
+
+        <div id="metrics" class="metric-strip" aria-label="今日运行指标"></div>
+      </section>
+
+      <section id="operations" class="operation-field" aria-labelledby="operationsTitle">
+        <header class="section-heading">
+          <div><p>OPERATION FIELD / 02</p><h2 id="operationsTitle">当前任务 <span>Operations</span></h2></div>
+          <span>真实阶段 · 不显示虚假百分比</span>
+        </header>
+        <div class="operation-grid">
+          <article class="operations-panel">
+            <div class="panel-label"><span>ACTIVE OPERATIONS</span><b id="activeCount">00</b></div>
+            <div id="active" class="active-list"></div>
+          </article>
+          <aside class="queue-panel">
+            <div class="panel-label"><span>QUEUED OPERATIONS</span><b id="queueCount">00</b></div>
+            <div id="queue" class="queue-list"></div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="channels" class="channel-field" aria-labelledby="channelsTitle">
+        <header class="section-heading channel-heading">
+          <div><p>CHANNEL ARCHIVE / 03</p><h2 id="channelsTitle">会话 <span>Channels</span></h2></div>
+          <div class="filters">
+            <label><span>CONTACT</span><select id="contactFilter" aria-label="联系人筛选"><option value="">全部联系人</option></select></label>
+            <label><span>STATUS</span><select id="statusFilter" aria-label="状态筛选"><option value="">全部状态</option></select></label>
+          </div>
+        </header>
+        <div id="recent" class="channel-list"></div>
+      </section>
+    </main>
+
+    <footer class="network-footer">
+      <span>LOCALHOST ONLY / 127.0.0.1</span><span>REFRESH CYCLE / 3S</span><span id="updated">AWAITING SIGNAL</span>
+    </footer>
+  </div>
+
+  <script>
+    const PHASES = [
+      ["stabilizing", "合并消息"], ["screening", "规则检查"], ["routing", "前置节点"],
+      ["acknowledged", "已确认"], ["worker", "执行节点"], ["steering", "补充已 Steer"],
+      ["verifying", "代码核验"], ["freshness", "发送前复查"], ["sending", "发送"]
+    ];
+    const STATUS = {
+      sent: ["已回复", "success"], shadow: ["影子回复", "info"], no_reply: ["无需回复", "muted"],
+      human_cooldown: ["人工接管", "warning"], refused: ["安全拒绝", "danger"], error: ["处理失败", "danger"],
+      stale_supplement: ["补充后重算", "info"], delivery_replan: ["交付重算", "info"], invalid_reply: ["回复重算", "info"]
+    };
+    let snapshot = null;
+    let recentRenderKey = "";
+    let networkBootScheduled = false;
+    let networkHealthy = false;
+    const openRuns = new Set();
+
+    const node = (tag, cls, text) => {
+      const value = document.createElement(tag);
+      if (cls) value.className = cls;
+      if (text !== undefined && text !== null) value.textContent = String(text);
+      return value;
+    };
+    const unitLabel = value => String(value || "").replace(/\bAgent\b/gi, "diamond-unit");
+    const clear = value => { while (value.firstChild) value.removeChild(value.firstChild); };
+    const time = value => value ? new Intl.DateTimeFormat("zh-CN", {hour:"2-digit", minute:"2-digit", second:"2-digit"}).format(new Date(value)) : "-";
+    const duration = (start, end = Date.now()) => {
+      const seconds = Math.max(0, Math.floor((new Date(end).getTime() - new Date(start).getTime()) / 1000));
+      return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+    };
+    const statusBadge = status => {
+      const [label, cls] = STATUS[status] || [status || "未知", "muted"];
+      return node("span", `badge ${cls}`, label);
+    };
+    const statusTone = status => (STATUS[status] || ["", "muted"])[1];
+    const modelLane = (sessionId, workflow = snapshot?.workflow) => {
+      if (!sessionId?.startsWith("dm-")) return "";
+      const stage = (workflow?.stages || []).find(item => {
+        const slug = String(item.agent || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+        return slug && sessionId.includes(`-${slug}-`);
+      });
+      if (stage) return stage.label || stage.agent;
+      if (sessionId.includes("-luna-sol-")) return "Luna → Sol";
+      if (sessionId.includes("-luna-")) return "Luna";
+      if (sessionId.includes("-sol-")) return "Sol";
+      return "Codex（旧）";
+    };
+
+    function renderTopology(data, healthy) {
+      const box = document.getElementById("workflowNodes"); clear(box);
+      const stages = data.workflow?.stages || [];
+      stages.forEach((stage, index) => {
+        const running = data.active.some(item => item.sessionId && modelLane(item.sessionId) === (stage.label || stage.agent));
+        const unit = node("article", `diamond-unit ${running ? "running" : healthy ? "standby" : "offline"}`);
+        const mark = node("div", "unit-mark"); mark.append(node("span", "", String(index + 1).padStart(2, "0")));
+        const copy = node("div", "unit-copy");
+        copy.append(node("p", "", "DIAMOND-UNIT"), node("h3", "", unitLabel(stage.label || stage.agent || `节点 ${index + 1}`)));
+        const meta = node("div", "unit-meta");
+        meta.append(node("span", "", stage.model || stage.protocol || "Runtime"), node("b", "", running ? "RUNNING" : healthy ? "STANDBY" : "OFFLINE"));
+        copy.append(meta); unit.append(mark, copy); box.append(unit);
+      });
+      if (!stages.length) box.append(node("div", "empty", "当前工作流未暴露执行节点"));
+
+      const status = document.getElementById("agentStatus"); clear(status);
+      [["Network", healthy ? "ONLINE" : "STALE"], ["Mode", String(data.service.mode || "-").toUpperCase()],
+       ["Diamond-units", stages.length], ["Active operations", data.summary.active], ["Queued operations", data.summary.queued]].forEach(([label, value]) => {
+        const row = document.createDocumentFragment(); row.append(node("dt", "", label), node("dd", "", value)); status.append(row);
+      });
+    }
+
+    function renderMetrics(data) {
+      const box = document.getElementById("metrics"); clear(box);
+      [["ACTIVE", "正在执行", data.summary.active, "info"], ["QUEUE", "等待队列", data.summary.queued, "warning"],
+       ["SENT TODAY", "今日回复", data.summary.sentToday, "success"], ["CODE OPS", "今日代码任务", data.summary.changesToday, "brand"],
+       ["FAILURES", "今日失败", data.summary.errorsToday, "danger"]].forEach(([code, label, value, cls], index) => {
+        const card = node("div", `metric ${cls}`); card.append(node("i", "", String(index + 1).padStart(2, "0")), node("span", "", code), node("strong", "", value), node("small", "", label)); box.append(card);
+      });
+    }
+
+    function renderActive(items) {
+      const box = document.getElementById("active"); clear(box);
+      document.getElementById("activeCount").textContent = String(items.length).padStart(2, "0");
+      if (!items.length) { box.append(node("div", "empty operation-empty", "当前没有正在执行的私聊任务")); return; }
+      items.forEach(item => {
+        const card = node("article", "active-card");
+        const top = node("div", "active-top");
+        const identity = node("div"); identity.append(node("p", "micro-label", "OPERATION OWNER"), node("div", "person", item.contactName), node("div", "hint", item.contactAlias || ""));
+        top.append(identity, node("span", "badge info", item.phaseLabel || "处理中")); card.append(top);
+        if (item.requestPreview) card.append(node("p", "request", item.requestPreview));
+        const steps = node("div", "steps");
+        const current = Math.max(0, PHASES.findIndex(([key]) => key === item.phase));
+        PHASES.forEach(([key, label], index) => {
+          const step = node("div", `step ${index < current ? "done" : index === current ? "current" : ""}`);
+          step.append(node("div", "step-line"), node("div", "step-label", label)); steps.append(step);
+        });
+        card.append(steps);
+        const meta = node("div", "meta");
+        meta.append(node("span", "", `运行 ${duration(item.startedAt)}`), node("span", "", `尝试 ${item.attempt || 1}`), node("span", "", `${item.batchSize || 1} 条消息`));
+        if (item.sessionId) meta.append(node("span", "", `channel ${item.sessionId.slice(-10)}`));
+        card.append(meta); box.append(card);
+      });
+    }
+
+    function renderQueue(items) {
+      const box = document.getElementById("queue"); clear(box);
+      document.getElementById("queueCount").textContent = String(items.length).padStart(2, "0");
+      if (!items.length) { box.append(node("div", "empty operation-empty", "没有等待任务")); return; }
+      items.forEach((item, index) => {
+        const row = node("div", "queue-item");
+        row.append(node("span", "queue-index", String(index + 1).padStart(2, "0")), node("strong", "", item.contactName), node("p", "request", item.requestPreview || "请求摘要未保存"), node("span", "hint", `等待 ${duration(item.receivedAt)} · ${item.batchSize} 条 · ${item.contentLength} 字`)); box.append(row);
+      });
+    }
+
+    function addBlock(parent, title, values) {
+      const list = (Array.isArray(values) ? values : [values]).filter(Boolean);
+      if (!list.length) return;
+      const block = node("section", "detail-block"); block.append(node("h3", "", title));
+      list.forEach(value => block.append(node("p", "", value))); parent.append(block);
+    }
+
+    function renderRecent(force = false) {
+      const box = document.getElementById("recent");
+      const contact = document.getElementById("contactFilter").value;
+      const status = document.getElementById("statusFilter").value;
+      const items = (snapshot?.recent || []).filter(item => (!contact || item.contactName === contact) && (!status || item.status === status));
+      const nextKey = JSON.stringify([contact, status, items]);
+      if (!force && nextKey === recentRenderKey) return;
+      recentRenderKey = nextKey; clear(box);
+      if (!items.length) { box.append(node("div", "empty", "当前筛选下没有会话记录")); return; }
+      items.forEach((item, index) => {
+        const details = node("details", `channel-card tone-${statusTone(item.status)}`); const summary = node("summary");
+        details.style.setProperty("--channel-index", Math.min(index, 12));
+        const sequence = node("span", "channel-sequence", String(index + 1).padStart(3, "0"));
+        const title = node("div", "channel-title"); const line = node("div", "channel-badges"); line.append(node("strong", "", item.contactName), statusBadge(item.status));
+        const lane = modelLane(item.sessionId); if (lane) line.append(node("span", "badge brand", lane));
+        title.append(line, node("p", "", item.requestPreview || "历史记录未保存请求摘要"));
+        const timing = node("span", "channel-time", `${time(item.finishedAt)} / ${duration(item.startedAt, item.finishedAt)}`);
+        summary.append(sequence, title, timing); details.append(summary);
+        const body = node("div", "channel-body"); addBlock(body, "对方消息", item.requestPreview || "历史记录未保存请求摘要"); addBlock(body, "模型路径", lane); addBlock(body, "处理结果", item.handled); addBlock(body, "原因", item.reason); addBlock(body, "验证", item.validation); addBlock(body, "告警", item.warnings); addBlock(body, "外部调用", item.externalCalls);
+        (item.changes || []).forEach(change => {
+          const code = node("section", "detail-block code-change"); code.append(node("h3", "", change.repo || "代码改动"));
+          addBlock(code, "分支 / Commit", [change.branch, change.head_sha]); addBlock(code, "推送目标", change.pushed_to);
+          if ((change.files || []).length) { const chips = node("div", "chips"); change.files.forEach(file => chips.append(node("span", "chip", file))); code.append(chips); }
+          body.append(code);
+        });
+        details.append(body); details.open = openRuns.has(item.sessionId);
+        details.addEventListener("toggle", () => details.open ? openRuns.add(item.sessionId) : openRuns.delete(item.sessionId)); box.append(details);
+      });
+    }
+
+    function populateFilters(data) {
+      const contact = document.getElementById("contactFilter"); const previousContact = contact.value;
+      const names = [...new Set(data.recent.map(item => item.contactName))].sort(); clear(contact); contact.append(new Option("全部联系人", "")); names.forEach(name => contact.append(new Option(name, name))); contact.value = previousContact;
+      const status = document.getElementById("statusFilter"); const previousStatus = status.value;
+      const statuses = [...new Set(data.recent.map(item => item.status))]; clear(status); status.append(new Option("全部状态", "")); statuses.forEach(value => status.append(new Option((STATUS[value] || [value])[0], value))); status.value = previousStatus;
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch("/api/snapshot", {cache: "no-store"}); if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        snapshot = await response.json();
+        const heartbeat = snapshot.service.heartbeatAt ? Date.now() - new Date(snapshot.service.heartbeatAt).getTime() : Infinity;
+        const healthy = snapshot.service.running && heartbeat < 15000;
+        networkHealthy = healthy;
+        document.getElementById("pulse").classList.toggle("live", healthy);
+        document.getElementById("serviceText").textContent = healthy ? `${String(snapshot.service.mode).toUpperCase()} / PID ${snapshot.service.pid}` : "SIGNAL STALE";
+        document.getElementById("networkMode").textContent = `${String(snapshot.service.mode || "-").toUpperCase()} / ${healthy ? "ONLINE" : "STALE"}`;
+        const stage = document.getElementById("network");
+        if (!networkBootScheduled) {
+          networkBootScheduled = true;
+          const settle = () => { stage.dataset.networkState = networkHealthy ? "ready" : "stale"; };
+          if (matchMedia("(prefers-reduced-motion: reduce)").matches) settle();
+          else setTimeout(settle, 3200);
+        } else if (stage.dataset.networkState !== "booting") {
+          stage.dataset.networkState = healthy ? "ready" : "stale";
+        }
+        renderTopology(snapshot, healthy); renderMetrics(snapshot); renderActive(snapshot.active); renderQueue(snapshot.queue); populateFilters(snapshot); renderRecent();
+        document.getElementById("updated").textContent = `SYNC / ${time(snapshot.generatedAt)}`;
+      } catch (error) {
+        document.getElementById("pulse").classList.remove("live"); document.getElementById("serviceText").textContent = "NETWORK UNAVAILABLE";
+      }
+    }
+    document.getElementById("contactFilter").addEventListener("change", () => renderRecent(true));
+    document.getElementById("statusFilter").addEventListener("change", () => renderRecent(true));
+    refresh(); setInterval(refresh, 3000); setInterval(() => snapshot && renderActive(snapshot.active), 1000);
+  </script>
+</body>
+</html>

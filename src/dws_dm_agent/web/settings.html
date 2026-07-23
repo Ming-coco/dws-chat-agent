@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Agent 配置 · DWS Agent</title>
+  <title>DIAMOND Settings · PROJECT D.I.A.M.O.N.D.</title>
   <style>
     :root {
       color-scheme: dark;
@@ -127,6 +127,90 @@
     .section-head p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
     .theme-group + .theme-group { margin-top: 14px; }
     .theme-group h3 { margin: 0 0 8px; color: var(--muted); font-size: 11px; font-weight: 650; }
+    .design-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .design-choice { display: grid; grid-template-columns: minmax(168px, .82fr) minmax(0, 1fr); align-items: center; gap: 14px; min-height: 122px; padding: 11px; text-align: left; background: var(--panel-2); }
+    .design-choice.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+    .design-choice strong, .design-choice small { display: block; }
+    .design-choice small { margin-top: 5px; color: var(--muted); }
+    .design-preview {
+      position: relative; width: 100%; aspect-ratio: 16 / 9; overflow: hidden;
+      border: 1px solid var(--line-strong); background: var(--control-deep);
+      color: var(--text-secondary); font: 600 5px/1 "Oxanium", ui-monospace, monospace;
+      letter-spacing: .08em;
+    }
+    .design-preview span, .design-preview i, .design-preview b { box-sizing: border-box; }
+    .design-preview i { display: grid; place-items: center; font-style: normal; }
+    .design-preview.metropolis { border-radius: 3px; }
+    .metropolis .preview-brand {
+      position: absolute; inset: 5px 6px auto; height: 9px; padding: 0 3px;
+      display: flex; align-items: center; color: var(--accent-ink);
+      border-bottom: 1px solid var(--accent-border);
+    }
+    .metropolis .preview-metrics {
+      position: absolute; inset: 18px 6px auto; height: 18px;
+      display: grid; grid-template-columns: repeat(5, 1fr);
+      border: 1px solid var(--line); background: var(--panel);
+    }
+    .metropolis .preview-metrics i { border-right: 1px solid var(--line); color: var(--text); }
+    .metropolis .preview-metrics i:last-child { border-right: 0; color: var(--accent-ink); }
+    .metropolis .preview-active, .metropolis .preview-queue {
+      position: absolute; top: 41px; height: 28px; padding: 4px;
+      border: 1px solid var(--line); background: var(--panel);
+    }
+    .metropolis .preview-active { left: 6px; width: 64%; border-left: 2px solid var(--accent); }
+    .metropolis .preview-queue { right: 6px; width: 28%; }
+    .metropolis .preview-active::after, .metropolis .preview-queue::after {
+      content: ""; position: absolute; left: 4px; right: 4px; bottom: 5px; height: 5px;
+      background: linear-gradient(90deg, var(--accent) 0 37%, var(--control) 37%);
+    }
+    .metropolis .preview-queue::after { background: linear-gradient(90deg, var(--normal) 0 23%, var(--control) 23%); }
+    .metropolis .preview-channels {
+      position: absolute; inset: auto 6px 5px; height: 13px; padding: 0 4px;
+      display: flex; align-items: center; border: 1px solid var(--line);
+      background: linear-gradient(90deg, var(--panel) 0 62%, var(--accent-soft) 62%);
+    }
+    .design-preview.diamond {
+      background-color: #07151a;
+      background-image:
+        radial-gradient(circle, color-mix(in srgb, var(--accent) 38%, transparent) .7px, transparent .9px),
+        linear-gradient(145deg, transparent 0 62%, color-mix(in srgb, var(--accent) 8%, transparent) 62% 64%, transparent 64%);
+      background-size: 8px 8px, 100% 100%;
+      color: #9eb3b7;
+    }
+    .diamond .preview-rail {
+      position: absolute; inset: 0 auto 0 0; width: 17px; padding-top: 16px;
+      display: grid; align-content: start; gap: 4px; border-right: 1px solid #1d4f59;
+      background: rgba(2, 13, 17, .88);
+    }
+    .diamond .preview-rail i { width: 9px; height: 9px; margin: auto; border: 1px solid #277180; color: #dffaff; font-size: 4px; }
+    .diamond .preview-head {
+      position: absolute; left: 22px; right: 5px; top: 5px; height: 9px;
+      display: flex; align-items: center; border-bottom: 1px solid #17434c; color: #79e6e2;
+    }
+    .diamond .preview-title {
+      position: absolute; left: 22px; top: 20px; color: #f2f8f8; font-size: 7px; letter-spacing: .14em;
+    }
+    .diamond .preview-units {
+      position: absolute; left: 22px; right: 43px; top: 31px; bottom: 7px;
+      display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px;
+    }
+    .diamond .preview-units i {
+      position: relative; place-items: end start; padding: 4px;
+      border: 1px solid #24535c; border-bottom: 2px solid #24d3c4;
+      background: rgba(9, 29, 35, .9); color: #d9e8e9;
+      clip-path: polygon(0 0, calc(100% - 5px) 0, 100% 5px, 100% 100%, 0 100%);
+    }
+    .diamond .preview-units i::before {
+      content: ""; position: absolute; left: 5px; top: 5px; width: 8px; height: 8px;
+      border: 1px solid #52dfe0; transform: rotate(45deg);
+    }
+    .diamond .preview-status {
+      position: absolute; right: 5px; top: 20px; bottom: 7px; width: 33px; padding: 5px 4px;
+      border: 1px solid #25505a; background: rgba(8, 27, 33, .92); color: #9eb3b7;
+    }
+    .diamond .preview-status::after {
+      content: "ONLINE"; position: absolute; left: 4px; bottom: 5px; color: #2be3cf;
+    }
     .theme-strip {
       display: grid; grid-auto-flow: column; grid-auto-columns: minmax(176px, 1fr);
       gap: 8px; overflow-x: auto; padding: 1px 1px 8px; scroll-snap-type: x proximity;
@@ -137,11 +221,24 @@
     .theme-choice strong { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .theme-choice small { display: block; margin-top: 5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .swatches { display: grid; grid-template-columns: repeat(4, 1fr); height: 10px; margin-top: 9px; overflow: hidden; border: 1px solid var(--line); border-radius: 4px; }
-    .custom-theme { display: grid; grid-template-columns: repeat(6, minmax(100px, 1fr)) auto; align-items: end; gap: 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+    .custom-theme { display: grid; grid-template-columns: minmax(150px, 1.4fr) repeat(6, minmax(100px, 1fr)) auto; align-items: end; gap: 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
     .color-field { display: grid; grid-template-columns: 38px minmax(0, 1fr); align-items: center; gap: 8px; }
     .color-field span { grid-column: 1 / -1; color: var(--muted); font-size: 11px; }
     .color-field input[type="color"] { width: 38px; height: 38px; padding: 3px; cursor: pointer; }
     .color-field output { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text-secondary); }
+    .theme-entry { position: relative; min-width: 0; }
+    .theme-entry .theme-choice { width: 100%; padding-right: 58px; }
+    .theme-remove { position: absolute; top: 8px; right: 8px; padding: 4px 7px; border-radius: 6px; color: var(--danger-ink); font-size: 10px; }
+    .contact-manager { display: grid; gap: 14px; }
+    .contact-list, .search-results { display: grid; gap: 8px; }
+    .contact-row, .search-result { display: grid; grid-template-columns: minmax(150px, .7fr) minmax(190px, 1fr) auto; align-items: end; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); }
+    .contact-row { padding: 8px 10px; }
+    .contact-row .field { grid-template-columns: 72px minmax(0, 1fr); align-items: center; }
+    .search-row { display: grid; grid-template-columns: minmax(180px, 1fr) auto; gap: 8px; }
+    .search-result { align-items: center; }
+    .contact-summary { min-width: 0; }
+    .contact-summary strong, .contact-summary span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .contact-summary span { margin-top: 4px; color: var(--muted); font-size: 11px; }
     .runtime-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
     .badge { display: inline-flex; align-items: center; min-height: 25px; padding: 2px 9px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--text-secondary); background: var(--control); font-size: 12px; white-space: nowrap; }
     .badge.brand { color: var(--accent-ink); border-color: var(--accent-border); background: var(--accent-soft); }
@@ -163,16 +260,20 @@
     .empty { display: grid; place-items: center; min-height: 180px; color: var(--muted); border: 1px dashed var(--line); border-radius: 14px; text-align: center; padding: 20px; }
     footer { color: var(--muted); font-size: 12px; margin-top: 14px; }
     @media (max-width: 900px) {
-      .config-grid, .form-grid, .profiles, .runtime-grid { grid-template-columns: 1fr; }
+      .config-grid, .form-grid, .profiles, .runtime-grid, .design-grid { grid-template-columns: 1fr; }
       .config-card.wide, .field.wide { grid-column: auto; }
       header, .notice { align-items: flex-start; flex-direction: column; }
-      .custom-theme { grid-template-columns: 1fr; }
+      .custom-theme, .contact-row, .search-result, .search-row { grid-template-columns: 1fr; }
       .config-status { text-align: left; }
       .toolbar { width: 100%; }
       .toolbar button { flex: 1; }
     }
+    @media (max-width: 520px) {
+      .design-choice { grid-template-columns: 1fr; }
+      .design-preview { max-width: 240px; }
+    }
   </style>
-  <link rel="icon" href="/favicon.svg?v=3" type="image/svg+xml">
+  <link rel="icon" href="/diamond-favicon.svg?v=3" type="image/svg+xml">
   <link rel="stylesheet" href="/app.css?v=1">
   <script src="/theme.js"></script>
 </head>
@@ -180,8 +281,8 @@
   <main class="shell">
     <header>
       <div class="brand">
-        <a class="back-link" href="/" aria-label="返回值班台" title="返回值班台">←</a>
-        <div><div class="eyebrow">Local agent settings</div><h1>Agent 配置</h1></div>
+        <a id="homeLink" class="back-link" href="/" aria-label="返回 DIAMOND Network" title="返回 DIAMOND Network">←</a>
+        <div><div class="eyebrow">DIAMOND NETWORK / CONFIGURATION</div><h1>DIAMOND Settings</h1></div>
       </div>
       <div class="toolbar">
         <button id="reloadConfig" type="button">重新读取</button>
@@ -191,19 +292,29 @@
 
     <section class="panel" aria-labelledby="appearanceTitle">
       <div class="section-head">
-        <div><h2 id="appearanceTitle">外观主题</h2><p>每套主题包含主色、正常、注意和紧急色，切换时会一起更新。</p></div>
+        <div><h2 id="appearanceTitle">界面主题</h2><p>主题决定页面结构与视觉语言；颜色可独立搭配任一主题。</p></div>
+        <span id="designStatus" class="config-status" role="status" aria-live="polite"></span>
+      </div>
+      <div id="designThemes" class="design-grid"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="colorTitle">
+      <div class="section-head">
+        <div><h2 id="colorTitle">颜色</h2><p>选择背景、卡片、主色和状态色；不会改变界面主题或页面布局。</p></div>
         <span id="themeStatus" class="config-status" role="status" aria-live="polite"></span>
       </div>
       <div class="theme-group"><h3>深色</h3><div id="darkThemes" class="theme-strip"></div></div>
       <div class="theme-group"><h3>浅色</h3><div id="lightThemes" class="theme-strip"></div></div>
+      <div id="customThemeGroup" class="theme-group" hidden><h3>用户配色</h3><div id="customThemes" class="theme-strip"></div></div>
       <div class="custom-theme">
+        <label class="field"><span>配色名称</span><input id="customThemeName" type="text" maxlength="40" placeholder="例如 Night Shift"></label>
         <label class="color-field"><span>背景色</span><input id="customBackground" type="color"><output id="customBackgroundValue"></output></label>
         <label class="color-field"><span>卡片色</span><input id="customSurface" type="color"><output id="customSurfaceValue"></output></label>
         <label class="color-field"><span>主色</span><input id="customAccent" type="color"><output id="customAccentValue"></output></label>
         <label class="color-field"><span>正常</span><input id="customNormal" type="color"><output id="customNormalValue"></output></label>
         <label class="color-field"><span>注意</span><input id="customAttention" type="color"><output id="customAttentionValue"></output></label>
         <label class="color-field"><span>紧急</span><input id="customUrgent" type="color"><output id="customUrgentValue"></output></label>
-        <button id="saveCustomTheme" type="button">保存自定义</button>
+        <button id="saveCustomTheme" type="button">创建配色</button>
       </div>
     </section>
 
@@ -216,12 +327,12 @@
     </section>
 
     <section class="notice">
-      <span><strong>只编辑公开配置。</strong> 私密环境变量、联系人 ID、登录态和 provider 私有参数不会下发到这个页面。</span>
+      <span><strong>只编辑本地配置。</strong> 登录态、凭证和 provider 私有参数不会下发；白名单联系人保存到本机 config.json。</span>
       <span id="configStatus" class="config-status" role="status" aria-live="polite"></span>
     </section>
 
-    <div id="configEditor" class="empty">正在读取 Agent 配置…</div>
-    <footer>保存前会检查当前没有执行中或排队会话；保存成功后只影响后续会话，不需要重启服务。</footer>
+    <div id="configEditor" class="empty">正在读取节点配置…</div>
+    <footer>保存前会检查当前没有执行中或排队会话；节点配置立即用于后续会话，联系人白名单需重启服务后生效。</footer>
   </main>
 
   <script>
@@ -234,6 +345,7 @@
       if (text !== undefined && text !== null) value.textContent = String(text);
       return value;
     };
+    const unitLabel = value => String(value || "").replace(/\bAgent\b/gi, "diamond-unit");
     const clear = value => { while (value.firstChild) value.removeChild(value.firstChild); };
     const themeInputs = {
       background: document.getElementById("customBackground"),
@@ -253,6 +365,60 @@
     };
     const themeMessage = text => { document.getElementById("themeStatus").textContent = text || ""; };
 
+    function designPreview(design) {
+      const preview = node("span", `design-preview ${design.id}`);
+      preview.setAttribute("aria-hidden", "true");
+      if (design.id === "metropolis") {
+        const metrics = node("span", "preview-metrics");
+        [2, 0, 6, 1, 3].forEach(value => metrics.append(node("i", "", value)));
+        preview.append(
+          node("span", "preview-brand", "PROJECT D.I.A.M.O.N.D."),
+          metrics,
+          node("span", "preview-active", "ACTIVE OPERATIONS"),
+          node("span", "preview-queue", "QUEUE"),
+          node("span", "preview-channels", "CHANNELS · RECENT ACTIVITY")
+        );
+        return preview;
+      }
+
+      const rail = node("span", "preview-rail");
+      ["01", "02", "03"].forEach(value => rail.append(node("i", "", value)));
+      const units = node("span", "preview-units");
+      ["UNIT 01", "UNIT 02"].forEach(value => units.append(node("i", "", value)));
+      preview.append(
+        rail,
+        node("span", "preview-head", "PROJECT D.I.A.M.O.N.D."),
+        node("b", "preview-title", "NETWORK"),
+        units,
+        node("span", "preview-status", "STATUS")
+      );
+      return preview;
+    }
+
+    function renderDesignPicker() {
+      const selection = window.DwsTheme.currentDesign();
+      const container = document.getElementById("designThemes");
+      clear(container);
+      window.DwsTheme.designs.forEach(design => {
+        const button = node("button", `design-choice ${design.id === selection.id ? "selected" : ""}`.trim());
+        button.type = "button";
+        button.dataset.designId = design.id;
+        button.setAttribute("aria-pressed", String(design.id === selection.id));
+        const preview = designPreview(design);
+        const copy = node("span");
+        copy.append(node("strong", "", design.name), node("small", "", design.note));
+        button.append(preview, copy);
+        button.addEventListener("click", () => {
+          const applied = window.DwsTheme.selectDesign(design.id);
+          renderDesignPicker();
+          document.getElementById("designStatus").textContent = `当前：${applied.name}`;
+        });
+        container.append(button);
+      });
+      document.getElementById("designStatus").textContent = `当前：${selection.name}`;
+      document.getElementById("homeLink").href = selection.home;
+    }
+
     function customThemeValue() {
       return {
         background: themeInputs.background.value,
@@ -271,9 +437,10 @@
       });
     }
 
-    function themeChoice(theme, selectedId) {
+    function themeChoice(theme, selectedId, removable = false) {
       const button = node("button", `theme-choice ${theme.id === selectedId ? "selected" : ""}`.trim());
       button.type = "button";
+      button.dataset.colorId = theme.id;
       button.style.setProperty("--preview-bg", theme.background);
       button.style.setProperty("--preview-surface", theme.surface);
       button.style.setProperty("--preview-accent", theme.accent);
@@ -290,28 +457,46 @@
       });
       button.append(swatches);
       button.addEventListener("click", () => {
-        const applied = window.DwsTheme.select(theme.id);
+        const applied = window.DwsTheme.selectColor(theme.id);
         syncThemeInputs(applied);
+        document.getElementById("customThemeName").value = removable ? applied.name : "";
         renderThemePicker();
         themeMessage(`已应用 ${applied.name}`);
       });
-      return button;
+      if (!removable) return button;
+      const entry = node("div", "theme-entry");
+      const remove = node("button", "theme-remove", "删除");
+      remove.type = "button";
+      remove.setAttribute("aria-label", `删除配色 ${theme.name}`);
+      remove.addEventListener("click", () => {
+        window.DwsTheme.removeCustomColor(theme.id);
+        renderThemePicker();
+        themeMessage(`已删除配色 ${theme.name}`);
+      });
+      entry.append(button, remove);
+      return entry;
     }
 
     function renderThemePicker() {
-      const selection = window.DwsTheme.current();
+      const selection = window.DwsTheme.currentColor();
       const dark = document.getElementById("darkThemes");
       const light = document.getElementById("lightThemes");
+      const custom = document.getElementById("customThemes");
+      const customGroup = document.getElementById("customThemeGroup");
       clear(dark); clear(light);
-      window.DwsTheme.themes.forEach(theme => {
+      window.DwsTheme.colors.forEach(theme => {
         (theme.mode === "dark" ? dark : light).append(themeChoice(theme, selection.id));
       });
+      clear(custom);
+      const customValues = window.DwsTheme.customColors();
+      customValues.forEach(theme => custom.append(themeChoice(theme, selection.id, true)));
+      customGroup.hidden = !customValues.length;
       syncThemeInputs(selection.theme);
       themeMessage(`当前：${selection.theme.name}`);
     }
 
     function previewCustomTheme() {
-      const preview = window.DwsTheme.previewCustom(customThemeValue());
+      const preview = window.DwsTheme.previewCustomColor(customThemeValue());
       syncThemeInputs(preview);
       themeMessage("正在预览自定义配色，保存后才会用于其他页面");
     }
@@ -341,7 +526,7 @@
         const top = node("div", "runtime-top");
         const title = node("div", "runtime-title");
         const first = node("div");
-        first.append(node("strong", "", stage.label || stage.id), node("span", `badge ${stage.readOnly ? "info" : "warning"}`, stage.agent));
+        first.append(node("strong", "", unitLabel(stage.label || stage.id)), node("span", `badge ${stage.readOnly ? "info" : "warning"}`, stage.agent));
         const launch = Array.isArray(stage.launchCommand) ? stage.launchCommand.join(" ") : stage.driver;
         title.append(
           first,
@@ -373,7 +558,7 @@
         const details = node("details", "runtime-card");
         const head = node("summary");
         const title = node("div", "runtime-title");
-        title.append(node("strong", "", "可用 Agent profiles"), node("p", "", `${workflow.availableAgents.length} 个可选 profile`));
+        title.append(node("strong", "", "可用 diamond-units"), node("p", "", `${workflow.availableAgents.length} 个可选执行节点`));
         head.append(title);
         details.append(head);
         const body = node("div", "runtime-body");
@@ -447,6 +632,113 @@
       return wrapper;
     };
 
+    function contactAlias(candidate, contacts) {
+      const base = String(candidate.flowerName || candidate.nick || candidate.name || candidate.userId.slice(-8)).trim();
+      let alias = base;
+      let suffix = 2;
+      while (contacts.some(item => item.alias === alias)) alias = `${base}-${suffix++}`;
+      return alias;
+    }
+
+    function renderContacts(editor) {
+      const contacts = agentConfig.contacts || (agentConfig.contacts = []);
+      const card = node("section", "config-card wide");
+      card.append(node("h2", "", `联系人白名单 · ${contacts.length}`));
+      const manager = node("div", "contact-manager");
+      const list = node("div", "contact-list");
+      contacts.forEach((contact, index) => {
+        const row = node("div", "contact-row");
+        const remove = node("button", "danger", "移除");
+        remove.type = "button";
+        remove.disabled = contacts.length === 1;
+        remove.title = remove.disabled ? "白名单至少保留一人" : "从白名单移除";
+        remove.addEventListener("click", () => {
+          contacts.splice(index, 1);
+          renderConfig();
+          dirtyConfig();
+        });
+        row.append(
+          field("显示名称", textControl(contact.display_name, value => { contact.display_name = value; })),
+          field("别名", textControl(contact.alias, value => { contact.alias = value; })),
+          remove
+        );
+        list.append(row);
+      });
+      const searchRow = node("div", "search-row");
+      const query = node("input");
+      query.type = "search";
+      query.placeholder = "搜索钉钉姓名、昵称或花名";
+      query.maxLength = 80;
+      const search = node("button", "", "搜索钉钉用户");
+      search.type = "button";
+      const results = node("div", "search-results");
+      const status = node("span", "config-status");
+      status.setAttribute("role", "status");
+      status.setAttribute("aria-live", "polite");
+      const runSearch = async () => {
+        const value = query.value.trim();
+        if (!value) { status.textContent = "请输入搜索词"; return; }
+        search.disabled = true;
+        status.textContent = "正在搜索…";
+        clear(results);
+        try {
+          const response = await fetch(`/api/contacts/search?q=${encodeURIComponent(value)}`, {cache:"no-store"});
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+          const values = data.results || [];
+          status.textContent = values.length ? `找到 ${values.length} 人` : "没有找到匹配用户";
+          values.forEach(candidate => {
+            const duplicate = contacts.some(item =>
+              item.user_id === candidate.userId ||
+              item.open_dingtalk_id === candidate.openDingTalkId
+            );
+            const complete = candidate.userId && candidate.openDingTalkId;
+            const row = node("div", "search-result");
+            const summary = node("div", "contact-summary");
+            summary.append(
+              node("strong", "", candidate.name || candidate.nick || "未命名用户"),
+              node("span", "", [candidate.flowerName, candidate.title, candidate.nick].filter(Boolean).join(" · ") || "钉钉联系人")
+            );
+            const state = node("span", `badge ${complete ? "info" : "warning"}`, duplicate ? "已在白名单" : complete ? "可添加" : "缺少监听 ID");
+            const add = node("button", "primary", duplicate ? "已添加" : "添加");
+            add.type = "button";
+            add.disabled = duplicate || !complete;
+            add.addEventListener("click", () => {
+              contacts.push({
+                alias: contactAlias(candidate, contacts),
+                display_name: candidate.name || candidate.nick || candidate.flowerName,
+                user_id: candidate.userId,
+                open_dingtalk_id: candidate.openDingTalkId
+              });
+              renderConfig();
+              dirtyConfig();
+              configMessage("联系人已加入待保存白名单；保存后重启服务生效。");
+            });
+            row.append(summary, state, add);
+            results.append(row);
+          });
+        } catch (error) {
+          status.textContent = `搜索失败：${error.message}`;
+        } finally {
+          search.disabled = false;
+        }
+      };
+      search.addEventListener("click", runSearch);
+      query.addEventListener("keydown", event => {
+        if (event.key === "Enter") { event.preventDefault(); runSearch(); }
+      });
+      searchRow.append(query, search);
+      manager.append(
+        searchRow,
+        status,
+        results,
+        list,
+        node("p", "config-note", "新增或移除监听联系人会写入本机 config.json；保存后重启服务，监听器才会按新白名单启动。")
+      );
+      card.append(manager);
+      editor.append(card);
+    }
+
     function renderConfig() {
       const editor = document.getElementById("configEditor");
       clear(editor);
@@ -462,6 +754,8 @@
       const activePreset = presets[workflows.active];
       const agentNames = Object.keys(agentConfig.agents || {});
 
+      renderContacts(editor);
+
       const workflowCard = node("section", "config-card wide");
       workflowCard.append(node("h2", "", "工作流"));
       const workflowForm = node("div", "form-grid");
@@ -474,8 +768,8 @@
       if (activePreset) {
         const agentOptions = agentNames.map(name => [name, name]);
         workflowForm.append(
-          field("前置 Agent", selectControl(agentOptions, activePreset.front?.agent, value => { activePreset.front.agent = value; })),
-          field("后置 Agent", selectControl(agentOptions, activePreset.worker?.agent, value => { activePreset.worker.agent = value; })),
+          field("前置 diamond-unit", selectControl(agentOptions, activePreset.front?.agent, value => { activePreset.front.agent = value; })),
+          field("执行 diamond-unit", selectControl(agentOptions, activePreset.worker?.agent, value => { activePreset.worker.agent = value; })),
           field("前置显示名", textControl(activePreset.front?.label, value => { activePreset.front.label = value; })),
           field("后置显示名", textControl(activePreset.worker?.label, value => { activePreset.worker.label = value; })),
           field("补充消息策略", selectControl([["steer", "Steer 当前会话"], ["restart_with_context", "带上下文重启"]], activePreset.supplement_strategy, value => { activePreset.supplement_strategy = value; })),
@@ -526,7 +820,7 @@
       editor.append(workflowCard);
 
       const profilesCard = node("section", "config-card wide");
-      profilesCard.append(node("h2", "", "Agent profiles"));
+      profilesCard.append(node("h2", "", "Diamond-units"));
       const profiles = node("div", "profiles");
       const referenced = new Set(Object.values(presets).flatMap(preset => [preset.front?.agent, preset.worker?.agent]));
       agentNames.forEach(name => {
@@ -599,7 +893,7 @@
     }
 
     async function loadConfig(force = false) {
-      if (force && configDirty && !window.confirm("放弃尚未保存的 Agent 配置改动？")) return;
+      if (force && configDirty && !window.confirm("放弃尚未保存的节点配置改动？")) return;
       configMessage("正在读取配置…");
       try {
         const response = await fetch("/api/config", {cache:"no-store"});
@@ -643,16 +937,24 @@
     document.getElementById("saveConfig").addEventListener("click", saveAgentConfig);
     Object.values(themeInputs).forEach(input => input.addEventListener("input", previewCustomTheme));
     document.getElementById("saveCustomTheme").addEventListener("click", () => {
-      const applied = window.DwsTheme.selectCustom(customThemeValue());
-      syncThemeInputs(applied);
-      renderThemePicker();
-      themeMessage("已保存自定义主题");
+      try {
+        const applied = window.DwsTheme.saveCustomColor(
+          document.getElementById("customThemeName").value,
+          customThemeValue()
+        );
+        syncThemeInputs(applied);
+        renderThemePicker();
+        themeMessage(`已创建配色 ${applied.name}`);
+      } catch (error) {
+        themeMessage(error.message);
+      }
     });
     window.addEventListener("beforeunload", event => {
       if (!configDirty) return;
       event.preventDefault();
       event.returnValue = "";
     });
+    renderDesignPicker();
     renderThemePicker();
     loadRuntimeWorkflow();
     loadConfig();

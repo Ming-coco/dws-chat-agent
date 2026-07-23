@@ -1,12 +1,40 @@
 (function () {
   "use strict";
 
+  const DESIGN_KEY = "dws-chat-agent-design-v1";
   const STORAGE_KEY = "dws-chat-agent-theme-v1";
+  const CUSTOM_THEMES_KEY = "dws-chat-agent-custom-themes-v1";
   const HEX = /^#[0-9a-f]{6}$/i;
-  const themes = [
+  const designs = [
     {
       id: "metropolis",
       name: "Metropolis",
+      home: "/",
+      note: "DIAMOND Network · 卡片式运营控制台"
+    },
+    {
+      id: "diamond",
+      name: "Diamond",
+      home: "/diamond-preview",
+      note: "DIAMOND Network · 战术拓扑与菱形几何"
+    }
+  ];
+  const themes = [
+    {
+      id: "ice-signal",
+      name: "Ice Signal",
+      mode: "dark",
+      background: "#060A0D",
+      surface: "#111B22",
+      accent: "#79C5EE",
+      normal: "#52D6C2",
+      attention: "#F0C35A",
+      urgent: "#E55242",
+      note: "黑色战术界面、冰蓝信号与克制红色状态"
+    },
+    {
+      id: "ocean-signal",
+      name: "Ocean Signal",
       mode: "dark",
       background: "#06151D",
       surface: "#102431",
@@ -111,6 +139,26 @@
     };
   }
 
+  function storedCustomThemes() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(CUSTOM_THEMES_KEY) || "[]");
+      if (!Array.isArray(parsed)) return [];
+      const ids = new Set();
+      return parsed.slice(0, 30).flatMap(item => {
+        const value = normalize(item);
+        if (!value.id.startsWith("custom-") || ids.has(value.id)) return [];
+        ids.add(value.id);
+        return [value];
+      });
+    } catch (error) {
+      return [];
+    }
+  }
+
+  function availableThemes() {
+    return [...themes.map(normalize), ...storedCustomThemes()];
+  }
+
   function tokens(theme) {
     const value = normalize(theme);
     const dark = value.mode === "dark";
@@ -182,6 +230,7 @@
     const root = document.documentElement;
     Object.entries(tokens(value)).forEach(([name, token]) => root.style.setProperty(name, token));
     root.dataset.theme = value.id;
+    root.dataset.color = value.id;
     root.dataset.colorMode = value.mode;
     root.style.colorScheme = value.mode;
     return value;
@@ -193,16 +242,17 @@
       if (parsed && parsed.id === "custom" && parsed.custom) {
         return {id:"custom", theme:normalize({...parsed.custom, id:"custom", name:"自定义"})};
       }
-      const preset = themes.find(item => item.id === parsed?.id);
+      const legacyId = {diamond:"ice-signal", metropolis:"ocean-signal"}[parsed?.id] || parsed?.id;
+      const preset = availableThemes().find(item => item.id === legacyId);
       if (preset) return {id:preset.id, theme:normalize(preset)};
     } catch (error) {
       // A corrupt browser preference should never block the operations console.
     }
-    return {id:"metropolis", theme:normalize(themes[0])};
+    return {id:"ocean-signal", theme:normalize(themes[1])};
   }
 
   function select(id) {
-    const preset = themes.find(item => item.id === id);
+    const preset = availableThemes().find(item => item.id === id);
     if (!preset) throw new Error(`unknown theme: ${id}`);
     localStorage.setItem(STORAGE_KEY, JSON.stringify({id}));
     const value = apply(preset);
@@ -218,18 +268,90 @@
     return custom;
   }
 
+  function saveCustom(name, value) {
+    const cleanName = String(name || "").trim().slice(0, 40);
+    if (!cleanName) throw new Error("请输入配色名称");
+    const custom = normalize({
+      ...value,
+      id: `custom-${Date.now().toString(36)}`,
+      name: cleanName,
+      note: "用户创建"
+    });
+    const saved = [...storedCustomThemes(), custom].slice(-30);
+    localStorage.setItem(CUSTOM_THEMES_KEY, JSON.stringify(saved));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({id:custom.id}));
+    apply(custom);
+    window.dispatchEvent(new CustomEvent("dws-theme-change", {detail:{id:custom.id, theme:custom}}));
+    return custom;
+  }
+
+  function removeCustom(id) {
+    let selectedId = "";
+    try {
+      selectedId = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null")?.id || "";
+    } catch (error) {
+      selectedId = "";
+    }
+    const saved = storedCustomThemes().filter(item => item.id !== id);
+    localStorage.setItem(CUSTOM_THEMES_KEY, JSON.stringify(saved));
+    if (selectedId === id) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({id:"ocean-signal"}));
+      return apply(themes[1]);
+    }
+    return storedSelection().theme;
+  }
+
   function previewCustom(value) {
     return apply({...value, id:"custom-preview", name:"自定义预览"});
   }
 
+  function currentDesign() {
+    const stored = localStorage.getItem(DESIGN_KEY);
+    return designs.find(item => item.id === stored) || designs[1];
+  }
+
+  function selectDesign(id) {
+    const design = designs.find(item => item.id === id);
+    if (!design) throw new Error(`unknown design: ${id}`);
+    localStorage.setItem(DESIGN_KEY, design.id);
+    document.documentElement.dataset.design = design.id;
+    window.dispatchEvent(new CustomEvent("dws-design-change", {detail:{design}}));
+    return design;
+  }
+
+  function syncDesignRoute(design) {
+    const path = window.location.pathname;
+    if (path === "/" && design.id === "diamond") {
+      window.location.replace(`/diamond-preview${window.location.search}`);
+    } else if ((path === "/diamond-preview" || path === "/diamond-preview.html") && design.id === "metropolis") {
+      window.location.replace(`/${window.location.search}`);
+    }
+  }
+
   const initial = storedSelection();
   apply(initial.theme);
+  const initialDesign = currentDesign();
+  document.documentElement.dataset.design = initialDesign.id;
   window.DwsTheme = {
+    designs,
+    currentDesign,
+    selectDesign,
+    colors: themes.map(normalize),
+    customColors: storedCustomThemes,
+    currentColor: storedSelection,
+    selectColor: select,
+    saveCustomColor: saveCustom,
+    removeCustomColor: removeCustom,
+    previewCustomColor: previewCustom,
     themes: themes.map(normalize),
+    customThemes: storedCustomThemes,
     current: storedSelection,
     select,
     selectCustom,
+    saveCustom,
+    removeCustom,
     previewCustom,
     normalize
   };
+  syncDesignRoute(initialDesign);
 })();

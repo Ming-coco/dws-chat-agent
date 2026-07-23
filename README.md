@@ -1,6 +1,8 @@
-# DWS Chat Agent
+# PROJECT D.I.A.M.O.N.D.
 
-A local DingTalk delegate that watches an explicit allowlist, answers direct messages, and can hand implementation work to a stronger coding agent. It supports Codex, Claude Code, and Pi behind one two-stage workflow.
+*DingTalk-Integrated Agent for Messaging, Orchestration & Networked Delegation*
+
+An autonomous DingTalk interface for coordinating local AI coding agents. It watches an explicit allowlist, answers direct messages, and can hand implementation work to a stronger coding agent. It supports Codex, Claude Code, and Pi behind one two-stage workflow.
 
 The service runs on the operator's machine and reuses existing DWS and coding-agent logins. Personal identities, contact IDs, local paths, and internal domains stay in an ignored `.env` file.
 
@@ -71,7 +73,7 @@ LaunchAgents and local scripts keep working while new code imports the
 `dws_dm_agent` package. Runtime configuration, prompts, `.env`, audit state, and
 worktrees remain outside the package so updates never overwrite operator data.
 
-The main dashboard at [http://127.0.0.1:8765/](http://127.0.0.1:8765/) stays focused on active work, the queue, and the processing timeline. Use its gear button to open the separate settings page at [http://127.0.0.1:8765/settings](http://127.0.0.1:8765/settings). That page shows the current runtime flow, switches presets, edits Agent profiles and prompts, and offers Metropolis plus common editor themes and custom colors. Appearance is stored only in the current browser. Agent saves are revision-checked, schema-validated, blocked while work is active or queued, written atomically, and applied to subsequent sessions without restarting. The page never exposes or overwrites profile environment variables, provider options, auth files, contact IDs, or `.env` values.
+The **DIAMOND Network** dashboard at [http://127.0.0.1:8765/](http://127.0.0.1:8765/) stays focused on operations, the queue, channels, and diamond-unit status. Metropolis preserves the original card-console layout; Diamond uses the tactical topology view at [http://127.0.0.1:8765/diamond-preview](http://127.0.0.1:8765/diamond-preview). Both views share the PROJECT D.I.A.M.O.N.D. vocabulary, live data, functionality, color system, and theme preference. The separate settings page at [http://127.0.0.1:8765/settings](http://127.0.0.1:8765/settings) switches interface themes, independently applies built-in or user-created colors, searches DingTalk users for the local allowlist, and edits diamond-units, workflows, and prompts. Appearance is stored only in the current browser. Configuration saves are revision-checked, schema-validated, blocked while work is active or queued, written atomically, and applied to subsequent sessions without restarting. The page never exposes or overwrites profile environment variables, provider options, auth files, contact IDs, or `.env` values.
 
 ## Requirements
 

@@ -68,6 +68,14 @@ class AgentRuntimeTests(unittest.TestCase):
             else {"binary": driver}
         )
         raw = {
+            "contacts": [
+                {
+                    "alias": "alice",
+                    "display_name": "Alice",
+                    "user_id": "user-alice",
+                    "open_dingtalk_id": "open-alice",
+                }
+            ],
             "agents": {
                 "front-agent": {
                     "driver": driver,
@@ -559,6 +567,14 @@ class AgentConfigStoreTests(unittest.TestCase):
             view = store.snapshot()
             self.assertIn("dws", view)
             view["dws"]["ai_tag"] = True
+            view["contacts"].append(
+                {
+                    "alias": "bob",
+                    "display_name": "Bob",
+                    "user_id": "user-bob",
+                    "open_dingtalk_id": "open-bob",
+                }
+            )
             self.assertNotIn(
                 "environment", json.dumps(view["agents"], ensure_ascii=False)
             )
@@ -576,6 +592,7 @@ class AgentConfigStoreTests(unittest.TestCase):
             self.assertEqual(raw["agents"]["worker-agent"]["command"], ["ccr", "code"])
             self.assertEqual(raw["agents"]["worker-agent"]["environment"], {"RUNTIME_TEST": "1"})
             self.assertTrue(raw["dws"]["ai_tag"])
+            self.assertEqual([item["alias"] for item in raw["contacts"]], ["alice", "bob"])
             self.assertEqual(
                 raw["workflows"]["presets"]["dm-default"]["auto_messages"]["ack"],
                 "收到，正在定位具体代码。",
@@ -620,6 +637,15 @@ class AgentConfigStoreTests(unittest.TestCase):
             settings_html.write_text(
                 "<!doctype html><title>settings test</title>", encoding="utf-8"
             )
+            (root / "diamond-preview.html").write_text(
+                "<!doctype html><title>diamond preview</title>", encoding="utf-8"
+            )
+            (root / "diamond-preview.css").write_text(
+                "body { color: var(--accent); }", encoding="utf-8"
+            )
+            (root / "diamond-favicon.svg").write_text(
+                "<svg><path d='M1 0 2 1 1 2 0 1Z'/></svg>", encoding="utf-8"
+            )
             (root / "theme.js").write_text("window.themeTest = true;", encoding="utf-8")
             (root / "app.css").write_text("body { color: CanvasText; }", encoding="utf-8")
             (root / "favicon.svg").write_text("<svg></svg>", encoding="utf-8")
@@ -632,6 +658,16 @@ class AgentConfigStoreTests(unittest.TestCase):
                 timezone.utc,
                 port=0,
                 config_store=store,
+                contact_search=lambda query: [
+                    {
+                        "name": query,
+                        "nick": "",
+                        "flowerName": "",
+                        "title": "Engineer",
+                        "userId": "user-search",
+                        "openDingTalkId": "open-search",
+                    }
+                ],
             )
             server.start()
             try:
@@ -640,6 +676,14 @@ class AgentConfigStoreTests(unittest.TestCase):
                 with urlopen(f"{base}/settings", timeout=2) as response:
                     settings_page = response.read().decode("utf-8")
                 self.assertIn("settings test", settings_page)
+                with urlopen(f"{base}/diamond-preview", timeout=2) as response:
+                    self.assertIn("diamond preview", response.read().decode("utf-8"))
+                with urlopen(f"{base}/diamond-preview.css", timeout=2) as response:
+                    self.assertEqual(response.headers.get_content_type(), "text/css")
+                    self.assertIn("--accent", response.read().decode("utf-8"))
+                with urlopen(f"{base}/diamond-favicon.svg", timeout=2) as response:
+                    self.assertEqual(response.headers.get_content_type(), "image/svg+xml")
+                    self.assertIn("<svg>", response.read().decode("utf-8"))
                 with urlopen(f"{base}/theme.js", timeout=2) as response:
                     self.assertEqual(response.headers.get_content_type(), "text/javascript")
                     self.assertIn("themeTest", response.read().decode("utf-8"))
@@ -650,6 +694,9 @@ class AgentConfigStoreTests(unittest.TestCase):
                     self.assertEqual(response.headers.get_content_type(), "image/svg+xml")
                 with urlopen(f"{base}/api/config", timeout=2) as response:
                     payload = json.load(response)
+                with urlopen(f"{base}/api/contacts/search?q=Alice", timeout=2) as response:
+                    search = json.load(response)
+                self.assertEqual(search["results"][0]["name"], "Alice")
                 payload["agents"]["front-agent"]["model"] = "updated-fast-model"
                 request = Request(
                     f"{base}/api/config",

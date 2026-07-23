@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -47,7 +48,16 @@ from .core import (
     sanitize_text,
     sha256_text,
 )
-from .config import DEFAULT_CONFIG, DEFAULT_ENV, WEB_DIR, Settings, _load_timezone, load_settings
+from .config import (
+    DEFAULT_CONFIG,
+    DEFAULT_ENV,
+    WEB_DIR,
+    Settings,
+    _load_timezone,
+    _read_env_file,
+    _resolve_env,
+    load_settings,
+)
 from .dashboard import AgentConfigStore, DashboardServer
 from .delivery import _is_beneath, build_change_archive
 from .dws import DwsClient, _find_dws_error_code
@@ -165,7 +175,17 @@ class AgentService:
                 on_apply=self._apply_agent_configuration,
                 is_idle=self._configuration_is_idle,
                 mutation_lock=self.configuration_lock,
+                contacts=[
+                    {
+                        "alias": item.alias,
+                        "display_name": item.display_name,
+                        "user_id": item.user_id,
+                        "open_dingtalk_id": item.open_dingtalk_id,
+                    }
+                    for item in settings.contacts
+                ],
             ),
+            contact_search=self._search_dingtalk_contacts,
         )
         self.main_repo_roots = tuple(
             child.resolve()
@@ -265,12 +285,72 @@ class AgentService:
                 queue.empty() for queue in self.queues.values()
             )
 
+    def _search_dingtalk_contacts(self, query: str) -> list[dict[str, Any]]:
+        command = [
+            str(self.settings.raw.get("dws", {}).get("binary", "dws")),
+            "contact",
+            "user",
+            "search",
+            "--query",
+            query,
+            "--format",
+            "json",
+            "--timeout",
+            "15",
+        ]
+        profile = self.settings.raw.get("dws", {}).get("profile")
+        if profile:
+            command.extend(["--profile", str(profile)])
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("搜索超时") from exc
+        if completed.returncode:
+            code = _find_dws_error_code(completed.stderr) or f"exit {completed.returncode}"
+            raise RuntimeError(code)
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("DWS 返回了无效 JSON") from exc
+        raw_results = payload.get("result", []) if isinstance(payload, Mapping) else []
+        if not isinstance(raw_results, list):
+            raise RuntimeError("DWS 返回了无效搜索结果")
+        results = []
+        for item in raw_results[:30]:
+            if not isinstance(item, Mapping):
+                continue
+            results.append(
+                {
+                    "name": sanitize_text(item.get("name"), 120),
+                    "nick": sanitize_text(item.get("nick"), 120),
+                    "flowerName": sanitize_text(item.get("flowerName"), 120),
+                    "title": sanitize_text(item.get("title"), 120),
+                    "userId": str(item.get("userId") or "")[:512],
+                    "openDingTalkId": str(item.get("openDingTalkId") or "")[:512],
+                }
+            )
+        return results
+
     def _apply_agent_configuration(self, raw: Mapping[str, Any]) -> None:
         env = _read_env_file(self.settings.env_path)
         env.update(os.environ)
+        contacts = raw.get("contacts", [])
+        if isinstance(contacts, list) and any(
+            str(item.get("open_dingtalk_id") or "") == self.settings.self_open_id
+            for item in contacts
+            if isinstance(item, Mapping)
+        ):
+            raise ValueError("self identity cannot be added to the contact whitelist")
         candidate = dict(self.settings.raw)
         candidate["agents"] = _resolve_env(raw.get("agents", {}), env)
         candidate["workflows"] = _resolve_env(raw.get("workflows", {}), env)
+        candidate["dws"] = _resolve_env(raw.get("dws", {}), env)
         runtime = AgentRuntime.from_config(
             candidate, self.settings.config_path, self.settings.workspace_root
         )
@@ -283,15 +363,21 @@ class AgentService:
             raise ValueError(f"active agent launcher not found: {', '.join(missing)}")
         previous_agents = self.settings.raw.get("agents")
         previous_workflows = self.settings.raw.get("workflows")
+        previous_dws = self.settings.raw.get("dws")
+        previous_ai_tag = self.dws.ai_tag
         previous_runtime = self.agent_runtime
         try:
             self.settings.raw["agents"] = candidate["agents"]
             self.settings.raw["workflows"] = candidate["workflows"]
+            self.settings.raw["dws"] = candidate["dws"]
+            self.dws.ai_tag = bool(candidate["dws"].get("ai_tag", False))
             self.agent_runtime = runtime
             self._write_runtime()
         except Exception:
             self.settings.raw["agents"] = previous_agents
             self.settings.raw["workflows"] = previous_workflows
+            self.settings.raw["dws"] = previous_dws
+            self.dws.ai_tag = previous_ai_tag
             self.agent_runtime = previous_runtime
             raise
 
