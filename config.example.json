@@ -7,9 +7,12 @@
     "open_dingtalk_id": "${DWS_CHAT_AGENT_SELF_OPEN_ID}"
   },
   "contacts": "${DWS_CHAT_AGENT_CONTACTS_JSON}",
-  "quiet_window_seconds": 20,
+  "quiet_window_seconds": 5,
   "human_cooldown_seconds": 600,
   "history_limit": 80,
+  "event_reconcile_interval_seconds": 60,
+  "event_reconcile_lookback_seconds": 7200,
+  "open_id_poll_interval_seconds": 5,
   "recent_context_messages": 6,
   "monitor_interval_seconds": 5,
   "max_replans": 5,
@@ -23,6 +26,21 @@
   "worktree_root": "${DWS_CHAT_AGENT_WORKTREE_ROOT}",
   "state_dir": "state",
   "agents": {
+    "pi-front": {
+      "driver": "pi",
+      "protocol": "pi-rpc",
+      "command": ["pi"],
+      "model": "",
+      "reasoning_effort": "off",
+      "read_only": true,
+      "timeout_seconds": 15,
+      "options": {
+        "tools": "escalate",
+        "plain_text": true,
+        "escalate_tool": true
+      },
+      "extra_args": ["--no-skills", "--no-extensions", "--no-prompt-templates"]
+    },
     "codex-front": {
       "driver": "codex",
       "protocol": "codex-app-server",
@@ -73,14 +91,13 @@
           "ack": "已收到消息，正在处理中。",
           "progress": "{{progress}}",
           "progress_enabled": true,
-          "progress_interval_seconds": 180,
+          "progress_interval_seconds": 5,
           "max_progress_updates": 60
         },
         "front": {
           "label": "快速前台",
-          "agent": "codex-front",
-          "prompt": "prompts/front.md",
-          "schema": "src/dws_dm_agent/schemas/front-decision.json"
+          "agent": "pi-front",
+          "prompt": "prompts/front.md"
         },
         "worker": {
           "label": "执行 Agent",
@@ -94,11 +111,10 @@
   "dws": {
     "binary": "dws",
     "profile": "${DWS_CHAT_AGENT_DWS_PROFILE}",
-    "ai_tag": true
+    "ai_tag": true,
+    "streaming_cards": true
   },
   "security": {
-    "max_message_chars": 12000,
-    "allowed_execution_domains": "${DWS_CHAT_AGENT_EXECUTION_DOMAINS_JSON}",
-    "allowed_reference_domains": ["github.com", "docs.github.com", "openai.com", "platform.openai.com"]
+    "max_message_chars": 12000
   }
 }

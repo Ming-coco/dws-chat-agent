@@ -33,7 +33,7 @@ DingTalk event
 Each front or worker run gets a fresh agent session. Messages that arrive while it is running are sent into that same live session instead of being silently detached:
 
 - Codex: `codex app-server` with `turn/steer`
-- Pi: native `pi --mode rpc` with `streamingBehavior: "steer"`; no plugin is required
+- Pi: native `pi --mode rpc` with `streamingBehavior: "steer"`; the fast front loads the bundled `escalate` tool
 - Claude Code: streaming JSON input/output
 
 If native steering fails, the current run is stopped safely and restarted with the accumulated context. A manual operator reply always aborts agent handling and starts the configured cooldown.
@@ -126,6 +126,12 @@ PYTHONPATH=src python3 -m dws_dm_agent doctor
 PYTHONPATH=src python3 -m dws_dm_agent run --mode shadow --open-dashboard
 ```
 
+Replay the checked-in front-routing cases against the configured live front model:
+
+```bash
+PYTHONPATH=src python3 -m dws_dm_agent.front_eval --concurrency 1
+```
+
 Start in `shadow` mode until configuration is verified. Shadow mode performs analysis and audit but does not send DingTalk messages. Switch `DWS_CHAT_AGENT_MODE` to `live` when it should reply.
 
 ## Agent and workflow configuration
@@ -144,9 +150,9 @@ Start in `shadow` mode until configuration is verified. Shadow mode performs ana
           "ack": "收到，我在处理中。",
           "progress": "{{progress}}",
           "progress_enabled": true,
-          "progress_interval_seconds": 180
+          "progress_interval_seconds": 5
         },
-        "front": {"agent": "codex-front", "prompt": "prompts/front.md"},
+        "front": {"agent": "pi-front", "prompt": "prompts/front.md"},
         "worker": {"agent": "codex-worker", "prompt": "prompts/worker.md"}
       }
     }
@@ -180,17 +186,19 @@ The included scaffold intentionally has only `front -> worker`. A profile separa
 
 `command` is an exact argument array and is never executed through a shell. Therefore a proxy launcher such as `ccr code`, an absolute executable path, a `.cmd` shim on Windows, or a wrapper with fixed arguments all work without quoting tricks. The adapter appends the flags required by `protocol`. Keep credentials in `environment` or the process login, never in `command`.
 
-The bundled protocols are `codex-app-server`, `claude-stream-json`, and `pi-rpc`. The current `ccr code` launcher forwards Claude Code flags, while Oh My Pi exposes native `--mode rpc`, so both reuse an existing protocol without a plugin. A completely independent CLI can use `custom-jsonl-v1`; its small stdin/stdout contract is documented in [docs/custom-agent-protocol.md](docs/custom-agent-protocol.md). An incompatible existing CLI only needs a thin wrapper that implements that contract. DingTalk orchestration does not change.
+The bundled protocols are `codex-app-server`, `claude-stream-json`, and `pi-rpc`. The current `ccr code` launcher forwards Claude Code flags, while Oh My Pi exposes native `--mode rpc`. The Pi fast-front profile explicitly loads the bundled `escalate` extension; other Pi profiles need no plugin. A completely independent CLI can use `custom-jsonl-v1`; its small stdin/stdout contract is documented in [docs/custom-agent-protocol.md](docs/custom-agent-protocol.md). An incompatible existing CLI only needs a thin wrapper that implements that contract. DingTalk orchestration does not change.
 
 Future custom flows can be introduced as additional presets without turning the current pipeline into a general DAG engine.
 
-Prompt text is stored in normal UTF-8 files and the active files are shown verbatim on the localhost settings page. A stage prompt may use `{{self_name}}`, `{{agent_name}}`, `{{worker_name}}`, `{{contact_name}}`, `{{contact_alias}}`, `{{contact_user_id}}`, `{{session_id}}`, `{{prior_attempt}}`, `{{workspace_root}}`, `{{worktree_root}}`, `{{recent_context_json}}`, `{{current_messages_json}}`, `{{execution_domains_json}}`, `{{reference_domains_json}}`, `{{execution_mode}}`, `{{execution_rule}}`, and `{{now}}`. The supplement prompt receives `{{supplement_messages_json}}`, `{{session_id}}`, contact identity fields, and `{{self_name}}`. Unknown or missing variables fail validation instead of silently producing a broken prompt.
+Prompt text is stored in normal UTF-8 files and the active files are shown verbatim on the localhost settings page. A stage prompt may use `{{self_name}}`, `{{agent_name}}`, `{{worker_name}}`, `{{contact_name}}`, `{{contact_alias}}`, `{{contact_user_id}}`, `{{session_id}}`, `{{prior_attempt}}`, `{{workspace_root}}`, `{{worktree_root}}`, `{{recent_context_json}}`, `{{current_messages_json}}`, `{{execution_mode}}`, `{{execution_rule}}`, and `{{now}}`. The supplement prompt receives `{{supplement_messages_json}}`, `{{session_id}}`, contact identity fields, and `{{self_name}}`. Unknown or missing variables fail validation instead of silently producing a broken prompt.
 
 Only the front profile must set `read_only: true`. The worker has normal coding-agent permissions; planning-only behavior for large changes is enforced in the worker prompt and requires the other person's explicit approval before implementation.
 
+With streaming cards enabled, acceptance is shown immediately. Front text deltas update that card directly; worker tool events are converted to safe progress labels, and a still-running tool receives the configured heartbeat (5 seconds in the default preset). Plain-text Pi fronts do not need an output schema.
+
 ## Safety and delivery
 
-- Incoming chat is untrusted. A small deterministic gate rejects obvious credential exfiltration and destructive instructions before spending model tokens; semantic decisions stay with the model.
+- A small deterministic gate only drops empty acknowledgements and enforces the message-size limit; all semantic safety decisions stay with the model.
 - Large changes first produce a plan, impact scope, and validation plan. The worker may edit only after explicit approval in the conversation.
 - Code work uses a dedicated Git worktree and requires a commit as a rollback point.
 - Force pushes, destructive resets, branch deletion, irreversible production actions, and destructive database operations are prohibited by the preset prompt.

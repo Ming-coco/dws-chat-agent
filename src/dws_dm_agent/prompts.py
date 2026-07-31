@@ -9,10 +9,10 @@ _PLACEHOLDER = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
 STAGE_PROMPT_VARIABLES = frozenset(
     {
         "self_name", "agent_name", "worker_name", "contact_name",
-        "contact_alias", "contact_user_id", "session_id", "prior_attempt",
+        "contact_alias", "contact_user_id", "contact_open_dingtalk_id",
+        "session_id", "prior_attempt",
         "workspace_root", "worktree_root", "recent_context_json",
-        "current_messages_json", "execution_domains_json",
-        "reference_domains_json", "execution_mode", "execution_rule", "now",
+        "current_messages_json", "execution_mode", "execution_rule", "now",
     }
 )
 SUPPLEMENT_PROMPT_VARIABLES = frozenset(

@@ -6,6 +6,7 @@ import os
 import re
 import signal
 import subprocess
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,7 @@ from . import claude, codex, custom, pi
 
 _STAGE_ORDER = ("front", "worker")
 _EVENT_STREAM_LIMIT = 8 * 1024 * 1024
+_PI_EMPTY_RESPONSE_RETRIES = 4
 _DRIVER_PROTOCOLS = {
     "codex": "codex-app-server",
     "claude": "claude-stream-json",
@@ -60,7 +62,7 @@ class WorkflowStage:
     label: str
     profile: AgentProfile
     prompt_path: Path
-    schema_path: Path
+    schema_path: Path | None
 
 
 @dataclass(frozen=True)
@@ -124,6 +126,7 @@ class AgentSession:
         self.turn_id = ""
         self.error = ""
         self._complete = asyncio.Event()
+        self._updates: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
         self._closing = False
         self._request_id = 0
         self._pending: dict[int, asyncio.Future[Mapping[str, Any]]] = {}
@@ -134,6 +137,13 @@ class AgentSession:
         self._final_text = ""
         self._structured_result: dict[str, Any] | None = None
         self._progress: list[str] = []
+        self._stream_text = ""
+        self._pi_empty_response_retries = 0
+        self._codex_item_phases: dict[str, str] = {}
+        self._codex_item_text: dict[str, str] = {}
+        self._codex_reasoning: dict[str, str] = {}
+        self._codex_operations: dict[str, str] = {}
+        self._codex_operation_started: dict[str, float] = {}
 
     @property
     def exit_code(self) -> int | None:
@@ -146,6 +156,23 @@ class AgentSession:
     @property
     def latest_progress(self) -> str:
         return self._progress[-1] if self._progress else ""
+
+    @property
+    def latest_stream_text(self) -> str:
+        return self._stream_text
+
+    @property
+    def has_active_operation(self) -> bool:
+        return bool(self._codex_operations)
+
+    def progress_heartbeat(self) -> str:
+        if not self._codex_operations:
+            return ""
+        item_id = next(reversed(self._codex_operations))
+        progress = self._codex_operations[item_id].rstrip("。")
+        started_at = self._codex_operation_started.get(item_id, time.monotonic())
+        elapsed = max(5, int(time.monotonic() - started_at) // 5 * 5)
+        return f"{progress}（已等待 {elapsed} 秒）。"
 
     async def start(self) -> None:
         if self.process is not None:
@@ -258,6 +285,12 @@ class AgentSession:
         else:
             await asyncio.wait_for(self._complete.wait(), timeout=timeout)
 
+    async def wait_for_update(self, timeout: float | None = None) -> None:
+        if timeout is None:
+            await self._updates.get()
+        else:
+            await asyncio.wait_for(self._updates.get(), timeout=timeout)
+
     async def steer(self, prompt: str) -> bool:
         if not prompt.strip() or self.done or self.process is None:
             return False
@@ -307,6 +340,15 @@ class AgentSession:
     def decision(self) -> dict[str, Any]:
         if self._structured_result is not None:
             return dict(self._structured_result)
+        if self.prepared.stage.profile.options.get("plain_text"):
+            reply = (self._final_text or self._stream_text).strip()
+            if not reply:
+                raise ValueError("plain-text agent produced no reply or escalation")
+            return {
+                "route": "reply",
+                "reply": reply,
+                "execution": "read_only",
+            }
         if self._final_text:
             return _parse_json_text(self._final_text)
         return self.prepared.read_decision()
@@ -466,13 +508,52 @@ class AgentSession:
             method = str(event.get("method") or "")
             params = event.get("params")
             params = params if isinstance(params, Mapping) else {}
-            if method == "item/completed":
+            if method == "item/started":
                 item = params.get("item")
-                if isinstance(item, Mapping) and item.get("type") == "agentMessage":
-                    self._capture_text(
-                        str(item.get("text") or ""),
-                        final=item.get("phase") == "final_answer",
+                if isinstance(item, Mapping):
+                    item_id = str(item.get("id") or "")
+                    if item.get("type") == "agentMessage":
+                        self._codex_item_phases[item_id] = str(
+                            item.get("phase") or ""
+                        )
+                    else:
+                        progress = _codex_operation_progress(item)
+                        if progress:
+                            self._codex_operations[item_id] = progress[0]
+                            self._codex_operation_started[item_id] = time.monotonic()
+                            self._capture_progress(progress[0])
+            elif method == "item/agentMessage/delta":
+                item_id = str(params.get("itemId") or "")
+                if self._codex_item_phases.get(item_id) == "commentary":
+                    value = self._codex_item_text.get(item_id, "") + str(
+                        params.get("delta") or ""
                     )
+                    self._codex_item_text[item_id] = value
+                    self._capture_progress(value)
+            elif method == "item/reasoning/summaryTextDelta":
+                item_id = str(params.get("itemId") or "")
+                value = self._codex_reasoning.get(item_id, "") + str(
+                    params.get("delta") or ""
+                )
+                self._codex_reasoning[item_id] = value
+                self._capture_progress(value)
+            elif method == "item/completed":
+                item = params.get("item")
+                if isinstance(item, Mapping):
+                    if item.get("type") == "agentMessage":
+                        phase = str(item.get("phase") or "")
+                        text = str(item.get("text") or "")
+                        if phase == "commentary":
+                            self._capture_progress(text)
+                        else:
+                            self._capture_text(text, final=phase == "final_answer")
+                    else:
+                        item_id = str(item.get("id") or "")
+                        progress = _codex_operation_progress(item)
+                        self._codex_operations.pop(item_id, None)
+                        self._codex_operation_started.pop(item_id, None)
+                        if progress:
+                            self._capture_progress(progress[1])
             elif method == "turn/completed":
                 turn = params.get("turn")
                 if isinstance(turn, Mapping) and (
@@ -495,12 +576,69 @@ class AgentSession:
                             "cancelled": True,
                         }
                     )
+            elif event_type == "message_update":
+                update = event.get("assistantMessageEvent")
+                update = update if isinstance(update, Mapping) else {}
+                if update.get("type") == "text_delta":
+                    self._capture_stream_delta(str(update.get("delta") or ""))
+            elif event_type == "tool_execution_start" and event.get("toolName") == "escalate":
+                arguments = event.get("args")
+                arguments = arguments if isinstance(arguments, Mapping) else {}
+                execution = str(arguments.get("execution") or "read_only")
+                if execution not in {
+                    "read_only",
+                    "small_change",
+                    "plan_large_change",
+                    "approved_plan",
+                }:
+                    execution = "read_only"
+                self._structured_result = {
+                    "route": "worker",
+                    "reason": sanitize_text(
+                        str(arguments.get("reason") or "需要执行 Agent"), 300
+                    ),
+                    "execution": execution,
+                    "progress": sanitize_text(
+                        str(arguments.get("user_message") or "我先调查一下。"),
+                        200,
+                    ),
+                }
+                self._signal_update()
             elif event_type == "message_end":
-                self._capture_text(_assistant_text(event))
+                text = _assistant_text(event)
+                if text:
+                    self._capture_text(text, final=True)
             elif event_type == "agent_end":
+                messages = event.get("messages")
+                if isinstance(messages, list):
+                    for message in reversed(messages):
+                        text = _assistant_text({"message": message})
+                        if text:
+                            self._capture_text(text, final=True)
+                            break
+                if (
+                    self.prepared.stage.profile.options.get("plain_text")
+                    and self._structured_result is None
+                    and not self._final_text
+                    and not self._stream_text
+                    and self._pi_empty_response_retries
+                    < _PI_EMPTY_RESPONSE_RETRIES
+                ):
+                    self._pi_empty_response_retries += 1
+                    self._request_id += 1
+                    await self._write_json(
+                        {
+                            "id": self._request_id,
+                            "type": "prompt",
+                            "message": self.prepared.prompt,
+                        }
+                    )
+                    return
                 self._finish()
             elif event_type == "response" and not event.get("success", True):
-                self.error = sanitize_text(str(event.get("error") or "Pi RPC error"), 500)
+                self._fail(
+                    sanitize_text(str(event.get("error") or "Pi RPC error"), 500)
+                )
             return
         if protocol == "custom-jsonl-v1":
             event_type = str(event.get("type") or "")
@@ -527,6 +665,7 @@ class AgentSession:
         if protocol != "claude-stream-json":
             self.error = f"unsupported_agent_protocol: {protocol}"
             self._complete.set()
+            self._signal_update()
             return
         event_type = str(event.get("type") or "")
         if event_type == "assistant":
@@ -555,17 +694,42 @@ class AgentSession:
         progress = sanitize_text(clean, 500).strip()
         if progress and (not self._progress or self._progress[-1] != progress):
             self._progress.append(progress)
+            self._signal_update()
+
+    def _capture_progress(self, text: str) -> None:
+        progress = sanitize_text(text, 500).strip()
+        if (
+            _is_user_facing_progress(progress)
+            and (not self._progress or self._progress[-1] != progress)
+        ):
+            self._progress.append(progress)
+            self._signal_update()
+
+    def _capture_stream_delta(self, delta: str) -> None:
+        if not delta:
+            return
+        self._stream_text += delta
+        self._signal_update()
+
+    def _signal_update(self) -> None:
+        if self._updates.empty():
+            self._updates.put_nowait(None)
 
     def _finish(self) -> None:
         if self._structured_result is not None:
             payload = json.dumps(self._structured_result, ensure_ascii=False)
         else:
-            payload = self._final_text
+            payload = self._final_text or (
+                self._stream_text
+                if self.prepared.stage.profile.options.get("plain_text")
+                else ""
+            )
         if payload:
             self.prepared.result_path.write_text(payload, encoding="utf-8")
         elif not self.error:
             self.error = "agent_result_missing"
         self._complete.set()
+        self._signal_update()
 
     def _fail(self, error: str) -> None:
         self.error = error
@@ -574,6 +738,7 @@ class AgentSession:
             if not future.done():
                 future.set_exception(failure)
         self._complete.set()
+        self._signal_update()
 
 
 class AgentRuntime:
@@ -708,10 +873,15 @@ class AgentRuntime:
             if profile is None:
                 raise ValueError(f"workflow stage references unknown agent: {profile_name}")
             prompt_path = _resolve_path(config_dir, value.get("prompt"))
-            schema_path = _resolve_path(config_dir, value.get("schema"))
+            schema_value = value.get("schema")
+            schema_path = (
+                _resolve_path(config_dir, schema_value) if schema_value else None
+            )
             if not prompt_path.is_file():
                 raise ValueError(f"workflow prompt does not exist: {prompt_path}")
-            if not schema_path.is_file():
+            if schema_path is None and not profile.options.get("plain_text"):
+                raise ValueError(f"workflow schema is required: {stage_name}")
+            if schema_path is not None and not schema_path.is_file():
                 raise ValueError(f"workflow schema does not exist: {schema_path}")
             stages[stage_name] = WorkflowStage(
                 name=stage_name,
@@ -772,11 +942,19 @@ class AgentRuntime:
         result_path = session_dir / "result.json"
         events_path = session_dir / "events.jsonl"
         stderr_path = session_dir / "stderr.log"
-        schema = json.loads(stage.schema_path.read_text(encoding="utf-8"))
-        if not isinstance(schema, Mapping):
-            raise ValueError(f"workflow schema must be an object: {stage.schema_path}")
+        schema: Mapping[str, Any] = {}
+        if stage.schema_path is not None:
+            loaded_schema = json.loads(stage.schema_path.read_text(encoding="utf-8"))
+            if not isinstance(loaded_schema, Mapping):
+                raise ValueError(
+                    f"workflow schema must be an object: {stage.schema_path}"
+                )
+            schema = loaded_schema
         input_prompt = prompt
-        if stage.profile.protocol == "pi-rpc":
+        if (
+            stage.profile.protocol == "pi-rpc"
+            and not stage.profile.options.get("plain_text")
+        ):
             input_prompt += (
                 "\n\n<output_schema>\n"
                 + json.dumps(schema, ensure_ascii=False)
@@ -1023,3 +1201,53 @@ def _is_final_decision(text: str) -> bool:
     except (TypeError, ValueError, json.JSONDecodeError):
         return False
     return "action" in value
+
+
+def _is_user_facing_progress(text: str) -> bool:
+    value = text.strip()
+    return bool(
+        value
+        and re.search(r"[\u3400-\u9fff]", value)
+        and not value.startswith(("{", "[", "```", "<"))
+    )
+
+
+def _codex_operation_progress(item: Mapping[str, Any]) -> tuple[str, str] | None:
+    item_type = re.sub(r"[^a-z]", "", str(item.get("type") or "").lower())
+    if item_type == "commandexecution":
+        actions = item.get("commandActions")
+        action_type = ""
+        if isinstance(actions, list) and actions and isinstance(actions[0], Mapping):
+            action_type = str(actions[0].get("type") or "").lower()
+        if action_type in {"search", "read"}:
+            return "正在检查相关代码。", "代码检查已完成，正在整理结果。"
+        return "正在执行本地检查。", "本地检查已完成，正在整理结果。"
+    if item_type == "websearch":
+        return "正在查询最新公开信息。", "公开信息查询已返回，正在整理结果。"
+    if item_type == "filechange":
+        return "正在写入代码改动。", "代码改动已写入，正在继续验证。"
+    if item_type == "collabtoolcall":
+        return "正在等待协作任务返回。", "协作任务已返回，正在整理结果。"
+    if item_type != "mcptoolcall":
+        return None
+    identity = " ".join(
+        str(item.get(key) or "")
+        for key in ("server", "serverName", "tool", "toolName", "name")
+    ).lower()
+    if any(value in identity for value in ("loki", "grafana", "log")):
+        return "正在查询日志。", "日志查询已返回，正在整理结果。"
+    if any(
+        value in identity
+        for value in ("gitlab", "github", "merge_request", "pull_request")
+    ):
+        return "正在查询代码托管平台。", "代码托管查询已返回，正在整理结果。"
+    if any(
+        value in identity
+        for value in ("sql", "database", "mysql", "postgres", "clickhouse")
+    ):
+        return "正在查询数据。", "数据查询已返回，正在整理结果。"
+    if any(value in identity for value in ("web", "search", "browser")):
+        return "正在查询最新信息。", "最新信息查询已返回，正在整理结果。"
+    if any(value in identity for value in ("k8s", "kubernetes", "deploy")):
+        return "正在检查运行环境。", "运行环境检查已返回，正在整理结果。"
+    return "正在调用业务工具。", "业务工具已返回，正在整理结果。"
