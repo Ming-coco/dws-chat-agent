@@ -26,16 +26,8 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
         name = str(case.get("name") or "")
         message = str(case.get("message") or "")
         route = str(case.get("expected_route") or "")
-        execution = str(case.get("expected_execution") or "")
         if not name or name in names or not message or route not in {"reply", "worker"}:
             raise ValueError(f"invalid front eval case: {name or '(unnamed)'}")
-        if execution and execution not in {
-            "read_only",
-            "small_change",
-            "plan_large_change",
-            "approved_plan",
-        }:
-            raise ValueError(f"invalid execution in front eval case: {name}")
         recent = case.get("recent_context", [])
         if not isinstance(recent, list) or any(
             not isinstance(item, Mapping) for item in recent
@@ -46,17 +38,9 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
     return cases
 
 
-def matches_expected(
-    decision: Mapping[str, Any], case: Mapping[str, Any]
-) -> bool:
-    if decision.get("route") != case.get("expected_route"):
-        return False
-    expected_execution = str(case.get("expected_execution") or "")
-    if expected_execution and decision.get("execution") != expected_execution:
-        return False
-    if decision.get("route") == "reply":
-        return bool(str(decision.get("reply") or "").strip())
-    return bool(str(decision.get("progress") or "").strip())
+def matches_expected(reply: str, escalated: bool, case: Mapping[str, Any]) -> bool:
+    route = "worker" if escalated else "reply"
+    return route == case.get("expected_route") and (escalated or bool(reply.strip()))
 
 
 async def _evaluate_case(
@@ -75,7 +59,6 @@ async def _evaluate_case(
                 "sender": settings.self_name
                 if item.get("role") == "agent"
                 else "测试联系人",
-                "execution": str(item.get("execution") or ""),
                 "time": str(item.get("time") or now.isoformat()),
                 "message_id": f"{session_id}-history-{offset}",
                 "conversation_id": "front-eval",
@@ -112,13 +95,12 @@ async def _evaluate_case(
                 "current_messages_json": json.dumps(
                     current, ensure_ascii=False, indent=2
                 ),
-                "execution_mode": "read_only",
-                "execution_rule": "",
                 "now": now.strftime("%Y-%m-%d %H:%M:%S"),
             },
         )
         started = time.monotonic()
-        decision: Mapping[str, Any] = {}
+        reply = ""
+        escalated = False
         error = ""
         with tempfile.TemporaryDirectory(prefix=f"{session_id}-") as directory:
             session = runtime.open_session(
@@ -129,25 +111,23 @@ async def _evaluate_case(
                 await session.wait(timeout=session.prepared.timeout_seconds + 5)
                 if session.error:
                     raise RuntimeError(session.error)
-                decision = session.decision()
+                reply = session.result()
+                escalated = session.escalated
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
             finally:
                 await session.close()
         return {
             "name": case["name"],
-            "passed": not error and matches_expected(decision, case),
+            "passed": not error and matches_expected(reply, escalated, case),
             "duration_seconds": round(time.monotonic() - started, 3),
             "error": error,
             "expected": {
                 "route": case["expected_route"],
-                "execution": case.get("expected_execution", ""),
             },
             "actual": {
-                "route": decision.get("route", ""),
-                "execution": decision.get("execution", ""),
-                "reply": str(decision.get("reply") or "")[:120],
-                "progress": str(decision.get("progress") or "")[:120],
+                "route": "worker" if escalated else "reply",
+                "reply": reply[:120],
             },
         }
 

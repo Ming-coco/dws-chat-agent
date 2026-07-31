@@ -225,7 +225,7 @@
     const STATUS = {
       sent: ["已回复", "success"], shadow: ["影子回复", "info"], no_reply: ["无需回复", "muted"],
       human_cooldown: ["人工接管", "warning"], refused: ["安全拒绝", "danger"], error: ["处理失败", "danger"],
-      stale_supplement: ["补充后重算", "info"], delivery_replan: ["交付重算", "info"],
+      stale_supplement: ["补充后重算", "info"],
       invalid_reply: ["回复重算", "info"]
     };
     let snapshot = null;
@@ -267,7 +267,7 @@
     function renderMetrics(data) {
       const box = document.getElementById("metrics"); clear(box);
       [["正在执行", data.summary.active, "info"], ["等待队列", data.summary.queued, "warning"],
-       ["今日回复", data.summary.sentToday, "success"], ["今日代码任务", data.summary.changesToday, "brand"],
+       ["今日回复", data.summary.sentToday, "success"],
        ["今日失败", data.summary.errorsToday, "danger"]].forEach(([label, value, cls]) => {
         const card = node("div", "metric"); card.append(node("span", "", label), node("strong", cls || "", value)); box.append(card);
       });
@@ -329,13 +329,7 @@
         const lane = modelLane(item.sessionId); if (lane) line.append(node("span", "badge brand", lane));
         title.append(line, node("p", "", item.requestPreview || "历史记录未保存请求摘要"));
         top.append(title, node("span", "run-time", `${time(item.finishedAt)} · ${duration(item.startedAt, item.finishedAt)}`)); summary.append(top); details.append(summary);
-        const body = node("div", "run-body"); addBlock(body, "对方消息", item.requestPreview || "历史记录未保存请求摘要"); addBlock(body, "模型路径", lane); addBlock(body, "处理结果", item.handled); addBlock(body, "原因", item.reason); addBlock(body, "验证", item.validation); addBlock(body, "告警", item.warnings); addBlock(body, "外部调用", item.externalCalls);
-        (item.changes || []).forEach(change => {
-          const code = node("section", "detail-block code-change"); code.append(node("h3", "", change.repo || "代码改动"));
-          addBlock(code, "分支 / Commit", [change.branch, change.head_sha]); addBlock(code, "推送目标", change.pushed_to);
-          if ((change.files || []).length) { const chips = node("div", "chips"); change.files.forEach(file => chips.append(node("span", "chip", file))); code.append(chips); }
-          body.append(code);
-        });
+        const body = node("div", "run-body"); addBlock(body, "对方消息", item.requestPreview || "历史记录未保存请求摘要"); addBlock(body, "模型路径", lane); addBlock(body, "处理结果", item.handled); addBlock(body, "原因", item.reason);
         details.append(body); details.open = openRuns.has(item.sessionId);
         details.addEventListener("toggle", () => details.open ? openRuns.add(item.sessionId) : openRuns.delete(item.sessionId));
         box.append(details);

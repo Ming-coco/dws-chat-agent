@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import copy
 import json
-import sys
 import tempfile
 import unittest
-from dataclasses import replace
 from datetime import timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -43,17 +39,6 @@ class AgentRuntimeTests(unittest.TestCase):
         (root / "prompts" / "supplement.md").write_text(
             "supplement {{supplement_messages_json}}", encoding="utf-8"
         )
-        for name in ("front", "worker"):
-            (root / f"{name}.schema.json").write_text(
-                json.dumps(
-                    {
-                        "type": "object",
-                        "properties": {"action": {"type": "string"}},
-                        "required": ["action"],
-                    }
-                ),
-                encoding="utf-8",
-            )
         options: dict[str, object] = {}
         if driver == "codex":
             options = {
@@ -109,18 +94,15 @@ class AgentRuntimeTests(unittest.TestCase):
                             "ack_enabled": True,
                             "ack": "收到，我在处理 {{request_count}} 条消息。",
                             "progress_enabled": True,
-                            "progress_interval_seconds": 90,
                             "max_progress_updates": 8,
                         },
                         "front": {
                             "agent": "front-agent",
                             "prompt": "prompts/front.md",
-                            "schema": "front.schema.json",
                         },
                         "worker": {
                             "agent": "worker-agent",
                             "prompt": "prompts/worker.md",
-                            "schema": "worker.schema.json",
                         },
                     }
                 },
@@ -151,7 +133,6 @@ class AgentRuntimeTests(unittest.TestCase):
                 ),
                 'supplement [{"text":"补充"}]',
             )
-            self.assertEqual(runtime.progress_interval_seconds, 90)
             self.assertEqual(runtime.max_progress_updates, 8)
             self.assertEqual(
                 runtime.render_auto_message("ack", {"request_count": 2}),
@@ -178,6 +159,11 @@ class AgentRuntimeTests(unittest.TestCase):
             self.assertEqual(front.thread_options["sandbox"], "read-only")
             self.assertEqual(worker.thread_options["sandbox"], "workspace-write")
             self.assertEqual(worker.environment["RUNTIME_TEST"], "1")
+            self.assertEqual(
+                front.environment["CODEX_HOME"],
+                str((root / "front-run" / "codex-home").resolve()),
+            )
+            self.assertFalse((root / "front-run" / "codex-home" / "config.toml").exists())
             self.assertEqual(front.timeout_seconds, 30)
             self.assertEqual(worker.timeout_seconds, 300)
 
@@ -190,7 +176,7 @@ class AgentRuntimeTests(unittest.TestCase):
             self.assertEqual(claude_front.protocol, "claude-stream-json")
             self.assertIn("plan", claude_front.argv)
             self.assertIn("stream-json", claude_front.argv)
-            self.assertIn("Read,Grep,Glob", claude_front.argv)
+            self.assertIn("Read,Grep,Glob,mcp__dws-escalate__escalate", claude_front.argv)
             self.assertIn("acceptEdits", claude_worker.argv)
             self.assertNotIn("Read,Grep,Glob", claude_worker.argv)
 
@@ -199,7 +185,7 @@ class AgentRuntimeTests(unittest.TestCase):
             pi_worker = pi.prepare("worker", "worker", "prompt", root / "pw")
             self.assertEqual(pi_front.protocol, "pi-rpc")
             self.assertIn("rpc", pi_front.argv)
-            self.assertIn("read,grep,find,ls", pi_front.argv)
+            self.assertIn("read,grep,find,ls,escalate", pi_front.argv)
             self.assertNotIn("read,grep,find,ls", pi_worker.argv)
             self.assertFalse(any(value.startswith("@") for value in pi_worker.argv))
 
@@ -207,7 +193,7 @@ class AgentRuntimeTests(unittest.TestCase):
             raw["agents"]["front-agent"]["options"]["tools"] = ""
             pi = AgentRuntime.from_config(raw, root / "pi" / "config.json", root / "pi")
             pi_front = pi.prepare("front", "front-fast", "prompt", root / "pf-fast")
-            self.assertIn("--no-tools", pi_front.argv)
+            self.assertIn("escalate", pi_front.argv)
             self.assertNotIn("read,grep,find,ls", pi_front.argv)
 
     def test_launcher_command_is_independent_from_the_session_protocol(self) -> None:
@@ -239,71 +225,47 @@ class AgentRuntimeTests(unittest.TestCase):
                 description["availableAgents"][0]["launchCommand"], ["ccr", "code"]
             )
 
-    def test_each_adapter_reads_structured_result_and_progress(self) -> None:
+    def test_front_mounts_escalate_adapter_and_worker_stays_plain(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            for driver in ("codex", "claude", "pi"):
+                runtime = self._runtime(root / driver, driver)
+                front = runtime.prepare(
+                    "front", f"{driver}-front", "prompt", root / f"{driver}-front"
+                )
+                worker = runtime.prepare(
+                    "worker", f"{driver}-worker", "prompt", root / f"{driver}-worker"
+                )
+                self.assertTrue((front.result_path.parent / "mcp.json").is_file())
+                self.assertFalse((worker.result_path.parent / "mcp.json").exists())
+                self.assertEqual(worker.result_path.name, "result.txt")
+                self.assertNotIn("--json-schema", worker.argv)
 
-            codex = self._runtime(root / "codex", "codex").prepare(
-                "worker", "codex", "prompt", root / "codex-run"
-            )
-            codex.result_path.write_text('{"action":"reply"}', encoding="utf-8")
-            codex.events_path.write_text(
-                json.dumps(
-                    {
-                        "type": "item.completed",
-                        "item": {"type": "agent_message", "text": "checking tests"},
-                    }
-                ),
-                encoding="utf-8",
-            )
-            self.assertEqual(codex.read_decision()["action"], "reply")
-            self.assertEqual(codex.latest_progress(), "checking tests")
+            self.assertIn("mcp_servers.dws-escalate.command", " ".join(
+                self._runtime(root / "codex-2", "codex").prepare(
+                    "front", "front", "prompt", root / "codex-front-2"
+                ).argv
+            ))
+            self.assertIn("--mcp-config", self._runtime(
+                root / "claude-2", "claude"
+            ).prepare("front", "front", "prompt", root / "claude-front-2").argv)
+            self.assertIn("pi_escalate.ts", " ".join(
+                self._runtime(root / "pi-2", "pi").prepare(
+                    "front", "front", "prompt", root / "pi-front-2"
+                ).argv
+            ))
 
-            claude = self._runtime(root / "claude", "claude").prepare(
-                "worker", "claude", "prompt", root / "claude-run"
-            )
-            claude.events_path.write_text(
-                "\n".join(
-                    [
-                        json.dumps(
-                            {
-                                "type": "assistant",
-                                "message": {
-                                    "content": [{"type": "text", "text": "checking code"}]
-                                },
-                            }
-                        ),
-                        json.dumps(
-                            {
-                                "type": "result",
-                                "structured_output": {"action": "reply"},
-                            }
-                        ),
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            self.assertEqual(claude.read_decision()["action"], "reply")
-            self.assertEqual(claude.latest_progress(), "checking code")
+    def test_front_stage_is_optional(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = self._runtime(root, "codex")
+            raw = json.loads((root / "config.json").read_text(encoding="utf-8"))
+            raw["workflows"]["presets"]["dm-default"].pop("front")
+            runtime = AgentRuntime.from_config(raw, root / "config.json", root)
 
-            pi = self._runtime(root / "pi", "pi").prepare(
-                "worker", "pi", "prompt", root / "pi-run"
-            )
-            pi.events_path.write_text(
-                json.dumps(
-                    {
-                        "type": "message_end",
-                        "message": {
-                            "role": "assistant",
-                            "content": [
-                                {"type": "text", "text": '{"action":"reply"}'}
-                            ],
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-            self.assertEqual(pi.read_decision()["action"], "reply")
+            self.assertFalse(runtime.has_stage("front"))
+            self.assertTrue(runtime.has_stage("worker"))
+            self.assertEqual([item["id"] for item in runtime.describe()["stages"]], ["worker"])
 
     def test_invalid_permission_layout_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -321,424 +283,163 @@ class FrontRoutingEvalTests(unittest.TestCase):
 
         self.assertEqual(len(cases), 12)
         self.assertEqual(len({case["name"] for case in cases}), len(cases))
-        self.assertTrue(
-            matches_expected(
-                {"route": "worker", "execution": "read_only", "progress": "我先查一下。"},
-                cases[4],
-            )
-        )
-        self.assertFalse(
-            matches_expected(
-                {"route": "reply", "reply": "不用查。", "execution": "read_only"},
-                cases[4],
-            )
-        )
+        self.assertTrue(matches_expected("", True, cases[4]))
+        self.assertFalse(matches_expected("不用查。", False, cases[4]))
 
 
 class AgentSessionProtocolTests(unittest.IsolatedAsyncioTestCase):
-    def _runtime(self, root: Path, driver: str) -> AgentRuntime:
-        return AgentRuntimeTests()._runtime(root, driver)
+    def _session(self, root: Path, driver: str, stage: str = "worker") -> AgentSession:
+        runtime = AgentRuntimeTests()._runtime(root, driver)
+        return AgentSession(
+            runtime.prepare(stage, "session", "prompt", root / "run"),
+            "session",
+        )
 
-    async def test_codex_app_server_steers_the_active_turn(self) -> None:
+    async def test_codex_exposes_reasoning_summary_and_keeps_final_body_separate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            script = root / "fake_codex.py"
-            script.write_text(
-                """import json, sys
-for line in sys.stdin:
-    value = json.loads(line)
-    method = value.get('method')
-    if method == 'initialize':
-        print(json.dumps({'id': value['id'], 'result': {'ok': True}}), flush=True)
-    elif method == 'thread/start':
-        print(json.dumps({'id': value['id'], 'result': {'thread': {'id': 'thread-1'}}}), flush=True)
-    elif method == 'turn/start':
-        print(json.dumps({'id': value['id'], 'result': {'turn': {'id': 'turn-1'}}}), flush=True)
-        print(json.dumps({'method': 'item/started', 'params': {'item': {'id': 'comment-1', 'type': 'agentMessage', 'phase': 'commentary'}}}), flush=True)
-        print(json.dumps({'method': 'item/agentMessage/delta', 'params': {'itemId': 'comment-1', 'delta': '正在检查代码'}}), flush=True)
-        print(json.dumps({'method': 'item/started', 'params': {'item': {'id': 'comment-2', 'type': 'agentMessage', 'phase': 'commentary'}}}), flush=True)
-        print(json.dumps({'method': 'item/agentMessage/delta', 'params': {'itemId': 'comment-2', 'delta': '{\"action\":\"reply\",\"reply\":\"内部结构化结果\"}'}}), flush=True)
-        print(json.dumps({'method': 'item/reasoning/summaryTextDelta', 'params': {'itemId': 'reason-1', 'delta': '**Correcting commentary format**'}}), flush=True)
-    elif method == 'turn/steer':
-        print(json.dumps({'id': value['id'], 'result': {'turnId': 'turn-1'}}), flush=True)
-        print(json.dumps({'method': 'item/completed', 'params': {'item': {'type': 'agentMessage', 'phase': 'final_answer', 'text': '{\"action\":\"reply\"}'}}}), flush=True)
-        print(json.dumps({'method': 'turn/completed', 'params': {'turn': {'id': 'turn-1', 'status': 'completed'}}}), flush=True)
-""",
-                encoding="utf-8",
-            )
-            prepared = self._runtime(root, "codex").prepare(
-                "worker", "session", "initial", root / "run"
-            )
-            prepared = replace(prepared, argv=(sys.executable, str(script)))
-            session = AgentSession(prepared, "session")
-            try:
-                await session.start()
-                await session.wait_for_update(timeout=2)
-                self.assertEqual(session.latest_progress, "正在检查代码")
-                self.assertTrue(await session.steer("new detail"))
-                await session.wait(timeout=2)
-                self.assertEqual(session.decision()["action"], "reply")
-            finally:
-                await session.close()
-
-    async def test_codex_tool_events_emit_safe_progress(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            session = AgentSession(
-                self._runtime(root, "codex").prepare(
-                    "worker", "session", "prompt", root / "run"
-                ),
-                "session",
-            )
-
+            session = self._session(Path(directory), "codex")
             await session._handle_event(
                 {
-                    "method": "item/started",
-                    "params": {
-                        "item": {
-                            "id": "exec-1",
-                            "type": "commandExecution",
-                            "command": "print-secret-token",
-                        }
-                    },
+                    "method": "item/reasoning/summaryTextDelta",
+                    "params": {"itemId": "reason-1", "delta": "正在核对真实链路"},
                 }
             )
-            self.assertEqual(session.latest_progress, "正在执行本地检查。")
-            self.assertNotIn("secret", session.latest_progress)
-
-            await session._handle_event(
-                {
-                    "method": "item/started",
-                    "params": {
-                        "item": {
-                            "id": "mcp-1",
-                            "type": "mcpToolCall",
-                            "server": "grafana-prod-logging",
-                            "tool": "query_loki_logs",
-                        }
-                    },
-                }
-            )
-            self.assertEqual(session.latest_progress, "正在查询日志。")
-
             await session._handle_event(
                 {
                     "method": "item/completed",
                     "params": {
                         "item": {
-                            "id": "mcp-1",
-                            "type": "mcpToolCall",
-                            "server": "grafana-prod-logging",
-                            "tool": "query_loki_logs",
+                            "type": "agentMessage",
+                            "phase": "final_answer",
+                            "text": "这是最终正文。",
                         }
                     },
                 }
             )
-            self.assertEqual(session.latest_progress, "日志查询已返回，正在整理结果。")
+            session._finish()
 
-    async def test_pi_plain_text_stream_and_escalate_tool(self) -> None:
+            self.assertEqual(session.latest_progress, "正在核对真实链路")
+            self.assertEqual(session.result(), "这是最终正文。")
+
+    async def test_codex_retryable_stream_error_does_not_poison_completed_turn(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            runtime = self._runtime(root, "pi")
-            raw = json.loads((root / "config.json").read_text(encoding="utf-8"))
-            raw["agents"]["front-agent"]["options"].update(
+            session = self._session(Path(directory), "codex")
+            session.turn_id = "turn-1"
+
+            await session._handle_event(
                 {
-                    "tools": "escalate",
-                    "plain_text": True,
-                    "escalate_tool": True,
+                    "method": "error",
+                    "params": {
+                        "error": {
+                            "message": "Reconnecting... 2/5",
+                            "additionalDetails": (
+                                "stream disconnected before completion: "
+                                "tls handshake eof"
+                            ),
+                        },
+                        "willRetry": True,
+                        "turnId": "turn-1",
+                    },
                 }
             )
-            raw["workflows"]["presets"]["dm-default"]["front"].pop("schema")
-            runtime = AgentRuntime.from_config(raw, root / "config.json", root)
-
-            reply = AgentSession(
-                runtime.prepare("front", "reply", "prompt", root / "reply-run"),
-                "reply",
+            await session._handle_event(
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "item": {
+                            "type": "agentMessage",
+                            "phase": "final_answer",
+                            "text": "恢复后的最终正文",
+                        }
+                    },
+                }
             )
-            await reply._handle_event(
+            await session._handle_event(
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "turn": {
+                            "id": "turn-1",
+                            "status": "completed",
+                        }
+                    },
+                }
+            )
+
+            self.assertEqual(session.error, "")
+            self.assertEqual(session.result(), "恢复后的最终正文")
+
+    async def test_pi_exposes_native_thinking_and_keeps_text_as_body(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory), "pi")
+            await session._handle_event(
+                {
+                    "type": "message_update",
+                    "assistantMessageEvent": {
+                        "type": "thinking_delta",
+                        "contentIndex": 0,
+                        "delta": "先确认上下文",
+                    },
+                }
+            )
+            await session._handle_event(
                 {
                     "type": "message_update",
                     "assistantMessageEvent": {
                         "type": "text_delta",
-                        "delta": "你好，可以聊聊。",
+                        "contentIndex": 1,
+                        "delta": "最终正文",
                     },
                 }
             )
-            await reply._handle_event({"type": "agent_end"})
-            self.assertEqual(reply.error, "")
-            self.assertEqual(reply.latest_stream_text, "你好，可以聊聊。")
-            self.assertEqual(
-                reply.decision(),
-                {
-                    "route": "reply",
-                    "reply": "你好，可以聊聊。",
-                    "execution": "read_only",
-                },
-            )
+            await session._handle_event({"type": "agent_end"})
 
-            coalesced = AgentSession(
-                runtime.prepare(
-                    "front", "coalesced", "prompt", root / "coalesced-run"
-                ),
-                "coalesced",
-            )
-            with patch.object(
-                coalesced, "_write_json", new_callable=AsyncMock
-            ) as resend:
-                await coalesced._handle_event(
-                    {
-                        "type": "agent_end",
-                        "messages": [{"role": "assistant", "content": []}],
-                    }
-                )
-                self.assertFalse(coalesced.done)
-                resend.assert_awaited_once()
-            await coalesced._handle_event(
+            self.assertEqual(session.latest_progress, "先确认上下文")
+            self.assertEqual(session.result(), "最终正文")
+
+    async def test_escalate_is_detected_for_all_provider_event_shapes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex = self._session(root / "codex", "codex", "front")
+            pi = self._session(root / "pi", "pi", "front")
+            claude = self._session(root / "claude", "claude", "front")
+
+            await codex._handle_event(
                 {
-                    "type": "agent_end",
-                    "messages": [
-                        {
-                            "role": "assistant",
-                            "content": [{"type": "text", "text": "这是合并后的回复。"}],
+                    "method": "item/started",
+                    "params": {
+                        "item": {
+                            "type": "mcpToolCall",
+                            "tool": "escalate",
                         }
-                    ],
-                }
-            )
-            self.assertEqual(coalesced.error, "")
-            self.assertEqual(coalesced.decision()["reply"], "这是合并后的回复。")
-
-            escalated = AgentSession(
-                runtime.prepare(
-                    "front", "escalated", "prompt", root / "escalated-run"
-                ),
-                "escalated",
-            )
-            await escalated._handle_event(
-                {
-                    "type": "tool_execution_start",
-                    "toolName": "escalate",
-                    "args": {
-                        "execution": "read_only",
-                        "user_message": "我先查一下 test 环境的日志。",
-                        "reason": "需要读取实时日志",
                     },
                 }
             )
-            await escalated._handle_event({"type": "agent_end"})
-            decision = escalated.decision()
-            self.assertEqual(
-                decision,
+            await pi._handle_event(
+                {"type": "tool_execution_start", "toolName": "escalate", "args": {}}
+            )
+            await claude._handle_event(
                 {
-                    "route": "worker",
-                    "reason": "需要读取实时日志",
-                    "execution": "read_only",
-                    "progress": "我先查一下 test 环境的日志。",
-                },
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "mcp__dws-escalate__escalate",
+                                "input": {},
+                            }
+                        ],
+                    },
+                }
             )
 
-    async def test_codex_app_server_accepts_large_jsonl_events(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            script = root / "fake_codex.py"
-            script.write_text(
-                """import json, sys
-for line in sys.stdin:
-    value = json.loads(line)
-    method = value.get('method')
-    if method == 'initialize':
-        print(json.dumps({'id': value['id'], 'result': {'ok': True}}), flush=True)
-    elif method == 'thread/start':
-        print(json.dumps({'id': value['id'], 'result': {'thread': {'id': 'thread-1'}}}), flush=True)
-    elif method == 'turn/start':
-        print(json.dumps({'id': value['id'], 'result': {'turn': {'id': 'turn-1'}}}), flush=True)
-        print(json.dumps({'method': 'item/completed', 'params': {'item': {'type': 'commandExecution', 'aggregatedOutput': 'x' * 70000}}}), flush=True)
-        print(json.dumps({'method': 'item/completed', 'params': {'item': {'type': 'agentMessage', 'phase': 'final_answer', 'text': '{\"action\":\"reply\"}'}}}), flush=True)
-        print(json.dumps({'method': 'turn/completed', 'params': {'turn': {'id': 'turn-1', 'status': 'completed'}}}), flush=True)
-""",
-                encoding="utf-8",
-            )
-            prepared = self._runtime(root, "codex").prepare(
-                "worker", "session", "initial", root / "run"
-            )
-            session = AgentSession(
-                replace(prepared, argv=(sys.executable, str(script))), "session"
-            )
-            try:
-                await session.start()
-                await session.wait(timeout=2)
-                self.assertEqual(session.error, "")
-                self.assertEqual(session.decision()["action"], "reply")
-            finally:
-                await session.close()
-
-    async def test_codex_app_server_sends_local_images_as_multimodal_input(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            image = root / "screenshot.png"
-            image.write_bytes(b"\x89PNG\r\n\x1a\n")
-            script = root / "fake_codex.py"
-            script.write_text(
-                """import json, sys
-for line in sys.stdin:
-    value = json.loads(line)
-    method = value.get('method')
-    if method == 'initialize':
-        print(json.dumps({'id': value['id'], 'result': {'ok': True}}), flush=True)
-    elif method == 'thread/start':
-        print(json.dumps({'id': value['id'], 'result': {'thread': {'id': 'thread-1'}}}), flush=True)
-    elif method == 'turn/start':
-        inputs = value['params']['input']
-        path = next(item['path'] for item in inputs if item['type'] == 'localImage')
-        print(json.dumps({'id': value['id'], 'result': {'turn': {'id': 'turn-1'}}}), flush=True)
-        print(json.dumps({'method': 'item/completed', 'params': {'item': {'type': 'agentMessage', 'phase': 'final_answer', 'text': json.dumps({'action': 'reply', 'image_path': path})}}}), flush=True)
-        print(json.dumps({'method': 'turn/completed', 'params': {'turn': {'id': 'turn-1', 'status': 'completed'}}}), flush=True)
-""",
-                encoding="utf-8",
-            )
-            prepared = self._runtime(root, "codex").prepare(
-                "worker", "session", "describe image", root / "run", [image]
-            )
-            session = AgentSession(
-                replace(prepared, argv=(sys.executable, str(script))), "session"
-            )
-            try:
-                await session.start()
-                await session.wait(timeout=2)
-                self.assertEqual(
-                    session.decision()["image_path"], str(image.resolve())
-                )
-            finally:
-                await session.close()
-
-
-    async def test_pi_rpc_uses_native_streaming_steer_without_a_plugin(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            script = root / "fake_pi.py"
-            script.write_text(
-                """import json, sys
-count = 0
-for line in sys.stdin:
-    value = json.loads(line)
-    if value.get('type') == 'prompt':
-        count += 1
-        print(json.dumps({'id': value['id'], 'type': 'response', 'command': 'prompt', 'success': True}), flush=True)
-        if count == 1:
-            print(json.dumps({'type': 'message_end', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'checking code'}]}}), flush=True)
-        else:
-            print(json.dumps({'type': 'message_end', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': '{\"action\":\"reply\"}'}]}}), flush=True)
-            print(json.dumps({'type': 'agent_end'}), flush=True)
-""",
-                encoding="utf-8",
-            )
-            prepared = self._runtime(root, "pi").prepare(
-                "worker", "session", "initial", root / "run"
-            )
-            prepared = replace(prepared, argv=(sys.executable, str(script)))
-            session = AgentSession(prepared, "session")
-            try:
-                await session.start()
-                await asyncio.sleep(0.05)
-                self.assertTrue(await session.steer("new detail"))
-                await session.wait(timeout=2)
-                self.assertEqual(session.decision()["action"], "reply")
-            finally:
-                await session.close()
-
-    async def test_claude_stream_json_accepts_a_running_followup(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            script = root / "fake_claude.py"
-            script.write_text(
-                """import json, sys
-count = 0
-for line in sys.stdin:
-    value = json.loads(line)
-    if value.get('type') != 'user':
-        continue
-    count += 1
-    if count == 1:
-        print(json.dumps({'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'checking code'}]}}), flush=True)
-    else:
-        print(json.dumps({'type': 'result', 'structured_output': {'action': 'reply'}, 'is_error': False}), flush=True)
-""",
-                encoding="utf-8",
-            )
-            prepared = self._runtime(root, "claude").prepare(
-                "worker", "session", "initial", root / "run"
-            )
-            prepared = replace(prepared, argv=(sys.executable, str(script)))
-            session = AgentSession(prepared, "session")
-            try:
-                await session.start()
-                await asyncio.sleep(0.05)
-                self.assertTrue(await session.steer("new detail"))
-                await session.wait(timeout=2)
-                self.assertEqual(session.decision()["action"], "reply")
-            finally:
-                await session.close()
-
-    async def test_custom_jsonl_cli_can_start_report_progress_steer_and_finish(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            script = root / "fake_custom_agent.py"
-            script.write_text(
-                """import json, sys
-for line in sys.stdin:
-    value = json.loads(line)
-    event_type = value.get('type')
-    if event_type == 'start':
-        print(json.dumps({'id': value['id'], 'type': 'response', 'success': True}), flush=True)
-        print(json.dumps({'type': 'progress', 'text': 'inspecting repository'}), flush=True)
-    elif event_type == 'steer':
-        print(json.dumps({'id': value['id'], 'type': 'response', 'success': True}), flush=True)
-        print(json.dumps({'type': 'result', 'result': {'action': 'reply', 'sessionId': value['sessionId']}}), flush=True)
-        break
-    elif event_type == 'abort':
-        print(json.dumps({'id': value['id'], 'type': 'response', 'success': True}), flush=True)
-""",
-                encoding="utf-8",
-            )
-            runtime = AgentRuntimeTests()._runtime(
-                root,
-                "custom",
-                command=[sys.executable, str(script)],
-                protocol="custom-jsonl-v1",
-            )
-            prepared = runtime.prepare("worker", "custom-session", "initial", root / "run")
-            self.assertEqual(prepared.argv, (sys.executable, str(script)))
-            session = AgentSession(prepared, "custom-session")
-            try:
-                await session.start()
-                await asyncio.sleep(0.05)
-                self.assertEqual(session.latest_progress, "inspecting repository")
-                self.assertTrue(await session.steer("new detail"))
-                await session.wait(timeout=2)
-                self.assertEqual(session.decision()["action"], "reply")
-                self.assertEqual(session.decision()["sessionId"], "custom-session")
-            finally:
-                await session.close()
-
-    async def test_custom_cli_startup_failure_is_reported_without_ack_timeout(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            script = root / "failing_custom_agent.py"
-            script.write_text("raise SystemExit(7)\n", encoding="utf-8")
-            runtime = AgentRuntimeTests()._runtime(
-                root,
-                "custom",
-                command=[sys.executable, str(script)],
-                protocol="custom-jsonl-v1",
-            )
-            session = AgentSession(
-                runtime.prepare("worker", "failed-session", "initial", root / "run"),
-                "failed-session",
-            )
-            try:
-                with self.assertRaisesRegex(RuntimeError, "agent_exit_7"):
-                    await asyncio.wait_for(session.start(), timeout=1)
-            finally:
-                await session.close()
+            self.assertTrue(codex.escalated)
+            self.assertTrue(pi.escalated)
+            self.assertTrue(claude.escalated)
+            self.assertTrue(codex.done)
+            self.assertTrue(pi.done)
+            self.assertTrue(claude.done)
 
 
 class AgentConfigStoreTests(unittest.TestCase):

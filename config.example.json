@@ -31,13 +31,11 @@
       "protocol": "pi-rpc",
       "command": ["pi"],
       "model": "",
-      "reasoning_effort": "off",
+      "reasoning_effort": "low",
       "read_only": true,
       "timeout_seconds": 15,
       "options": {
-        "tools": "escalate",
-        "plain_text": true,
-        "escalate_tool": true
+        "tools": "escalate"
       },
       "extra_args": ["--no-skills", "--no-extensions", "--no-prompt-templates"]
     },
@@ -89,9 +87,7 @@
         "auto_messages": {
           "ack_enabled": true,
           "ack": "已收到消息，正在处理中。",
-          "progress": "{{progress}}",
           "progress_enabled": true,
-          "progress_interval_seconds": 5,
           "max_progress_updates": 60
         },
         "front": {
@@ -102,8 +98,7 @@
         "worker": {
           "label": "执行 Agent",
           "agent": "codex-worker",
-          "prompt": "prompts/worker.md",
-          "schema": "src/dws_dm_agent/schemas/decision.json"
+          "prompt": "prompts/worker.md"
         }
       }
     }

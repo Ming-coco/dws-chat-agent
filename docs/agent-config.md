@@ -35,8 +35,8 @@ Inspect executable paths and version/help output without changing their configur
 | Codex | `["codex"]` | `codex-app-server` | Uses native app-server and `turn/steer` |
 | Claude Code | `["claude"]` | `claude-stream-json` | Uses print mode with streaming JSON |
 | Claude Code Router | `["ccr", "code"]` | `claude-stream-json` | Reuses the Claude protocol; CCR forwards its flags |
-| Pi | `["pi"]` | `pi-rpc` | Uses native RPC; no plugin required |
-| Oh My Pi | `["omp"]` | `pi-rpc` | Uses its native `--mode rpc` |
+| Pi | `["pi"]` | `pi-rpc` | Uses native RPC; a bundled session extension bridges `escalate()` to stdio MCP |
+| Oh My Pi | `["omp"]` | `pi-rpc` | Uses native RPC and the same bundled session extension |
 | Other CLI | exact executable and fixed args | `custom-jsonl-v1` | Implement or use a reviewed thin wrapper following `docs/custom-agent-protocol.md` |
 
 The launcher name and session protocol are independent. Do not implement a new adapter merely because the user invokes an existing protocol through a proxy command.
@@ -73,13 +73,31 @@ For an initial installation, or when the service cannot start, configure reusabl
 }
 ```
 
-The front profile must be `read_only: true`; the worker must be `read_only: false`. Runtime write restrictions apply only to the front stage. The worker's behavior, including the large-change approval requirement, is governed by `prompts/worker.md`.
+The front profile must be `read_only: true`; the worker must be `read_only: false`. Runtime write restrictions apply only to the front stage. The worker receives the original conversation and follows `prompts/worker.md`, the target repository's `AGENTS.md`, and the repository's normal Git/CI review policy. Escalation never grants write permission.
 
-Keep the initial workflow as the supplied `front -> worker` scaffold. Configure messages received during a run with `supplement_strategy: "steer"`; preserve `prompts/supplement.md` so new messages enter the live session instead of becoming detached development requests.
+Every preset requires a worker. The front is optional: keep it for cheap direct replies and routing, or omit the `front` object to send every accepted message directly to the worker. Do not choose Pi, Codex, or Claude by role name alone; choose the launcher that best fits latency, reasoning, tool support, and local authentication.
 
-In the settings page, disable the automatic acknowledgement with `auto_messages.ack_enabled: false` (or clear its text). Disable DingTalk's message AI tag with `dws.ai_tag: false`; both settings apply to subsequent sessions.
+When present, the front has exactly two output outcomes:
+
+- write the final natural-language reply; or
+- call the session-local zero-argument `escalate()` tool before writing any body.
+
+`escalate()` accepts no reason, execution mode, permission, progress text, or context parameters. The service already forwards the complete request, recent conversation, and authorization boundary to the worker. Do not add JSON routing output or another decision schema.
+
+Configure messages received during a run with `supplement_strategy: "steer"`; preserve `prompts/supplement.md` so new messages enter the live session instead of becoming detached development requests.
+
+In the settings page, disable the automatic acknowledgement with `auto_messages.ack_enabled: false` (or clear its text). `auto_messages.progress_enabled` controls whether native thinking is shown, and `max_progress_updates` caps card updates. There is no configurable fixed interval or progress template. Disable DingTalk's message AI tag with `dws.ai_tag: false`; these settings apply to subsequent sessions.
 
 Prompts are ordinary UTF-8 files. Edit them only when the user requests different behavior, and keep chat data inside the marked untrusted sections. The settings page must display the active profiles, launch commands, protocols, models, and prompt templates without displaying environment values. Theme selection and custom colors are browser-local and do not modify the Agent configuration.
+
+The front escalation adapter is session-local and must never be installed into global agent settings:
+
+- Codex receives an isolated per-session `CODEX_HOME` plus command-line MCP configuration.
+- Claude receives a per-session `--mcp-config` with `--strict-mcp-config`.
+- Pi/Oh My Pi receives the bundled extension only on that session; the extension calls the same stdio MCP server.
+- A custom front adapter receives `DWS_ESCALATE_MCP_CONFIG`, `DWS_ESCALATE_PYTHON`, and `DWS_ESCALATE_MCP_SCRIPT`.
+
+The stdio server exposes only `escalate` with an empty object input schema. Do not persist generated MCP files, auth links, or provider caches outside the temporary session directory.
 
 ## 5. Validate before starting
 
@@ -105,7 +123,9 @@ For a first installation, start in `shadow` mode and open `http://127.0.0.1:8765
 - the settings page reports the intended workflow and agent commands
 - all intended contacts, and no others, are monitored
 - active and queued counts are visible
-- recent request text and concrete progress are visible
+- recent request text is visible
+- native thinking appears only when the selected model emits it
+- a final natural-language reply replaces the thinking card
 - expanding a record or prompt remains expanded across refreshes
 
 Only after the user approves live operation may you set `DWS_CHAT_AGENT_MODE=live` and restart. Do not send a synthetic DingTalk message unless the user asks for one.
@@ -120,6 +140,8 @@ Before updating, inspect the current service status, active/queued work, Git sta
 - Re-run the full tests and `doctor` after updating.
 - For code updates, restart only after active and queued counts are both zero, then verify the dashboard and the current workflow on `/settings`. Agent settings saved through the settings page do not require a service restart.
 
+Codex response-stream errors with `willRetry: true` are non-terminal notifications. Do not add an outer retry loop or fail the message immediately; the adapter waits for the final `turn/completed` status. A non-completed turn or a terminated process remains a real failure.
+
 ## Completion report
 
 Report in plain language:
@@ -127,6 +149,7 @@ Report in plain language:
 - whether the service is installed, updated, and/or running
 - `shadow` or `live` mode
 - active front and worker launcher/protocol/model, without credentials
+- whether native thinking is enabled and which provider event is mapped
 - monitored contact display names
 - test and doctor results
 - files changed and the Git commit, if any
