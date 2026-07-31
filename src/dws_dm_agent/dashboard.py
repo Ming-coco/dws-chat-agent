@@ -263,10 +263,11 @@ class AgentConfigStore:
                 "open_dingtalk_id": 512,
             }
             if any(
-                not value
-                or len(value) > limits[key]
+                len(value) > limits[key]
                 or any(ord(char) < 32 for char in value)
                 for key, value in contact.items()
+            ) or not all(
+                contact[key] for key in ("alias", "display_name", "open_dingtalk_id")
             ):
                 raise ValueError("contact fields are missing or invalid")
             contacts.append(contact)
@@ -275,7 +276,7 @@ class AgentConfigStore:
         if len(contacts) > 100:
             raise ValueError("contact whitelist cannot exceed 100 users")
         for key in ("alias", "user_id", "open_dingtalk_id"):
-            values = [item[key] for item in contacts]
+            values = [item[key] for item in contacts if item[key]]
             if len(values) != len(set(values)):
                 raise ValueError(f"duplicate contact {key}")
         return contacts

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import ipaddress
 import json
 import logging
 import os
@@ -22,7 +21,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as fixed_timezone, tzinfo
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 if os.name == "nt":
@@ -69,6 +67,26 @@ _MAX_IMAGES = 4
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
 
+def _event_consume_command(
+    settings: Settings, contact: Contact, *, dry_run: bool = False
+) -> list[str]:
+    command = [
+        str(settings.raw.get("dws", {}).get("binary", "dws")),
+        "event",
+        "consume",
+        "user_im_message_receive_o2o",
+    ]
+    if contact.user_id:
+        command.extend(["--user", contact.user_id])
+    command.extend(["--format", "ndjson", "--ephemeral"])
+    profile = settings.raw.get("dws", {}).get("profile")
+    if profile:
+        command.extend(["--profile", str(profile)])
+    if dry_run:
+        command.append("--dry-run")
+    return command
+
+
 def _image_resources(
     batch: Sequence[IncomingEvent],
 ) -> list[tuple[IncomingEvent, str]]:
@@ -108,7 +126,6 @@ class AgentResult:
     supplements: list[IncomingEvent] | None = None
     consumed_supplements: list[IncomingEvent] | None = None
     error: str = ""
-    workspace_drift: list[str] | None = None
 
 
 def configure_logging(state_dir: Path, verbose: bool = False) -> None:
@@ -145,15 +162,14 @@ class AgentService:
         self.store = AuditStore(settings.state_dir / "audit.sqlite3")
         security = settings.raw.get("security", {})
         self.gate = SecurityGate(
-            max_chars=int(security.get("max_message_chars", 12000)),
-            allowed_execution_domains=security.get("allowed_execution_domains", []),
-            allowed_reference_domains=security.get("allowed_reference_domains", []),
+            max_chars=int(security.get("max_message_chars", 12000))
         )
         self.dws = DwsClient(settings)
         self.queues: dict[str, asyncio.Queue[IncomingEvent]] = {}
         self.workers: dict[str, asyncio.Task[None]] = {}
         self.listeners: list[asyncio.Task[None]] = []
         self.runtime_heartbeat: asyncio.Task[None] | None = None
+        self.history_reconciler: asyncio.Task[None] | None = None
         self.listener_processes: set[asyncio.subprocess.Process] = set()
         self.stop_event = asyncio.Event()
         self.capacity = int(settings.raw.get("max_parallel_conversations", 2))
@@ -167,7 +183,7 @@ class AgentService:
             settings.state_dir / "audit.sqlite3",
             self.runtime_path,
             WEB_DIR / "dashboard.html",
-            {item.user_id: item.display_name for item in settings.contacts},
+            {item.identity: item.display_name for item in settings.contacts},
             settings.timezone,
             config_store=AgentConfigStore(
                 settings.config_path,
@@ -187,14 +203,6 @@ class AgentService:
             ),
             contact_search=self._search_dingtalk_contacts,
         )
-        self.main_repo_roots = tuple(
-            child.resolve()
-            for child in settings.workspace_root.iterdir()
-            if child.is_dir()
-            and (child / ".git").exists()
-            and not _is_beneath(child, settings.worktree_root)
-        )
-
     def close(self) -> None:
         self.dashboard.stop()
         self.runtime_path.unlink(missing_ok=True)
@@ -213,10 +221,14 @@ class AgentService:
         except OSError as exc:
             LOG.error("dashboard failed error=%s", exc)
         await self._recover_pending_events()
+        await self._reconcile_missing_events()
         self.listeners = [
             asyncio.create_task(self._listen_contact(contact), name=f"listen:{contact.alias}")
             for contact in self.settings.contacts
         ]
+        self.history_reconciler = asyncio.create_task(
+            self._reconcile_history_loop(), name="history-reconciler"
+        )
         self.runtime_heartbeat = asyncio.create_task(
             self._keep_runtime_alive(), name="runtime-heartbeat"
         )
@@ -226,10 +238,12 @@ class AgentService:
             task.cancel()
         for task in self.workers.values():
             task.cancel()
+        self.history_reconciler.cancel()
         self.runtime_heartbeat.cancel()
         await asyncio.gather(
             *self.listeners,
             *self.workers.values(),
+            self.history_reconciler,
             self.runtime_heartbeat,
             return_exceptions=True,
         )
@@ -239,7 +253,7 @@ class AgentService:
 
     async def _recover_pending_events(self) -> None:
         async def recover(contact: Contact) -> None:
-            pending = self.store.pending_event_ids(contact.user_id)
+            pending = self.store.pending_event_ids(contact.identity)
             if not pending:
                 return
             try:
@@ -273,6 +287,69 @@ class AgentService:
                 )
 
         await asyncio.gather(*(recover(contact) for contact in self.settings.contacts))
+
+    async def _reconcile_missing_events(
+        self, contacts: Sequence[Contact] | None = None
+    ) -> None:
+        lookback = float(
+            self.settings.raw.get("event_reconcile_lookback_seconds", 7200)
+        )
+        not_before = datetime.now(self.settings.timezone) - timedelta(seconds=lookback)
+
+        async def reconcile(contact: Contact) -> None:
+            try:
+                history = await self.dws.history(contact)
+            except Exception as exc:
+                LOG.warning(
+                    "event history reconciliation failed contact=%s error=%s",
+                    contact.alias,
+                    exc,
+                )
+                return
+            latest_self = max(
+                (
+                    message.created_at
+                    for message in history
+                    if message.sender_open_dingtalk_id == self.settings.self_open_id
+                ),
+                default=not_before,
+            )
+            recover_after = max(not_before, latest_self)
+            recovered = 0
+            for message in history:
+                if (
+                    message.sender_open_dingtalk_id != contact.open_dingtalk_id
+                    or message.created_at <= recover_after
+                ):
+                    continue
+                event = IncomingEvent(
+                    event_id=f"reconcile:{message.message_id}",
+                    message_id=message.message_id,
+                    conversation_id=message.conversation_id,
+                    contact=contact,
+                    content=message.content,
+                    created_at=message.created_at,
+                )
+                if self.store.claim_event(event):
+                    self._enqueue(event)
+                    recovered += 1
+            if recovered:
+                LOG.warning(
+                    "recovered events missed by listener contact=%s count=%d",
+                    contact.alias,
+                    recovered,
+                )
+
+        targets = contacts if contacts is not None else self.settings.contacts
+        await asyncio.gather(*(reconcile(contact) for contact in targets))
+
+    async def _reconcile_history_loop(self) -> None:
+        interval = float(
+            self.settings.raw.get("event_reconcile_interval_seconds", 60)
+        )
+        while not self.stop_event.is_set():
+            await asyncio.sleep(interval)
+            await self._reconcile_missing_events()
 
     async def _keep_runtime_alive(self) -> None:
         while True:
@@ -466,22 +543,12 @@ class AgentService:
         self._write_runtime()
 
     async def _listen_contact(self, contact: Contact) -> None:
+        if not contact.user_id:
+            await self._poll_open_id_contact(contact)
+            return
         delay = 1.0
         while not self.stop_event.is_set():
-            command = [
-                str(self.settings.raw.get("dws", {}).get("binary", "dws")),
-                "event",
-                "consume",
-                "user_im_message_receive_o2o",
-                "--user",
-                contact.user_id,
-                "--format",
-                "ndjson",
-                "--ephemeral",
-            ]
-            profile = self.settings.raw.get("dws", {}).get("profile")
-            if profile:
-                command.extend(["--profile", str(profile)])
+            command = _event_consume_command(self.settings, contact)
             process: asyncio.subprocess.Process | None = None
             stderr_task: asyncio.Task[None] | None = None
             try:
@@ -526,6 +593,21 @@ class AgentService:
             if not self.stop_event.is_set():
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30)
+
+    async def _poll_open_id_contact(self, contact: Contact) -> None:
+        # ponytail: open-id-only contacts poll until DWS event consume accepts
+        # openDingTalkId; replace this with a native subscription when available.
+        interval = float(
+            self.settings.raw.get("open_id_poll_interval_seconds", 5)
+        )
+        LOG.info(
+            "listener ready contact=%s transport=history-poll interval=%ss",
+            contact.alias,
+            interval,
+        )
+        while not self.stop_event.is_set():
+            await asyncio.sleep(interval)
+            await self._reconcile_missing_events((contact,))
 
     async def _drain_listener_stderr(
         self, process: asyncio.subprocess.Process, contact: Contact
@@ -577,7 +659,13 @@ class AgentService:
                         if self.store.event_is_pending(item.message_id)
                     ]
                     if pending:
-                        await self._handle_batch(pending)
+                        await self._set_processing_reactions(pending, active=True)
+                        try:
+                            await self._handle_batch(pending)
+                        finally:
+                            await self._set_processing_reactions(
+                                pending, active=False
+                            )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -607,6 +695,26 @@ class AgentService:
                 self._clear_runtime(conversation_id)
                 for _ in batch:
                     queue.task_done()
+
+    async def _set_processing_reactions(
+        self, batch: Sequence[IncomingEvent], *, active: bool
+    ) -> None:
+        dws = getattr(self, "dws", None)
+        operation = getattr(
+            dws, "add_emoji" if active else "remove_emoji", None
+        )
+        if not callable(operation):
+            return
+        for item in batch:
+            try:
+                await operation(item.conversation_id, item.message_id, "专注")
+            except Exception as exc:
+                LOG.warning(
+                    "processing reaction failed active=%s message=%s error=%s",
+                    active,
+                    sha256_text(item.message_id)[:12],
+                    sanitize_text(str(exc), 300),
+                )
 
     @staticmethod
     def _deduplicate(events: Sequence[IncomingEvent]) -> list[IncomingEvent]:
@@ -741,6 +849,7 @@ class AgentService:
         batch = initial_batch
         prior_attempt = ""
         acknowledgement_sent = False
+        stream_card_id = ""
         front_enabled = True
         front_attempted = not front_enabled
         front_escalated = False
@@ -828,7 +937,61 @@ class AgentService:
                 )
                 return
 
-            workspace_before = await self._workspace_snapshot()
+            if (
+                not acknowledgement_sent
+                and getattr(getattr(self, "dws", None), "streaming_cards", False)
+            ):
+                freshness, _ = await self._freshness_state(batch)
+                if freshness == "manual":
+                    self._record_without_agent(
+                        batch,
+                        status="human_cooldown",
+                        action="no_reply",
+                        handled="发送处理中提示前检测到人工接管",
+                        reason="manual_takeover_before_ack",
+                    )
+                    self.store.update_event_status(
+                        (item.message_id for item in batch),
+                        "skipped",
+                        "human_cooldown",
+                    )
+                    return
+                if freshness == "supplement":
+                    batch = await self._merge_latest(batch)
+                    continue
+                acknowledgement = self.agent_runtime.render_auto_message(
+                    "ack",
+                    {
+                        "request_count": len(batch),
+                        "contact_name": batch[0].contact.display_name,
+                        "contact_alias": batch[0].contact.alias,
+                        "self_name": self.settings.self_name,
+                    },
+                )
+                if acknowledgement:
+                    try:
+                        stream_card_id = await self._start_streaming_card(
+                            batch[0].contact,
+                            batch[0].conversation_id,
+                            acknowledgement,
+                            f"ack-{uuid.uuid4().hex[:12]}",
+                        )
+                    except Exception as exc:
+                        LOG.warning(
+                            "streaming card start failed; falling back to text "
+                            "contact=%s error=%s",
+                            batch[0].contact.alias,
+                            sanitize_text(str(exc), 300),
+                        )
+                        await self._send_supervisor_text(
+                            batch[0].contact,
+                            batch[0].conversation_id,
+                            acknowledgement,
+                            f"ack-{uuid.uuid4().hex[:12]}",
+                        )
+                acknowledgement_sent = True
+                self._set_runtime(batch, "acknowledged", attempt=attempt + 1)
+
             has_images = bool(_image_resources(batch))
             run_sol = front_attempted
             front_started_at: datetime | None = None
@@ -840,6 +1003,7 @@ class AgentService:
                     prior_attempt,
                     front=True,
                     recent_context=recent_context,
+                    stream_card_id=stream_card_id,
                 )
                 if result.consumed_supplements:
                     batch = self._deduplicate([*batch, *result.consumed_supplements])
@@ -878,6 +1042,18 @@ class AgentService:
                     front_escalated = True
                     run_sol = True
             if run_sol:
+                if front_escalated and stream_card_id:
+                    await self._safe_update_streaming_card(
+                        stream_card_id,
+                        sanitize_text(
+                            str(
+                                (result.decision or {}).get("progress")
+                                or "我再确认一下。"
+                            ),
+                            200,
+                        ),
+                        2,
+                    )
                 if not acknowledgement_sent:
                     freshness, _ = await self._freshness_state(batch)
                     if freshness == "manual":
@@ -911,12 +1087,36 @@ class AgentService:
                         },
                     )
                     if acknowledgement:
-                        await self._send_supervisor_text(
-                            batch[0].contact,
-                            batch[0].conversation_id,
-                            acknowledgement,
-                            f"ack-{uuid.uuid4().hex[:12]}",
-                        )
+                        if getattr(
+                            getattr(self, "dws", None), "streaming_cards", False
+                        ):
+                            try:
+                                stream_card_id = await self._start_streaming_card(
+                                    batch[0].contact,
+                                    batch[0].conversation_id,
+                                    acknowledgement,
+                                    f"ack-{uuid.uuid4().hex[:12]}",
+                                )
+                            except Exception as exc:
+                                LOG.warning(
+                                    "streaming card start failed; falling back to text "
+                                    "contact=%s error=%s",
+                                    batch[0].contact.alias,
+                                    sanitize_text(str(exc), 300),
+                                )
+                                await self._send_supervisor_text(
+                                    batch[0].contact,
+                                    batch[0].conversation_id,
+                                    acknowledgement,
+                                    f"ack-{uuid.uuid4().hex[:12]}",
+                                )
+                        else:
+                            await self._send_supervisor_text(
+                                batch[0].contact,
+                                batch[0].conversation_id,
+                                acknowledgement,
+                                f"ack-{uuid.uuid4().hex[:12]}",
+                            )
                     acknowledgement_sent = True
                     self._set_runtime(batch, "acknowledged", attempt=attempt + 1)
                 self._set_runtime(batch, "worker", attempt=attempt + 1)
@@ -928,13 +1128,16 @@ class AgentService:
                     recent_context=recent_context,
                     allow_write=self._write_allowed(execution_mode, follows_plan),
                     execution_mode=execution_mode,
+                    stream_card_id=stream_card_id,
                 )
                 if result.consumed_supplements:
                     batch = self._deduplicate([*batch, *result.consumed_supplements])
                 if front_started_at:
                     result.started_at = front_started_at
-            result.workspace_drift = await self._workspace_drift(workspace_before)
             if result.manual_takeover:
+                await self._safe_update_streaming_card(
+                    stream_card_id, "已停止自动处理，已转人工。", 5
+                )
                 discovered = await self._discover_session_changes(result, [])
                 cancelled_changes = await self._verify_changes(discovered)
                 self._record_agent_result(
@@ -950,7 +1153,6 @@ class AgentService:
                         "external_calls": [],
                         "warnings": [
                             "被中止的 session worktree 如存在需在控制台复核",
-                            *self._workspace_drift_warnings(result.workspace_drift),
                         ],
                     },
                     changes=cancelled_changes,
@@ -973,7 +1175,7 @@ class AgentService:
                         "changes": [],
                         "validation": [],
                         "external_calls": [],
-                        "warnings": self._workspace_drift_warnings(result.workspace_drift),
+                        "warnings": [],
                     },
                     changes=failed_changes,
                 )
@@ -987,6 +1189,9 @@ class AgentService:
                     self._set_runtime(batch, "stabilizing", attempt=attempt + 1)
                     await asyncio.sleep(self.settings.quiet_window)
                     continue
+                await self._safe_update_streaming_card(
+                    stream_card_id, "处理失败，请稍后重试或转人工处理。", 5
+                )
                 self.store.update_event_status(
                     (item.message_id for item in batch), "error", result.error[:200]
                 )
@@ -1002,26 +1207,6 @@ class AgentService:
                 await self._discover_session_changes(result, declared_changes)
             )
             changes = await self._verify_changes(declared_changes)
-            external_warnings = self._external_call_warnings(decision.get("external_calls", []))
-            if external_warnings:
-                decision["warnings"].extend(external_warnings)
-                decision["action"] = "handoff"
-                decision["reply"] = (
-                    "这里碰到了不在白名单里的外部地址，我先停了。"
-                    "这个调用得确认过用途和授权范围后才能继续。"
-                )
-                decision["handled"] = "外部调用证据异常，转人工复核"
-            if result.workspace_drift:
-                decision["warnings"].extend(
-                    self._workspace_drift_warnings(result.workspace_drift)
-                )
-                decision["action"] = "handoff"
-                decision["reply"] = (
-                    "主工作区里出现了不属于这次独立分支的改动，我先没往下做。"
-                    "得先确认这些改动是谁在处理。"
-                )
-                decision["handled"] = "主工作区状态漂移，转人工复核"
-
             if result.supplements:
                 self._record_agent_result(
                     batch,
@@ -1050,6 +1235,9 @@ class AgentService:
                     decision["handled"] = "发现代码状态，转人工复核"
                     decision["warnings"].append("有代码状态时禁止静默 no_reply")
                 else:
+                    await self._safe_update_streaming_card(
+                        stream_card_id, "已处理，本次无需额外回复。", 3
+                    )
                     self._record_agent_result(
                         batch, result, status="no_reply", decision=decision, changes=[]
                     )
@@ -1098,8 +1286,16 @@ class AgentService:
 
             self._set_runtime(batch, "freshness", attempt=attempt + 1)
             try:
-                outcome = await self._send_after_freshness_check(batch, decision, changes)
+                outcome = await self._send_after_freshness_check(
+                    batch,
+                    decision,
+                    changes,
+                    stream_card_id=stream_card_id,
+                )
             except Exception as exc:
+                await self._safe_update_streaming_card(
+                    stream_card_id, "结果发送失败，请稍后重试。", 5
+                )
                 reason = sanitize_text(str(exc), 500) or type(exc).__name__
                 failed_decision = dict(decision)
                 failed_decision["handled"] = (
@@ -1140,6 +1336,10 @@ class AgentService:
                 self._set_runtime(batch, "stabilizing", attempt=attempt + 1)
                 await asyncio.sleep(self.settings.quiet_window)
                 continue
+            if outcome == "human_cooldown":
+                await self._safe_update_streaming_card(
+                    stream_card_id, "已停止自动处理，已转人工。", 5
+                )
             status = outcome
             self._record_agent_result(
                 batch, result, status=status, decision=decision, changes=changes
@@ -1149,6 +1349,9 @@ class AgentService:
             )
             return
 
+        await self._safe_update_streaming_card(
+            stream_card_id, "补充消息过多，本轮已停止自动处理。", 5
+        )
         self._record_without_agent(
             batch,
             status="no_reply",
@@ -1165,7 +1368,9 @@ class AgentService:
         contact_limit = int(limits.get("per_contact_per_hour", 12))
         global_limit = int(limits.get("global_per_hour", 40))
         since = datetime.now(self.settings.timezone) - timedelta(hours=1)
-        contact_count, global_count = self.store.agent_run_counts_since(since, contact.user_id)
+        contact_count, global_count = self.store.agent_run_counts_since(
+            since, contact.identity
+        )
         return contact_count >= contact_limit or global_count >= global_limit
 
     async def _merge_latest(self, batch: list[IncomingEvent]) -> list[IncomingEvent]:
@@ -1260,7 +1465,7 @@ class AgentService:
     ) -> dict[str, Any] | None:
         if not value or value.get("route") != "reply":
             return None
-        action = str(value.get("action") or "")
+        action = str(value.get("action") or "reply")
         reply = str(value.get("reply") or "")
         if action not in {"reply", "no_reply"} or (
             action == "reply" and not reply.strip()
@@ -1271,8 +1476,8 @@ class AgentService:
                 "action": action,
                 "delivery": "none",
                 "reply": reply,
-                "handled": value.get("handled", ""),
-                "reason": value.get("reason", ""),
+                "handled": value.get("handled", "快速前台直接回复"),
+                "reason": value.get("reason", "无需执行工具或外部操作"),
                 "changes": [],
                 "validation": value.get("validation", []),
                 "external_calls": [],
@@ -1340,7 +1545,6 @@ class AgentService:
                 "这是连续对话的只读分析阶段。结合最近上下文回答原问题；禁止修改文件、"
                 "创建 worktree、commit、push、合并或发布，changes 必须为 []。"
             )
-        security = self.settings.raw.get("security", {})
         return {
             "self_name": self.settings.self_name,
             "agent_name": self.agent_runtime.profile_name(stage),
@@ -1348,6 +1552,7 @@ class AgentService:
             "contact_name": contact.display_name,
             "contact_alias": contact.alias,
             "contact_user_id": contact.user_id,
+            "contact_open_dingtalk_id": contact.open_dingtalk_id,
             "session_id": session_id,
             "prior_attempt": prior_attempt or "无",
             "workspace_root": self.settings.workspace_root,
@@ -1357,12 +1562,6 @@ class AgentService:
             ),
             "current_messages_json": json.dumps(
                 messages, ensure_ascii=False, indent=2
-            ),
-            "execution_domains_json": json.dumps(
-                security.get("allowed_execution_domains", []), ensure_ascii=False
-            ),
-            "reference_domains_json": json.dumps(
-                security.get("allowed_reference_domains", []), ensure_ascii=False
             ),
             "execution_mode": execution_mode,
             "execution_rule": execution_rule,
@@ -1379,6 +1578,7 @@ class AgentService:
         recent_context: Sequence[Mapping[str, str]] = (),
         allow_write: bool = True,
         execution_mode: str = "small_change",
+        stream_card_id: str = "",
     ) -> AgentResult:
         stage = "front" if front else "worker"
         profile = re.sub(
@@ -1433,15 +1633,30 @@ class AgentService:
             interval = float(self.settings.raw.get("monitor_interval_seconds", 5))
             timeout = session.prepared.timeout_seconds
             progress_interval = (
+                (
+                    0.5
+                    if stream_card_id
+                    else self.agent_runtime.progress_interval_seconds
+                )
+                if not front and self.agent_runtime.progress_enabled
+                else 0.0
+            )
+            heartbeat_interval = (
                 self.agent_runtime.progress_interval_seconds
                 if not front and self.agent_runtime.progress_enabled
                 else 0.0
             )
+            stream_interval = 0.4 if front and stream_card_id else 0.0
             max_progress_updates = self.agent_runtime.max_progress_updates
-            deadline = asyncio.get_running_loop().time() + timeout
-            next_progress_at = asyncio.get_running_loop().time() + progress_interval
+            now_monotonic = asyncio.get_running_loop().time()
+            deadline = now_monotonic + timeout
+            next_history_at = now_monotonic + interval
+            next_progress_at = now_monotonic
+            next_heartbeat_at = now_monotonic + heartbeat_interval
+            next_stream_at = now_monotonic + stream_interval
             progress_updates = 0
             last_progress = ""
+            last_stream_text = ""
             known_ids = {item.message_id for item in batch}
             earliest = min(item.created_at for item in batch)
             while not session.done:
@@ -1460,12 +1675,104 @@ class AgentService:
                         ),
                         error="agent_timeout",
                     )
+                wake_at = next_history_at
+                if (
+                    stream_interval > 0
+                    and session.latest_stream_text != last_stream_text
+                ):
+                    wake_at = min(wake_at, next_stream_at)
+                if (
+                    progress_interval > 0
+                    and session.latest_progress != last_progress
+                ):
+                    wake_at = min(wake_at, next_progress_at)
+                if (
+                    heartbeat_interval > 0
+                    and getattr(session, "has_active_operation", False)
+                ):
+                    wake_at = min(wake_at, next_heartbeat_at)
                 try:
-                    await session.wait(timeout=min(interval, remaining))
+                    await session.wait_for_update(
+                        timeout=min(
+                            max(0.0, wake_at - asyncio.get_running_loop().time()),
+                            remaining,
+                        )
+                    )
                 except TimeoutError:
                     pass
                 if session.done:
                     break
+                now_monotonic = asyncio.get_running_loop().time()
+                heartbeat_due = (
+                    heartbeat_interval > 0
+                    and getattr(session, "has_active_operation", False)
+                    and now_monotonic >= next_heartbeat_at
+                )
+                if stream_interval > 0 and now_monotonic >= next_stream_at:
+                    stream_text = sanitize_text(
+                        session.latest_stream_text, 8000
+                    ).strip()
+                    if stream_text and stream_text != last_stream_text:
+                        try:
+                            await self.dws.update_card(
+                                stream_card_id, stream_text, 2
+                            )
+                            last_stream_text = stream_text
+                        except Exception as exc:
+                            LOG.warning(
+                                "front stream update failed session=%s error=%s",
+                                session_id,
+                                exc,
+                            )
+                    next_stream_at = now_monotonic + stream_interval
+                if (
+                    progress_interval > 0
+                    and progress_updates < max_progress_updates
+                    and (now_monotonic >= next_progress_at or heartbeat_due)
+                ):
+                    progress = (
+                        session.progress_heartbeat()
+                        if heartbeat_due
+                        else session.latest_progress
+                    )
+                    if progress and progress != last_progress:
+                        progress_text = self.agent_runtime.render_auto_message(
+                            "progress",
+                            {
+                                "progress": progress,
+                                "request_count": len(batch) + len(consumed),
+                                "contact_name": batch[0].contact.display_name,
+                                "contact_alias": batch[0].contact.alias,
+                                "self_name": self.settings.self_name,
+                            },
+                        )
+                        if progress_text:
+                            try:
+                                if stream_card_id:
+                                    await self.dws.update_card(
+                                        stream_card_id, progress_text, 2
+                                    )
+                                else:
+                                    await self._send_supervisor_text(
+                                        batch[0].contact,
+                                        batch[0].conversation_id,
+                                        progress_text,
+                                        f"{session_id}:progress:{progress_updates + 1}",
+                                    )
+                                progress_updates += 1
+                                last_progress = progress
+                            except Exception as exc:
+                                LOG.warning(
+                                    "progress update failed session=%s error=%s",
+                                    session_id,
+                                    exc,
+                                )
+                    next_progress_at = now_monotonic + progress_interval
+                if heartbeat_due:
+                    next_heartbeat_at = now_monotonic + heartbeat_interval
+                if now_monotonic < next_history_at:
+                    continue
+                next_history_at = now_monotonic + interval
                 try:
                     history = await self.dws.history(batch[0].contact)
                 except Exception as exc:
@@ -1549,41 +1856,6 @@ class AgentService:
                             ),
                             error="supplement_restart",
                         )
-                now_monotonic = asyncio.get_running_loop().time()
-                if (
-                    progress_interval > 0
-                    and progress_updates < max_progress_updates
-                    and now_monotonic >= next_progress_at
-                ):
-                    progress = session.latest_progress
-                    if progress and progress != last_progress:
-                        progress_text = self.agent_runtime.render_auto_message(
-                            "progress",
-                            {
-                                "progress": progress,
-                                "request_count": len(batch) + len(consumed),
-                                "contact_name": batch[0].contact.display_name,
-                                "contact_alias": batch[0].contact.alias,
-                                "self_name": self.settings.self_name,
-                            },
-                        )
-                        if progress_text:
-                            try:
-                                await self._send_supervisor_text(
-                                    batch[0].contact,
-                                    batch[0].conversation_id,
-                                    progress_text,
-                                    f"{session_id}:progress:{progress_updates + 1}",
-                                )
-                                progress_updates += 1
-                                last_progress = progress
-                            except Exception as exc:
-                                LOG.warning(
-                                    "progress update failed session=%s error=%s",
-                                    session_id,
-                                    exc,
-                                )
-                    next_progress_at = now_monotonic + progress_interval
             if session.error:
                 return AgentResult(
                     session_id,
@@ -1650,33 +1922,6 @@ class AgentService:
             downloaded.replace(image)
             images.append(image)
         return tuple(images)
-
-    async def _workspace_snapshot(self) -> dict[str, str]:
-        async def signature(root: Path) -> tuple[str, str]:
-            head_code, head = await self._run_git(root, "rev-parse", "HEAD")
-            status_code, status = await self._run_git(
-                root, "status", "--porcelain=v1", "--untracked-files=normal"
-            )
-            if head_code != 0 or status_code != 0:
-                return str(root), "unavailable"
-            return str(root), sha256_text(f"{head}\0{status}")
-
-        pairs = await asyncio.gather(*(signature(root) for root in self.main_repo_roots))
-        return dict(pairs)
-
-    async def _workspace_drift(self, before: Mapping[str, str]) -> list[str]:
-        after = await self._workspace_snapshot()
-        return sorted(
-            Path(path).name
-            for path, signature in before.items()
-            if after.get(path) != signature
-        )
-
-    @staticmethod
-    def _workspace_drift_warnings(repositories: Sequence[str] | None) -> list[str]:
-        if not repositories:
-            return []
-        return [f"主检出目录状态发生变化：{', '.join(repositories)}"]
 
     async def _discover_session_changes(
         self,
@@ -1769,35 +2014,6 @@ class AgentService:
                 files.append(path.strip('"'))
         return sorted(set(files))
 
-    @staticmethod
-    def _domain_allowed(host: str, domains: Sequence[str]) -> bool:
-        host = host.lower().rstrip(".")
-        try:
-            address = ipaddress.ip_address(host)
-            return address.is_private or address.is_loopback
-        except ValueError:
-            pass
-        return any(host == domain or host.endswith(f".{domain}") for domain in domains)
-
-    def _external_call_warnings(self, calls: Sequence[str]) -> list[str]:
-        security = self.settings.raw.get("security", {})
-        execution_domains = [str(x).lower() for x in security.get("allowed_execution_domains", [])]
-        reference_domains = [str(x).lower() for x in security.get("allowed_reference_domains", [])]
-        warnings: list[str] = []
-        for call in calls:
-            urls = re.findall(r"https?://[^\s<>\]\[\"']+", str(call), re.IGNORECASE)
-            for raw_url in urls:
-                host = (urlparse(raw_url).hostname or "").lower()
-                if self._domain_allowed(host, execution_domains):
-                    continue
-                read_only = bool(
-                    re.search(r"(?:\bGET\b|read|fetch|docs?|查询|读取|查看)", str(call), re.IGNORECASE)
-                )
-                if read_only and self._domain_allowed(host, reference_domains):
-                    continue
-                warnings.append(f"未授权外部调用：{host or '未知主机'}")
-        return warnings
-
     async def _run_git(self, worktree: Path, *arguments: str) -> tuple[int, str]:
         process = await asyncio.create_subprocess_exec(
             "git",
@@ -1835,7 +2051,6 @@ class AgentService:
                 continue
             worktree = Path(worktree_text).resolve()
             if not _is_beneath(worktree, self.settings.worktree_root):
-                # Main-checkout mutations are handled separately by workspace_drift.
                 # Existing tags and release inputs are not changes made by this session.
                 continue
             root_code, root_text = await self._run_git(worktree, "rev-parse", "--show-toplevel")
@@ -1952,7 +2167,7 @@ class AgentService:
             send_uuid,
             None,
             conversation_id,
-            contact.user_id,
+            contact.identity,
             sent_at,
             content,
             session_id,
@@ -1971,7 +2186,7 @@ class AgentService:
                     send_uuid,
                     message_id,
                     conversation_id,
-                    contact.user_id,
+                    contact.identity,
                     sent_at,
                     content,
                     session_id,
@@ -1979,11 +2194,62 @@ class AgentService:
             except Exception:
                 LOG.exception("outgoing message-id update failed session=%s", session_id)
 
+    async def _start_streaming_card(
+        self,
+        contact: Contact,
+        conversation_id: str,
+        content: str,
+        session_id: str,
+    ) -> str:
+        if self.mode == "shadow":
+            LOG.info(
+                "shadow streaming card contact=%s chars=%d",
+                contact.alias,
+                len(content),
+            )
+            return ""
+        sent_at = datetime.now(self.settings.timezone)
+        send_uuid = str(uuid.uuid4())
+        biz_id, message_id, _ = await self.dws.send_card(contact)
+        self.store.record_outgoing(
+            send_uuid,
+            message_id,
+            conversation_id,
+            contact.identity,
+            sent_at,
+            content,
+            session_id,
+        )
+        try:
+            await self.dws.update_card(biz_id, content, 2)
+        except Exception:
+            await self._safe_update_streaming_card(
+                biz_id, "卡片初始化失败，请等待普通文本回复。", 5
+            )
+            raise
+        return biz_id
+
+    async def _safe_update_streaming_card(
+        self, biz_id: str, content: str, flow_status: int
+    ) -> None:
+        if not biz_id or getattr(self, "mode", "live") == "shadow":
+            return
+        try:
+            await self.dws.update_card(biz_id, content, flow_status)
+        except Exception as exc:
+            LOG.warning(
+                "streaming card update failed status=%d error=%s",
+                flow_status,
+                sanitize_text(str(exc), 300),
+            )
+
     async def _send_after_freshness_check(
         self,
         batch: Sequence[IncomingEvent],
         decision: Mapping[str, Any],
         changes: Sequence[ChangeEvidence],
+        *,
+        stream_card_id: str = "",
     ) -> str:
         state, _ = await self._freshness_state(batch)
         if state == "manual":
@@ -2033,7 +2299,7 @@ class AgentService:
                     file_uuid,
                     None,
                     batch[0].conversation_id,
-                    batch[0].contact.user_id,
+                    batch[0].contact.identity,
                     file_sent_at,
                     attachment_path.name,
                     session_id,
@@ -2052,7 +2318,7 @@ class AgentService:
                             file_uuid,
                             file_message_id,
                             batch[0].conversation_id,
-                            batch[0].contact.user_id,
+                            batch[0].contact.identity,
                             file_sent_at,
                             attachment_path.name,
                             session_id,
@@ -2067,13 +2333,31 @@ class AgentService:
                 state, _ = await self._freshness_state(batch)
                 if state != "fresh":
                     return "human_cooldown" if state == "manual" else "supplement"
-            await self._send_supervisor_text(
-                batch[0].contact,
-                batch[0].conversation_id,
-                content,
-                session_id,
-                retry_network=True,
-            )
+            if stream_card_id:
+                try:
+                    await self.dws.update_card(stream_card_id, content, 3)
+                except Exception as exc:
+                    LOG.warning(
+                        "streaming card final update failed; falling back to text "
+                        "session=%s error=%s",
+                        session_id,
+                        sanitize_text(str(exc), 300),
+                    )
+                    await self._send_supervisor_text(
+                        batch[0].contact,
+                        batch[0].conversation_id,
+                        content,
+                        session_id,
+                        retry_network=True,
+                    )
+            else:
+                await self._send_supervisor_text(
+                    batch[0].contact,
+                    batch[0].conversation_id,
+                    content,
+                    session_id,
+                    retry_network=True,
+                )
         finally:
             if attachment_path:
                 attachment_path.unlink(missing_ok=True)
@@ -2084,7 +2368,7 @@ class AgentService:
 def _validate_configuration(settings: Settings) -> list[str]:
     errors: list[str] = []
     aliases = [item.alias for item in settings.contacts]
-    user_ids = [item.user_id for item in settings.contacts]
+    user_ids = [item.user_id for item in settings.contacts if item.user_id]
     open_ids = [item.open_dingtalk_id for item in settings.contacts]
     if not settings.contacts:
         errors.append("contacts must not be empty")
@@ -2125,17 +2409,7 @@ async def _doctor(settings: Settings) -> int:
         checks.append((binary_name, bool(resolved), resolved or "not found"))
     if not errors and shutil.which(str(settings.raw.get("dws", {}).get("binary", "dws"))):
         contact = settings.contacts[0]
-        command = [
-            str(settings.raw.get("dws", {}).get("binary", "dws")),
-            "event",
-            "consume",
-            "user_im_message_receive_o2o",
-            "--user",
-            contact.user_id,
-            "--format",
-            "ndjson",
-            "--dry-run",
-        ]
+        command = _event_consume_command(settings, contact, dry_run=True)
         process = await asyncio.create_subprocess_exec(
             *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
@@ -2221,9 +2495,7 @@ async def async_main(arguments: argparse.Namespace) -> int:
     if arguments.command == "probe-gate":
         security = settings.raw.get("security", {})
         gate = SecurityGate(
-            int(security.get("max_message_chars", 12000)),
-            security.get("allowed_execution_domains", []),
-            security.get("allowed_reference_domains", []),
+            int(security.get("max_message_chars", 12000))
         )
         result: GateResult = gate.inspect([arguments.text])
         print(json.dumps(result.__dict__, ensure_ascii=False))

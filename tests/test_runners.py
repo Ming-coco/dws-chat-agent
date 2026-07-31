@@ -9,9 +9,11 @@ import unittest
 from dataclasses import replace
 from datetime import timezone
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from dws_dm_agent.front_eval import load_cases, matches_expected
 from dws_dm_agent.runners.runtime import AgentRuntime, AgentSession
 from dws_dm_agent.dashboard import (
     AgentConfigStore,
@@ -201,6 +203,13 @@ class AgentRuntimeTests(unittest.TestCase):
             self.assertNotIn("read,grep,find,ls", pi_worker.argv)
             self.assertFalse(any(value.startswith("@") for value in pi_worker.argv))
 
+            raw = json.loads((root / "pi" / "config.json").read_text(encoding="utf-8"))
+            raw["agents"]["front-agent"]["options"]["tools"] = ""
+            pi = AgentRuntime.from_config(raw, root / "pi" / "config.json", root / "pi")
+            pi_front = pi.prepare("front", "front-fast", "prompt", root / "pf-fast")
+            self.assertIn("--no-tools", pi_front.argv)
+            self.assertNotIn("read,grep,find,ls", pi_front.argv)
+
     def test_launcher_command_is_independent_from_the_session_protocol(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -304,6 +313,28 @@ class AgentRuntimeTests(unittest.TestCase):
                 self._runtime(root, "codex", worker_read_only=True)
 
 
+class FrontRoutingEvalTests(unittest.TestCase):
+    def test_historical_cases_have_valid_expectations(self) -> None:
+        cases = load_cases(
+            Path(__file__).parents[1] / "evals" / "front-routing.json"
+        )
+
+        self.assertEqual(len(cases), 12)
+        self.assertEqual(len({case["name"] for case in cases}), len(cases))
+        self.assertTrue(
+            matches_expected(
+                {"route": "worker", "execution": "read_only", "progress": "我先查一下。"},
+                cases[4],
+            )
+        )
+        self.assertFalse(
+            matches_expected(
+                {"route": "reply", "reply": "不用查。", "execution": "read_only"},
+                cases[4],
+            )
+        )
+
+
 class AgentSessionProtocolTests(unittest.IsolatedAsyncioTestCase):
     def _runtime(self, root: Path, driver: str) -> AgentRuntime:
         return AgentRuntimeTests()._runtime(root, driver)
@@ -323,7 +354,11 @@ for line in sys.stdin:
         print(json.dumps({'id': value['id'], 'result': {'thread': {'id': 'thread-1'}}}), flush=True)
     elif method == 'turn/start':
         print(json.dumps({'id': value['id'], 'result': {'turn': {'id': 'turn-1'}}}), flush=True)
-        print(json.dumps({'method': 'item/completed', 'params': {'item': {'type': 'agentMessage', 'phase': 'commentary', 'text': 'checking code'}}}), flush=True)
+        print(json.dumps({'method': 'item/started', 'params': {'item': {'id': 'comment-1', 'type': 'agentMessage', 'phase': 'commentary'}}}), flush=True)
+        print(json.dumps({'method': 'item/agentMessage/delta', 'params': {'itemId': 'comment-1', 'delta': '正在检查代码'}}), flush=True)
+        print(json.dumps({'method': 'item/started', 'params': {'item': {'id': 'comment-2', 'type': 'agentMessage', 'phase': 'commentary'}}}), flush=True)
+        print(json.dumps({'method': 'item/agentMessage/delta', 'params': {'itemId': 'comment-2', 'delta': '{\"action\":\"reply\",\"reply\":\"内部结构化结果\"}'}}), flush=True)
+        print(json.dumps({'method': 'item/reasoning/summaryTextDelta', 'params': {'itemId': 'reason-1', 'delta': '**Correcting commentary format**'}}), flush=True)
     elif method == 'turn/steer':
         print(json.dumps({'id': value['id'], 'result': {'turnId': 'turn-1'}}), flush=True)
         print(json.dumps({'method': 'item/completed', 'params': {'item': {'type': 'agentMessage', 'phase': 'final_answer', 'text': '{\"action\":\"reply\"}'}}}), flush=True)
@@ -338,13 +373,168 @@ for line in sys.stdin:
             session = AgentSession(prepared, "session")
             try:
                 await session.start()
-                await asyncio.sleep(0.05)
-                self.assertEqual(session.latest_progress, "checking code")
+                await session.wait_for_update(timeout=2)
+                self.assertEqual(session.latest_progress, "正在检查代码")
                 self.assertTrue(await session.steer("new detail"))
                 await session.wait(timeout=2)
                 self.assertEqual(session.decision()["action"], "reply")
             finally:
                 await session.close()
+
+    async def test_codex_tool_events_emit_safe_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = AgentSession(
+                self._runtime(root, "codex").prepare(
+                    "worker", "session", "prompt", root / "run"
+                ),
+                "session",
+            )
+
+            await session._handle_event(
+                {
+                    "method": "item/started",
+                    "params": {
+                        "item": {
+                            "id": "exec-1",
+                            "type": "commandExecution",
+                            "command": "print-secret-token",
+                        }
+                    },
+                }
+            )
+            self.assertEqual(session.latest_progress, "正在执行本地检查。")
+            self.assertNotIn("secret", session.latest_progress)
+
+            await session._handle_event(
+                {
+                    "method": "item/started",
+                    "params": {
+                        "item": {
+                            "id": "mcp-1",
+                            "type": "mcpToolCall",
+                            "server": "grafana-prod-logging",
+                            "tool": "query_loki_logs",
+                        }
+                    },
+                }
+            )
+            self.assertEqual(session.latest_progress, "正在查询日志。")
+
+            await session._handle_event(
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "item": {
+                            "id": "mcp-1",
+                            "type": "mcpToolCall",
+                            "server": "grafana-prod-logging",
+                            "tool": "query_loki_logs",
+                        }
+                    },
+                }
+            )
+            self.assertEqual(session.latest_progress, "日志查询已返回，正在整理结果。")
+
+    async def test_pi_plain_text_stream_and_escalate_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = self._runtime(root, "pi")
+            raw = json.loads((root / "config.json").read_text(encoding="utf-8"))
+            raw["agents"]["front-agent"]["options"].update(
+                {
+                    "tools": "escalate",
+                    "plain_text": True,
+                    "escalate_tool": True,
+                }
+            )
+            raw["workflows"]["presets"]["dm-default"]["front"].pop("schema")
+            runtime = AgentRuntime.from_config(raw, root / "config.json", root)
+
+            reply = AgentSession(
+                runtime.prepare("front", "reply", "prompt", root / "reply-run"),
+                "reply",
+            )
+            await reply._handle_event(
+                {
+                    "type": "message_update",
+                    "assistantMessageEvent": {
+                        "type": "text_delta",
+                        "delta": "你好，可以聊聊。",
+                    },
+                }
+            )
+            await reply._handle_event({"type": "agent_end"})
+            self.assertEqual(reply.error, "")
+            self.assertEqual(reply.latest_stream_text, "你好，可以聊聊。")
+            self.assertEqual(
+                reply.decision(),
+                {
+                    "route": "reply",
+                    "reply": "你好，可以聊聊。",
+                    "execution": "read_only",
+                },
+            )
+
+            coalesced = AgentSession(
+                runtime.prepare(
+                    "front", "coalesced", "prompt", root / "coalesced-run"
+                ),
+                "coalesced",
+            )
+            with patch.object(
+                coalesced, "_write_json", new_callable=AsyncMock
+            ) as resend:
+                await coalesced._handle_event(
+                    {
+                        "type": "agent_end",
+                        "messages": [{"role": "assistant", "content": []}],
+                    }
+                )
+                self.assertFalse(coalesced.done)
+                resend.assert_awaited_once()
+            await coalesced._handle_event(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "这是合并后的回复。"}],
+                        }
+                    ],
+                }
+            )
+            self.assertEqual(coalesced.error, "")
+            self.assertEqual(coalesced.decision()["reply"], "这是合并后的回复。")
+
+            escalated = AgentSession(
+                runtime.prepare(
+                    "front", "escalated", "prompt", root / "escalated-run"
+                ),
+                "escalated",
+            )
+            await escalated._handle_event(
+                {
+                    "type": "tool_execution_start",
+                    "toolName": "escalate",
+                    "args": {
+                        "execution": "read_only",
+                        "user_message": "我先查一下 test 环境的日志。",
+                        "reason": "需要读取实时日志",
+                    },
+                }
+            )
+            await escalated._handle_event({"type": "agent_end"})
+            decision = escalated.decision()
+            self.assertEqual(
+                decision,
+                {
+                    "route": "worker",
+                    "reason": "需要读取实时日志",
+                    "execution": "read_only",
+                    "progress": "我先查一下 test 环境的日志。",
+                },
+            )
 
     async def test_codex_app_server_accepts_large_jsonl_events(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

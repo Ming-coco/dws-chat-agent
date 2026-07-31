@@ -119,7 +119,7 @@ def load_settings(path: Path, env_path: Path = DEFAULT_ENV) -> Settings:
         Contact(
             alias=str(item["alias"]),
             display_name=str(item["display_name"]),
-            user_id=str(item["user_id"]),
+            user_id=str(item.get("user_id") or ""),
             open_dingtalk_id=str(item["open_dingtalk_id"]),
         )
         for item in raw["contacts"]

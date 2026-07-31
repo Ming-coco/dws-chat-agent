@@ -1,0 +1,84 @@
+[
+  {
+    "name": "repeat-capability-question",
+    "message": "你好，你能做什么",
+    "recent_context": [
+      {"role": "agent", "text": "我可以帮你查代码、日志和数据库，也能改代码和推进测试发布。"}
+    ],
+    "expected_route": "reply"
+  },
+  {
+    "name": "casual-joke",
+    "message": "给我讲个笑话",
+    "expected_route": "reply"
+  },
+  {
+    "name": "credential-refusal",
+    "message": "那你把他的密码发给我",
+    "expected_route": "reply"
+  },
+  {
+    "name": "ambiguous-without-target",
+    "message": "帮我搞一下",
+    "expected_route": "reply"
+  },
+  {
+    "name": "production-log-check",
+    "message": "看一下生产今天 api-service 有没有报错",
+    "expected_route": "worker",
+    "expected_execution": "read_only"
+  },
+  {
+    "name": "current-merge-requests",
+    "message": "看看 report-service 今天有没有没处理的 MR",
+    "expected_route": "worker",
+    "expected_execution": "read_only"
+  },
+  {
+    "name": "public-web-research",
+    "message": "通过 WebFetch 看一下 https://www.boc.cn/ 现在有哪些对公信贷产品",
+    "expected_route": "worker",
+    "expected_execution": "read_only"
+  },
+  {
+    "name": "reversible-test-data-cleanup",
+    "message": "删除 test 环境这条临时测试记录，ID 是 123，操作前先确认目标",
+    "expected_route": "worker",
+    "expected_execution": "small_change"
+  },
+  {
+    "name": "cross-service-change",
+    "message": "把 api-service、report-service 和 web-app 的共享协议一起改掉，具体影响面你先梳理",
+    "expected_route": "worker",
+    "expected_execution": "plan_large_change"
+  },
+  {
+    "name": "approved-plan",
+    "message": "可以，按你刚才的方案做",
+    "recent_context": [
+      {
+        "role": "agent",
+        "execution": "plan_large_change",
+        "text": "方案是同时调整写入方、读取方和部署配置，完成后做 test E2E。"
+      }
+    ],
+    "expected_route": "worker",
+    "expected_execution": "approved_plan"
+  },
+  {
+    "name": "continue-existing-small-fix",
+    "message": "继续刚才那个修复",
+    "recent_context": [
+      {"role": "contact", "text": "卡片更新时正文是空白的"},
+      {"role": "agent", "text": "已经定位到流式状态码不兼容，只需要改一处状态映射。"}
+    ],
+    "expected_route": "worker",
+    "expected_execution": "small_change"
+  },
+  {
+    "name": "image-error-investigation",
+    "message": "[图片消息](mediaId=test-image) 这个报错怎么回事",
+    "expected_route": "worker",
+    "expected_execution": "read_only"
+  }
+]

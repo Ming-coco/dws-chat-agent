@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
 import re
 import sqlite3
@@ -9,7 +8,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
-from urllib.parse import urlparse
 
 
 @dataclass(frozen=True)
@@ -18,6 +16,11 @@ class Contact:
     display_name: str
     user_id: str
     open_dingtalk_id: str
+
+    @property
+    def identity(self) -> str:
+        """Stable local key when DingTalk does not expose a userId."""
+        return self.user_id or self.open_dingtalk_id
 
 
 @dataclass(frozen=True)
@@ -196,7 +199,7 @@ def parse_dws_event(line: str, contact: Contact, timezone: tzinfo) -> IncomingEv
     )
     conversation_id = str(
         _deep_value(payload, {"conversation_id", "conversationId", "openConversationId"})
-        or f"dm:{contact.user_id}"
+        or f"dm:{contact.identity}"
     )
     event_id = str(_deep_value(outer, {"event_id", "eventId", "id"}) or "")
     if not message_id:
@@ -219,67 +222,11 @@ _ACK_TEXT = re.compile(
     re.IGNORECASE,
 )
 _ONLY_REACTION = re.compile(r"^(?:\[[^\]\n]{1,16}\]|[\W_]){1,8}$", re.UNICODE)
-_URL = re.compile(r"https?://[^\s<>\]\[\"']+", re.IGNORECASE)
-
-
 class SecurityGate:
-    """Deterministic, zero-token gate. Uncertain business requests pass to the agent."""
+    """Zero-token noise and size gate. Semantic decisions belong to the agent."""
 
-    def __init__(
-        self,
-        max_chars: int,
-        allowed_execution_domains: Sequence[str],
-        allowed_reference_domains: Sequence[str],
-    ) -> None:
+    def __init__(self, max_chars: int) -> None:
         self.max_chars = max_chars
-        self.allowed_execution_domains = tuple(x.lower().lstrip(".") for x in allowed_execution_domains)
-        self.allowed_reference_domains = tuple(x.lower().lstrip(".") for x in allowed_reference_domains)
-        self._hard_patterns: list[tuple[str, re.Pattern[str]]] = [
-            (
-                "prompt_injection",
-                re.compile(
-                    r"(?:忽略|绕过|覆盖|无视).{0,30}(?:系统|上文|之前|安全|规则|指令|prompt|提示词)",
-                    re.IGNORECASE | re.DOTALL,
-                ),
-            ),
-            (
-                "credential_exfiltration",
-                re.compile(
-                    r"(?:读取|窃取|导出|上传|发给|贴出|泄露|回传).{0,50}(?:\.ssh|私钥|助记词|密码|口令|token|cookie|credential|keychain|环境变量|密钥|凭据)",
-                    re.IGNORECASE | re.DOTALL,
-                ),
-            ),
-            (
-                "destructive_command",
-                re.compile(
-                    r"(?:rm\s+-rf\s+(?:/|~|\$HOME)|git\s+(?:push\s+--force|reset\s+--hard)|DROP\s+(?:DATABASE|SCHEMA)|TRUNCATE\s+TABLE|mkfs\b|dd\s+if=|:\(\)\s*\{\s*:\|:&\s*\};:|curl\b[^\n|]{0,300}\|\s*(?:sh|bash))",
-                    re.IGNORECASE,
-                ),
-            ),
-            (
-                "offensive_intrusion",
-                re.compile(
-                    r"(?:帮我|替我|直接|执行|写个|生成).{0,30}(?:入侵|提权|绕过鉴权|爆破密码|盗取数据|植入后门|反弹\s*shell|勒索|木马)",
-                    re.IGNORECASE | re.DOTALL,
-                ),
-            ),
-            (
-                "metadata_exfiltration",
-                re.compile(r"169\.254\.169\.254|metadata\.google\.internal", re.IGNORECASE),
-            ),
-        ]
-
-    @staticmethod
-    def _host_allowed(host: str, domains: Sequence[str]) -> bool:
-        host = host.lower().rstrip(".")
-        if not host:
-            return False
-        try:
-            address = ipaddress.ip_address(host)
-            return address.is_private or address.is_loopback
-        except ValueError:
-            pass
-        return any(host == domain or host.endswith(f".{domain}") for domain in domains)
 
     def inspect(self, messages: Sequence[str]) -> GateResult:
         cleaned = [value.strip() for value in messages if value and value.strip()]
@@ -294,34 +241,6 @@ class SecurityGate:
             )
         if all(_ACK_TEXT.fullmatch(value) or _ONLY_REACTION.fullmatch(value) for value in cleaned):
             return GateResult("drop", "ack_or_reaction")
-        for reason, pattern in self._hard_patterns:
-            if pattern.search(combined):
-                return GateResult(
-                    "refuse",
-                    reason,
-                    "这个请求涉及越权、敏感信息或破坏性操作，我不能代为执行。如果是正常内部需求，请说明目标环境、授权范围和可回滚方案。",
-                )
-
-        execution_words = re.search(
-            r"(?:执行|调用|请求|curl|wget|POST|PUT|PATCH|DELETE|上传|回传|发到|发送到|提交到)",
-            combined,
-            re.IGNORECASE,
-        )
-        sensitive_words = re.search(
-            r"(?:token|cookie|密码|口令|凭据|密钥|客户数据|用户数据|内部数据)",
-            combined,
-            re.IGNORECASE,
-        )
-        if execution_words:
-            for raw_url in _URL.findall(combined):
-                host = (urlparse(raw_url).hostname or "").lower()
-                if not self._host_allowed(host, self.allowed_execution_domains):
-                    if sensitive_words or not self._host_allowed(host, self.allowed_reference_domains):
-                        return GateResult(
-                            "refuse",
-                            "untrusted_external_execution",
-                            "这个请求要向未授权的外部地址执行调用或传输数据，我不能代为执行。请提供内部域名、测试环境和明确授权。",
-                        )
         return GateResult("pass", "eligible")
 
 
@@ -417,7 +336,7 @@ class AuditStore:
                 event.event_id,
                 event.message_id,
                 event.conversation_id,
-                event.contact.user_id,
+                event.contact.identity,
                 event.created_at.isoformat(),
                 sha256_text(event.content),
                 len(event.content),
@@ -610,7 +529,7 @@ class AuditStore:
             (
                 session_id,
                 conversation_id,
-                contact.user_id,
+                contact.identity,
                 contact.display_name,
                 started_at.isoformat(),
                 finished_at.isoformat(),
