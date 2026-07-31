@@ -3,10 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import signal
 import subprocess
-import time
+import sys
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,7 +61,6 @@ class WorkflowStage:
     label: str
     profile: AgentProfile
     prompt_path: Path
-    schema_path: Path | None
 
 
 @dataclass(frozen=True)
@@ -73,7 +71,6 @@ class PreparedAgent:
     cwd: Path
     environment: Mapping[str, str]
     prompt: str
-    output_schema: Mapping[str, Any]
     thread_options: Mapping[str, Any]
     result_path: Path
     events_path: Path
@@ -84,36 +81,6 @@ class PreparedAgent:
     @property
     def timeout_seconds(self) -> float:
         return self.stage.profile.timeout_seconds
-
-    def read_decision(self) -> dict[str, Any]:
-        if self.result_path.is_file():
-            return _parse_json_text(self.result_path.read_text(encoding="utf-8"))
-        events = _read_json_lines(self.events_path)
-        for event in reversed(events):
-            structured = event.get("structured_output")
-            if isinstance(structured, Mapping):
-                return dict(structured)
-            result = event.get("result")
-            if isinstance(result, Mapping):
-                return dict(result)
-            text = _event_assistant_text(event)
-            if not text:
-                continue
-            try:
-                return _parse_json_text(text)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
-        raise ValueError(f"{self.stage.profile.driver} produced no structured result")
-
-    def latest_progress(self) -> str:
-        latest = ""
-        for event in _read_json_lines(self.events_path):
-            text = _event_assistant_text(event)
-            if not text or _is_final_decision(text):
-                continue
-            latest = sanitize_text(text, 500).strip()
-        return latest
-
 
 class AgentSession:
     """One live agent process with a provider-neutral steering surface."""
@@ -135,15 +102,13 @@ class AgentSession:
         self._watch_task: asyncio.Task[None] | None = None
         self._write_lock = asyncio.Lock()
         self._final_text = ""
-        self._structured_result: dict[str, Any] | None = None
+        self._escalated = False
         self._progress: list[str] = []
         self._stream_text = ""
         self._pi_empty_response_retries = 0
         self._codex_item_phases: dict[str, str] = {}
-        self._codex_item_text: dict[str, str] = {}
         self._codex_reasoning: dict[str, str] = {}
-        self._codex_operations: dict[str, str] = {}
-        self._codex_operation_started: dict[str, float] = {}
+        self._pi_thinking: dict[int, str] = {}
 
     @property
     def exit_code(self) -> int | None:
@@ -162,17 +127,8 @@ class AgentSession:
         return self._stream_text
 
     @property
-    def has_active_operation(self) -> bool:
-        return bool(self._codex_operations)
-
-    def progress_heartbeat(self) -> str:
-        if not self._codex_operations:
-            return ""
-        item_id = next(reversed(self._codex_operations))
-        progress = self._codex_operations[item_id].rstrip("。")
-        started_at = self._codex_operation_started.get(item_id, time.monotonic())
-        elapsed = max(5, int(time.monotonic() - started_at) // 5 * 5)
-        return f"{progress}（已等待 {elapsed} 秒）。"
+    def escalated(self) -> bool:
+        return self._escalated
 
     async def start(self) -> None:
         if self.process is not None:
@@ -233,7 +189,11 @@ class AgentSession:
                         "threadId": self.thread_id,
                         "input": inputs,
                         "effort": self.prepared.stage.profile.reasoning_effort or None,
-                        "outputSchema": dict(self.prepared.output_schema),
+                        "summary": str(
+                            self.prepared.stage.profile.options.get(
+                                "reasoning_summary", "concise"
+                            )
+                        ),
                     },
                 )
                 self.turn_id = str(
@@ -256,7 +216,6 @@ class AgentSession:
                         "stage": self.prepared.stage.name,
                         "cwd": str(self.prepared.cwd),
                         "prompt": self.prepared.prompt,
-                        "outputSchema": dict(self.prepared.output_schema),
                         "readOnly": self.prepared.stage.profile.read_only,
                         "model": self.prepared.stage.profile.model,
                         "reasoningEffort": self.prepared.stage.profile.reasoning_effort,
@@ -337,21 +296,13 @@ class AgentSession:
         except (BrokenPipeError, ConnectionError, RuntimeError, TimeoutError):
             return False
 
-    def decision(self) -> dict[str, Any]:
-        if self._structured_result is not None:
-            return dict(self._structured_result)
-        if self.prepared.stage.profile.options.get("plain_text"):
-            reply = (self._final_text or self._stream_text).strip()
-            if not reply:
-                raise ValueError("plain-text agent produced no reply or escalation")
-            return {
-                "route": "reply",
-                "reply": reply,
-                "execution": "read_only",
-            }
-        if self._final_text:
-            return _parse_json_text(self._final_text)
-        return self.prepared.read_decision()
+    def result(self) -> str:
+        if self._escalated:
+            return ""
+        reply = (self._final_text or self._stream_text).strip()
+        if not reply:
+            raise ValueError("agent produced no reply or escalation")
+        return reply
 
     async def abort(self) -> None:
         if self.process is None or self.process.returncode is not None:
@@ -516,20 +467,12 @@ class AgentSession:
                         self._codex_item_phases[item_id] = str(
                             item.get("phase") or ""
                         )
-                    else:
-                        progress = _codex_operation_progress(item)
-                        if progress:
-                            self._codex_operations[item_id] = progress[0]
-                            self._codex_operation_started[item_id] = time.monotonic()
-                            self._capture_progress(progress[0])
-            elif method == "item/agentMessage/delta":
-                item_id = str(params.get("itemId") or "")
-                if self._codex_item_phases.get(item_id) == "commentary":
-                    value = self._codex_item_text.get(item_id, "") + str(
-                        params.get("delta") or ""
-                    )
-                    self._codex_item_text[item_id] = value
-                    self._capture_progress(value)
+                    elif _is_escalate_tool(
+                        item.get("tool")
+                        or item.get("toolName")
+                        or item.get("name")
+                    ):
+                        self._capture_escalation()
             elif method == "item/reasoning/summaryTextDelta":
                 item_id = str(params.get("itemId") or "")
                 value = self._codex_reasoning.get(item_id, "") + str(
@@ -543,27 +486,31 @@ class AgentSession:
                     if item.get("type") == "agentMessage":
                         phase = str(item.get("phase") or "")
                         text = str(item.get("text") or "")
-                        if phase == "commentary":
-                            self._capture_progress(text)
-                        else:
-                            self._capture_text(text, final=phase == "final_answer")
-                    else:
-                        item_id = str(item.get("id") or "")
-                        progress = _codex_operation_progress(item)
-                        self._codex_operations.pop(item_id, None)
-                        self._codex_operation_started.pop(item_id, None)
-                        if progress:
-                            self._capture_progress(progress[1])
+                        if phase == "final_answer":
+                            self._capture_body(text, final=True)
+                    elif item.get("type") == "reasoning":
+                        self._capture_progress(_codex_reasoning_text(item))
+                    elif _is_escalate_tool(
+                        item.get("tool")
+                        or item.get("toolName")
+                        or item.get("name")
+                    ):
+                        self._capture_escalation()
             elif method == "turn/completed":
                 turn = params.get("turn")
                 if isinstance(turn, Mapping) and (
                     not self.turn_id or str(turn.get("id") or "") == self.turn_id
                 ):
-                    if str(turn.get("status") or "") != "completed":
+                    if str(turn.get("status") or "") == "completed":
+                        self.error = ""
+                    else:
                         self.error = f"codex_turn_{turn.get('status') or 'failed'}"
                     self._finish()
             elif method == "error":
-                self.error = sanitize_text(str(params.get("message") or params), 500)
+                if not bool(params.get("willRetry")):
+                    self.error = sanitize_text(
+                        str(params.get("message") or params), 500
+                    )
             return
         if protocol == "pi-rpc":
             event_type = str(event.get("type") or "")
@@ -579,46 +526,36 @@ class AgentSession:
             elif event_type == "message_update":
                 update = event.get("assistantMessageEvent")
                 update = update if isinstance(update, Mapping) else {}
-                if update.get("type") == "text_delta":
+                update_type = str(update.get("type") or "")
+                if update_type == "text_delta":
                     self._capture_stream_delta(str(update.get("delta") or ""))
-            elif event_type == "tool_execution_start" and event.get("toolName") == "escalate":
-                arguments = event.get("args")
-                arguments = arguments if isinstance(arguments, Mapping) else {}
-                execution = str(arguments.get("execution") or "read_only")
-                if execution not in {
-                    "read_only",
-                    "small_change",
-                    "plan_large_change",
-                    "approved_plan",
-                }:
-                    execution = "read_only"
-                self._structured_result = {
-                    "route": "worker",
-                    "reason": sanitize_text(
-                        str(arguments.get("reason") or "需要执行 Agent"), 300
-                    ),
-                    "execution": execution,
-                    "progress": sanitize_text(
-                        str(arguments.get("user_message") or "我先调查一下。"),
-                        200,
-                    ),
-                }
-                self._signal_update()
+                elif update_type == "thinking_delta":
+                    index = int(update.get("contentIndex") or 0)
+                    value = self._pi_thinking.get(index, "") + str(
+                        update.get("delta") or ""
+                    )
+                    self._pi_thinking[index] = value
+                    self._capture_progress(value)
+                elif update_type == "thinking_end":
+                    self._capture_progress(str(update.get("content") or ""))
+            elif event_type == "tool_execution_start" and _is_escalate_tool(
+                event.get("toolName")
+            ):
+                self._capture_escalation()
             elif event_type == "message_end":
                 text = _assistant_text(event)
                 if text:
-                    self._capture_text(text, final=True)
+                    self._capture_body(text, final=True)
             elif event_type == "agent_end":
                 messages = event.get("messages")
                 if isinstance(messages, list):
                     for message in reversed(messages):
                         text = _assistant_text({"message": message})
                         if text:
-                            self._capture_text(text, final=True)
+                            self._capture_body(text, final=True)
                             break
                 if (
-                    self.prepared.stage.profile.options.get("plain_text")
-                    and self._structured_result is None
+                    not self._escalated
                     and not self._final_text
                     and not self._stream_text
                     and self._pi_empty_response_retries
@@ -642,15 +579,17 @@ class AgentSession:
             return
         if protocol == "custom-jsonl-v1":
             event_type = str(event.get("type") or "")
-            if event_type == "progress":
-                self._capture_text(str(event.get("text") or ""))
+            if event_type in {"progress", "thinking"}:
+                self._capture_progress(str(event.get("text") or ""))
             elif event_type == "assistant":
-                self._capture_text(_assistant_text(event))
+                self._capture_body(_assistant_text(event))
+            elif event_type == "tool_call" and _is_escalate_tool(
+                event.get("name") or event.get("toolName")
+            ):
+                self._capture_escalation()
             elif event_type == "result":
                 result = event.get("result", event.get("value"))
-                if isinstance(result, Mapping):
-                    self._structured_result = dict(result)
-                elif isinstance(result, str):
+                if isinstance(result, str):
                     self._final_text = result
                 else:
                     self.error = "custom_agent_result_missing"
@@ -669,41 +608,41 @@ class AgentSession:
             return
         event_type = str(event.get("type") or "")
         if event_type == "assistant":
-            self._capture_text(_assistant_text(event))
+            for tool_name in _assistant_tool_names(event):
+                if _is_escalate_tool(tool_name):
+                    self._capture_escalation()
+            thinking = _assistant_thinking(event)
+            if thinking:
+                self._capture_progress(thinking)
+            self._capture_body(_assistant_text(event))
         elif event_type == "result":
-            structured = event.get("structured_output")
-            if isinstance(structured, Mapping):
-                self._structured_result = dict(structured)
-            else:
-                result = event.get("result")
-                if isinstance(result, Mapping):
-                    self._structured_result = dict(result)
-                elif isinstance(result, str):
-                    self._final_text = result
+            result = event.get("result")
+            if isinstance(result, str):
+                self._final_text = result
             if event.get("is_error"):
                 self.error = sanitize_text(str(event.get("result") or "Claude error"), 500)
             self._finish()
 
-    def _capture_text(self, text: str, *, final: bool = False) -> None:
+    def _capture_body(self, text: str, *, final: bool = False) -> None:
         clean = text.strip()
         if not clean:
             return
-        if final or _is_final_decision(clean):
+        if final:
             self._final_text = clean
             return
-        progress = sanitize_text(clean, 500).strip()
+        self._stream_text = clean
+        self._signal_update()
+
+    def _capture_progress(self, text: str) -> None:
+        progress = sanitize_text(text, 500).strip()
         if progress and (not self._progress or self._progress[-1] != progress):
             self._progress.append(progress)
             self._signal_update()
 
-    def _capture_progress(self, text: str) -> None:
-        progress = sanitize_text(text, 500).strip()
-        if (
-            _is_user_facing_progress(progress)
-            and (not self._progress or self._progress[-1] != progress)
-        ):
-            self._progress.append(progress)
-            self._signal_update()
+    def _capture_escalation(self) -> None:
+        self._escalated = True
+        self._complete.set()
+        self._signal_update()
 
     def _capture_stream_delta(self, delta: str) -> None:
         if not delta:
@@ -716,17 +655,10 @@ class AgentSession:
             self._updates.put_nowait(None)
 
     def _finish(self) -> None:
-        if self._structured_result is not None:
-            payload = json.dumps(self._structured_result, ensure_ascii=False)
-        else:
-            payload = self._final_text or (
-                self._stream_text
-                if self.prepared.stage.profile.options.get("plain_text")
-                else ""
-            )
+        payload = self._final_text or self._stream_text
         if payload:
             self.prepared.result_path.write_text(payload, encoding="utf-8")
-        elif not self.error:
+        elif not self.error and not self._escalated:
             self.error = "agent_result_missing"
         self._complete.set()
         self._signal_update()
@@ -764,9 +696,6 @@ class AgentRuntime:
         self._supplement_prompt_path = supplement_prompt_path
         self._auto_messages = dict(auto_messages)
         self.progress_enabled = bool(auto_messages.get("progress_enabled", True))
-        self.progress_interval_seconds = float(
-            auto_messages.get("progress_interval_seconds", 180)
-        )
         self.max_progress_updates = int(auto_messages.get("max_progress_updates", 60))
 
     @classmethod
@@ -851,8 +780,6 @@ class AgentRuntime:
         auto_messages = preset.get("auto_messages", {})
         if not isinstance(auto_messages, Mapping):
             raise ValueError("workflow auto_messages must be an object")
-        if float(auto_messages.get("progress_interval_seconds", 180)) < 0:
-            raise ValueError("progress interval must not be negative")
         if int(auto_messages.get("max_progress_updates", 60)) < 0:
             raise ValueError("max progress updates must not be negative")
         config_dir = config_path.resolve().parent
@@ -867,22 +794,16 @@ class AgentRuntime:
         for stage_name in _STAGE_ORDER:
             value = preset.get(stage_name)
             if not isinstance(value, Mapping):
+                if stage_name == "front":
+                    continue
                 raise ValueError(f"workflow {active} requires stage: {stage_name}")
             profile_name = str(value.get("agent") or "")
             profile = profiles.get(profile_name)
             if profile is None:
                 raise ValueError(f"workflow stage references unknown agent: {profile_name}")
             prompt_path = _resolve_path(config_dir, value.get("prompt"))
-            schema_value = value.get("schema")
-            schema_path = (
-                _resolve_path(config_dir, schema_value) if schema_value else None
-            )
             if not prompt_path.is_file():
                 raise ValueError(f"workflow prompt does not exist: {prompt_path}")
-            if schema_path is None and not profile.options.get("plain_text"):
-                raise ValueError(f"workflow schema is required: {stage_name}")
-            if schema_path is not None and not schema_path.is_file():
-                raise ValueError(f"workflow schema does not exist: {schema_path}")
             stages[stage_name] = WorkflowStage(
                 name=stage_name,
                 label=str(
@@ -891,9 +812,8 @@ class AgentRuntime:
                 ),
                 profile=profile,
                 prompt_path=prompt_path,
-                schema_path=schema_path,
             )
-        if not stages["front"].profile.read_only:
+        if "front" in stages and not stages["front"].profile.read_only:
             raise ValueError("workflow front agent must set read_only=true")
         if stages["worker"].profile.read_only:
             raise ValueError("workflow worker agent must set read_only=false")
@@ -939,40 +859,36 @@ class AgentRuntime:
         stage = self._stage(stage_name)
         session_dir.mkdir(parents=True, exist_ok=True)
         prompt_path = session_dir / "prompt.md"
-        result_path = session_dir / "result.json"
+        result_path = session_dir / "result.txt"
         events_path = session_dir / "events.jsonl"
         stderr_path = session_dir / "stderr.log"
-        schema: Mapping[str, Any] = {}
-        if stage.schema_path is not None:
-            loaded_schema = json.loads(stage.schema_path.read_text(encoding="utf-8"))
-            if not isinstance(loaded_schema, Mapping):
-                raise ValueError(
-                    f"workflow schema must be an object: {stage.schema_path}"
-                )
-            schema = loaded_schema
-        input_prompt = prompt
-        if (
-            stage.profile.protocol == "pi-rpc"
-            and not stage.profile.options.get("plain_text")
-        ):
-            input_prompt += (
-                "\n\n<output_schema>\n"
-                + json.dumps(schema, ensure_ascii=False)
-                + "\n</output_schema>\n"
-            )
-        prompt_path.write_text(input_prompt, encoding="utf-8")
+        prompt_path.write_text(prompt, encoding="utf-8")
         protocol = stage.profile.protocol
         if local_images and protocol != "codex-app-server":
             raise ValueError("local images require the Codex app-server protocol")
-        argv = _command(stage.profile, schema)
+        mcp_config_path = (
+            _write_escalate_mcp_config(session_dir) if stage_name == "front" else None
+        )
+        argv = _command(stage.profile, mcp_config_path)
+        environment = self._environment(
+            stage.profile,
+            session_dir / "codex-home"
+            if stage_name == "front" and protocol == "codex-app-server"
+            else None,
+        )
+        if mcp_config_path is not None:
+            environment["DWS_ESCALATE_MCP_CONFIG"] = str(mcp_config_path)
+            environment["DWS_ESCALATE_PYTHON"] = sys.executable
+            environment["DWS_ESCALATE_MCP_SCRIPT"] = str(
+                Path(__file__).with_name("escalate_mcp.py").resolve()
+            )
         return PreparedAgent(
             stage=stage,
             protocol=protocol,
             argv=tuple(argv),
             cwd=self._workspace_root,
-            environment=self._environment(stage.profile),
-            prompt=input_prompt,
-            output_schema=dict(schema),
+            environment=environment,
+            prompt=prompt,
             thread_options=_thread_options(stage.profile, self._workspace_root),
             result_path=result_path,
             events_path=events_path,
@@ -997,6 +913,9 @@ class AgentRuntime:
     def profile_name(self, stage_name: str) -> str:
         return self._stage(stage_name).profile.name
 
+    def has_stage(self, stage_name: str) -> bool:
+        return stage_name in self._stages
+
     def required_binaries(self) -> dict[str, str]:
         return {
             stage.profile.name: stage.profile.command[0]
@@ -1014,9 +933,7 @@ class AgentRuntime:
             "supplementPrompt": self._supplement_prompt_path.read_text(encoding="utf-8"),
             "autoMessages": {
                 "ack": self.ack_message,
-                "progress": str(self._auto_messages.get("progress") or "{{progress}}"),
                 "progressEnabled": self.progress_enabled,
-                "progressIntervalSeconds": self.progress_interval_seconds,
                 "maxProgressUpdates": self.max_progress_updates,
             },
             "stages": [
@@ -1037,6 +954,7 @@ class AgentRuntime:
                     "prompt": self._stages[name].prompt_path.read_text(encoding="utf-8"),
                 }
                 for name in _STAGE_ORDER
+                if name in self._stages
             ],
             "availableAgents": [
                 {
@@ -1059,23 +977,32 @@ class AgentRuntime:
         except KeyError as exc:
             raise ValueError(f"unknown workflow stage: {name}") from exc
 
-    def _environment(self, profile: AgentProfile) -> dict[str, str]:
+    def _environment(
+        self, profile: AgentProfile, session_home: Path | None = None
+    ) -> dict[str, str]:
         environment = {**os.environ, **profile.environment, "PYTHONUNBUFFERED": "1"}
         if profile.protocol != "codex-app-server":
             return environment
-        home_value = profile.options.get("isolated_home")
-        auth_value = profile.options.get("auth_file")
-        if not home_value or not auth_value:
+        home_value: Any = session_home or profile.options.get("isolated_home")
+        if not home_value:
             return environment
         home = Path(str(home_value)).expanduser()
         if not home.is_absolute():
             home = self._config_dir / home
-        auth_source = Path(str(auth_value)).expanduser().resolve()
-        if not auth_source.is_file():
-            return environment
         home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        auth_value = profile.options.get("auth_file")
+        auth_source = (
+            Path(str(auth_value)).expanduser().resolve()
+            if auth_value
+            else Path(environment.get("CODEX_HOME") or Path.home() / ".codex")
+            / "auth.json"
+        )
         auth_target = home / "auth.json"
-        if not auth_target.exists() and not auth_target.is_symlink():
+        if (
+            auth_source.is_file()
+            and not auth_target.exists()
+            and not auth_target.is_symlink()
+        ):
             auth_target.symlink_to(auth_source)
         environment["CODEX_HOME"] = str(home.resolve())
         return environment
@@ -1088,17 +1015,40 @@ def _resolve_path(base: Path, value: Any) -> Path:
     return path.resolve() if path.is_absolute() else (base / path).resolve()
 
 
-def _command(profile: AgentProfile, schema: Mapping[str, Any]) -> list[str]:
+def _command(profile: AgentProfile, mcp_config_path: Path | None) -> list[str]:
     protocol = profile.protocol
     if protocol == "codex-app-server":
-        return codex.command(profile)
+        return codex.command(profile, bool(mcp_config_path))
     if protocol == "claude-stream-json":
-        return claude.command(profile, schema)
+        return claude.command(profile, mcp_config_path)
     if protocol == "custom-jsonl-v1":
         return custom.command(profile)
     if protocol == "pi-rpc":
-        return pi.command(profile)
+        return pi.command(profile, bool(mcp_config_path))
     raise ValueError(f"unsupported agent protocol: {protocol}")
+
+
+def _write_escalate_mcp_config(session_dir: Path) -> Path:
+    path = session_dir / "mcp.json"
+    script = Path(__file__).with_name("escalate_mcp.py").resolve()
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "dws-escalate": {
+                        "type": "stdio",
+                        "command": sys.executable,
+                        "args": [str(script)],
+                    }
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 def _thread_options(profile: AgentProfile, workspace_root: Path) -> dict[str, Any]:
@@ -1137,22 +1087,6 @@ def _without_none(value: Mapping[str, Any]) -> dict[str, Any]:
     return {key: item for key, item in value.items() if item is not None}
 
 
-def _read_json_lines(path: Path) -> list[dict[str, Any]]:
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return []
-    events: list[dict[str, Any]] = []
-    for line in lines:
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            events.append(value)
-    return events
-
-
 def _assistant_text(event: Mapping[str, Any]) -> str:
     message = event.get("message")
     if not isinstance(message, Mapping) or message.get("role") not in {None, "assistant"}:
@@ -1169,85 +1103,47 @@ def _assistant_text(event: Mapping[str, Any]) -> str:
     ).strip()
 
 
-def _event_assistant_text(event: Mapping[str, Any]) -> str:
-    if event.get("type") == "progress":
-        return str(event.get("text") or "")
-    method = str(event.get("method") or "")
-    params = event.get("params")
-    if method == "item/completed" and isinstance(params, Mapping):
-        item = params.get("item")
-        if isinstance(item, Mapping) and item.get("type") == "agentMessage":
-            return str(item.get("text") or "")
-    if event.get("type") == "item.completed":
-        item = event.get("item")
-        if isinstance(item, Mapping) and item.get("type") in {"agent_message", "agentMessage"}:
-            return str(item.get("text") or "")
-    return _assistant_text(event)
+def _assistant_thinking(event: Mapping[str, Any]) -> str:
+    message = event.get("message")
+    if not isinstance(message, Mapping):
+        return ""
+    content = message.get("content")
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        str(item.get("thinking") or "")
+        for item in content
+        if isinstance(item, Mapping) and item.get("type") == "thinking"
+    ).strip()
 
 
-def _parse_json_text(text: str) -> dict[str, Any]:
-    value = text.strip()
-    if value.startswith("```"):
-        value = re.sub(r"^```(?:json)?\s*|\s*```$", "", value)
-    parsed = json.loads(value)
-    if not isinstance(parsed, dict):
-        raise TypeError("agent result must be a JSON object")
-    return parsed
+def _codex_reasoning_text(item: Mapping[str, Any]) -> str:
+    summary = item.get("summary")
+    if not isinstance(summary, list):
+        return ""
+    return "\n".join(
+        str(part.get("text") or "")
+        for part in summary
+        if isinstance(part, Mapping)
+    ).strip()
 
 
-def _is_final_decision(text: str) -> bool:
-    try:
-        value = _parse_json_text(text)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return False
-    return "action" in value
+def _assistant_tool_names(event: Mapping[str, Any]) -> list[str]:
+    message = event.get("message")
+    if not isinstance(message, Mapping):
+        return []
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    return [
+        str(item.get("name") or "")
+        for item in content
+        if isinstance(item, Mapping) and item.get("type") in {"tool_use", "toolUse"}
+    ]
 
 
-def _is_user_facing_progress(text: str) -> bool:
-    value = text.strip()
-    return bool(
-        value
-        and re.search(r"[\u3400-\u9fff]", value)
-        and not value.startswith(("{", "[", "```", "<"))
+def _is_escalate_tool(value: Any) -> bool:
+    name = str(value or "").lower()
+    return name == "escalate" or name.endswith(
+        ("__escalate", "/escalate", ":escalate")
     )
-
-
-def _codex_operation_progress(item: Mapping[str, Any]) -> tuple[str, str] | None:
-    item_type = re.sub(r"[^a-z]", "", str(item.get("type") or "").lower())
-    if item_type == "commandexecution":
-        actions = item.get("commandActions")
-        action_type = ""
-        if isinstance(actions, list) and actions and isinstance(actions[0], Mapping):
-            action_type = str(actions[0].get("type") or "").lower()
-        if action_type in {"search", "read"}:
-            return "正在检查相关代码。", "代码检查已完成，正在整理结果。"
-        return "正在执行本地检查。", "本地检查已完成，正在整理结果。"
-    if item_type == "websearch":
-        return "正在查询最新公开信息。", "公开信息查询已返回，正在整理结果。"
-    if item_type == "filechange":
-        return "正在写入代码改动。", "代码改动已写入，正在继续验证。"
-    if item_type == "collabtoolcall":
-        return "正在等待协作任务返回。", "协作任务已返回，正在整理结果。"
-    if item_type != "mcptoolcall":
-        return None
-    identity = " ".join(
-        str(item.get(key) or "")
-        for key in ("server", "serverName", "tool", "toolName", "name")
-    ).lower()
-    if any(value in identity for value in ("loki", "grafana", "log")):
-        return "正在查询日志。", "日志查询已返回，正在整理结果。"
-    if any(
-        value in identity
-        for value in ("gitlab", "github", "merge_request", "pull_request")
-    ):
-        return "正在查询代码托管平台。", "代码托管查询已返回，正在整理结果。"
-    if any(
-        value in identity
-        for value in ("sql", "database", "mysql", "postgres", "clickhouse")
-    ):
-        return "正在查询数据。", "数据查询已返回，正在整理结果。"
-    if any(value in identity for value in ("web", "search", "browser")):
-        return "正在查询最新信息。", "最新信息查询已返回，正在整理结果。"
-    if any(value in identity for value in ("k8s", "kubernetes", "deploy")):
-        return "正在检查运行环境。", "运行环境检查已返回，正在整理结果。"
-    return "正在调用业务工具。", "业务工具已返回，正在整理结果。"

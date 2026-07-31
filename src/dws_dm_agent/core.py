@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -48,20 +48,6 @@ class GateResult:
     action: str
     reason: str
     reply: str = ""
-
-
-@dataclass
-class ChangeEvidence:
-    repo: str
-    worktree: str
-    branch: str
-    base_sha: str
-    head_sha: str
-    commits: list[str] = field(default_factory=list)
-    files: list[str] = field(default_factory=list)
-    pushed_to: list[str] = field(default_factory=list)
-    verified: bool = False
-    warning: str = ""
 
 
 def sha256_text(value: str) -> str:
@@ -510,10 +496,6 @@ class AuditStore:
         status: str,
         handled: str,
         reason: str,
-        changes: Sequence[Mapping[str, Any]],
-        validation: Sequence[str],
-        external_calls: Sequence[str],
-        warnings: Sequence[str],
         codex_exit_code: int | None,
         request_preview: str = "",
     ) -> None:
@@ -537,10 +519,10 @@ class AuditStore:
                 status,
                 sanitize_text(handled, 1000),
                 sanitize_text(reason, 1000),
-                json.dumps(list(changes), ensure_ascii=False),
-                json.dumps([sanitize_text(x, 1000) for x in validation], ensure_ascii=False),
-                json.dumps([sanitize_text(x, 1000) for x in external_calls], ensure_ascii=False),
-                json.dumps([sanitize_text(x, 1000) for x in warnings], ensure_ascii=False),
+                "[]",
+                "[]",
+                "[]",
+                "[]",
                 sanitize_text(request_preview, 500),
                 codex_exit_code,
             ),
@@ -568,70 +550,3 @@ class AuditStore:
 
     # Kept for callers that still read audit databases created by older releases.
     codex_run_counts_since = agent_run_counts_since
-
-
-def normalize_decision(value: Mapping[str, Any]) -> dict[str, Any]:
-    action = str(value.get("action") or "handoff")
-    if action not in {"reply", "no_reply", "refuse", "handoff"}:
-        action = "handoff"
-    delivery = str(value.get("delivery") or "")
-    if delivery not in {"none", "feature", "attachment", "dev", "test"}:
-        delivery = "test" if value.get("changes") else "none"
-    decision: dict[str, Any] = {
-        "action": action,
-        "delivery": delivery,
-        "reply": sanitize_text(value.get("reply"), 6000),
-        "handled": sanitize_text(value.get("handled"), 1000),
-        "reason": sanitize_text(value.get("reason"), 1000),
-        "changes": [],
-        "validation": [sanitize_text(x, 1000) for x in value.get("validation", []) if str(x).strip()][
-            :50
-        ],
-        "external_calls": [
-            sanitize_text(x, 1000) for x in value.get("external_calls", []) if str(x).strip()
-        ][:50],
-        "warnings": [sanitize_text(x, 1000) for x in value.get("warnings", []) if str(x).strip()][
-            :50
-        ],
-    }
-    for raw in value.get("changes", []):
-        if not isinstance(raw, Mapping):
-            continue
-        decision["changes"].append(
-            {
-                "repo": sanitize_text(raw.get("repo"), 300),
-                "worktree": sanitize_text(raw.get("worktree"), 1000),
-                "branch": sanitize_text(raw.get("branch"), 300),
-                "base_sha": sanitize_text(raw.get("base_sha"), 100),
-                "head_sha": sanitize_text(raw.get("head_sha"), 100),
-                "commits": [sanitize_text(x, 100) for x in raw.get("commits", []) if str(x)][:100],
-                "files": [sanitize_text(x, 1000) for x in raw.get("files", []) if str(x)][:500],
-                "pushed_to": [
-                    sanitize_text(x, 300) for x in raw.get("pushed_to", []) if str(x)
-                ][:50],
-            }
-        )
-    if decision["action"] != "no_reply" and not decision["reply"]:
-        decision["action"] = "handoff"
-        decision["reply"] = "这个问题需要我本人确认一下，我先不代为做确定性答复。"
-        decision["warnings"].append("模型未提供可发送正文，已转人工")
-    return decision
-
-
-def evidence_to_mapping(evidence: ChangeEvidence) -> dict[str, Any]:
-    return {
-        "repo": evidence.repo,
-        "worktree": evidence.worktree,
-        "branch": evidence.branch,
-        "base_sha": evidence.base_sha,
-        "head_sha": evidence.head_sha,
-        "commits": evidence.commits,
-        "files": evidence.files,
-        "pushed_to": evidence.pushed_to,
-        "verified": evidence.verified,
-        "warning": evidence.warning,
-    }
-
-
-def render_reply(decision: Mapping[str, Any], changes: Sequence[ChangeEvidence]) -> str:
-    return sanitize_text(decision.get("reply"), 6000)

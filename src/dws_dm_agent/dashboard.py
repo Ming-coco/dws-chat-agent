@@ -47,19 +47,16 @@ _PROFILE_FIELDS = {
     "read_only",
     "timeout_seconds",
 }
-_STAGE_FIELDS = {"label", "agent", "prompt", "schema"}
+_STAGE_FIELDS = {"label", "agent", "prompt"}
 _AUTO_FIELDS = {
     "ack_enabled",
     "ack",
-    "progress",
     "progress_enabled",
-    "progress_interval_seconds",
     "max_progress_updates",
 }
 _ACK_VARIABLES = frozenset(
     {"request_count", "contact_name", "contact_alias", "self_name"}
 )
-_PROGRESS_VARIABLES = frozenset({*_ACK_VARIABLES, "progress"})
 
 
 class AgentConfigStore:
@@ -221,7 +218,9 @@ class AgentConfigStore:
                 },
             }
             for stage_name in ("front", "worker"):
-                raw_stage = raw_preset.get(stage_name, {})
+                raw_stage = raw_preset.get(stage_name)
+                if not isinstance(raw_stage, Mapping):
+                    continue
                 preset[stage_name] = {
                     key: copy.deepcopy(item)
                     for key, item in (
@@ -370,14 +369,16 @@ class AgentConfigStore:
             for key in _AUTO_FIELDS:
                 if key in raw_auto:
                     auto[key] = copy.deepcopy(raw_auto[key])
+            auto.pop("progress", None)
+            auto.pop("progress_interval_seconds", None)
             validate_template_variables(str(auto.get("ack") or ""), _ACK_VARIABLES)
-            validate_template_variables(
-                str(auto.get("progress") or ""), _PROGRESS_VARIABLES
-            )
             preset["auto_messages"] = auto
             for stage_name in ("front", "worker"):
                 raw_stage = raw_preset.get(stage_name)
                 if not isinstance(raw_stage, Mapping):
+                    if stage_name == "front":
+                        preset.pop("front", None)
+                        continue
                     raise ValueError(f"workflow {name} requires stage: {stage_name}")
                 stage = copy.deepcopy(
                     preset.get(stage_name, {})
@@ -809,32 +810,13 @@ class DashboardServer:
         rows = connection.execute(
             """
             SELECT session_id, contact_name, started_at, finished_at, action, status,
-                   handled, reason, changes_json, validation_json, external_calls_json,
-                   warnings_json, codex_exit_code, request_preview
+                   handled, reason, codex_exit_code, request_preview
             FROM runs ORDER BY finished_at DESC LIMIT ?
             """,
             (max(1, min(limit, 200)),),
         ).fetchall()
         result: list[dict[str, Any]] = []
         for row in rows:
-            changes = self._json_list(row["changes_json"])
-            safe_changes = [
-                {
-                    key: change.get(key)
-                    for key in (
-                        "repo",
-                        "branch",
-                        "head_sha",
-                        "commits",
-                        "files",
-                        "pushed_to",
-                        "verified",
-                        "warning",
-                    )
-                }
-                for change in changes
-                if isinstance(change, dict)
-            ]
             result.append(
                 {
                     "sessionId": row["session_id"],
@@ -846,10 +828,6 @@ class DashboardServer:
                     "handled": row["handled"],
                     "reason": row["reason"],
                     "requestPreview": row["request_preview"],
-                    "changes": safe_changes,
-                    "validation": self._json_list(row["validation_json"]),
-                    "externalCalls": self._json_list(row["external_calls_json"]),
-                    "warnings": self._json_list(row["warnings_json"]),
                     "codexExitCode": row["codex_exit_code"],
                 }
             )
@@ -865,26 +843,16 @@ class DashboardServer:
             hour=0, minute=0, second=0, microsecond=0
         ).isoformat()
         rows = connection.execute(
-            "SELECT status, changes_json FROM runs WHERE finished_at >= ?",
+            "SELECT status FROM runs WHERE finished_at >= ?",
             (day_start,),
         ).fetchall()
-        sent = errors = changed = 0
+        sent = errors = 0
         for row in rows:
             sent += row["status"] in {"sent", "shadow"}
             errors += row["status"] == "error"
-            changed += bool(self._json_list(row["changes_json"]))
         return {
             "active": len(runtime.get("active", [])),
             "queued": len(queued),
             "sentToday": sent,
             "errorsToday": errors,
-            "changesToday": changed,
         }
-
-    @staticmethod
-    def _json_list(value: Any) -> list[Any]:
-        try:
-            parsed = json.loads(value or "[]")
-            return parsed if isinstance(parsed, list) else []
-        except (TypeError, json.JSONDecodeError):
-            return []

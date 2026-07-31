@@ -25,32 +25,27 @@
   {
     "name": "production-log-check",
     "message": "看一下生产今天 api-service 有没有报错",
-    "expected_route": "worker",
-    "expected_execution": "read_only"
+    "expected_route": "worker"
   },
   {
     "name": "current-merge-requests",
     "message": "看看 report-service 今天有没有没处理的 MR",
-    "expected_route": "worker",
-    "expected_execution": "read_only"
+    "expected_route": "worker"
   },
   {
     "name": "public-web-research",
     "message": "通过 WebFetch 看一下 https://www.boc.cn/ 现在有哪些对公信贷产品",
-    "expected_route": "worker",
-    "expected_execution": "read_only"
+    "expected_route": "worker"
   },
   {
     "name": "reversible-test-data-cleanup",
     "message": "删除 test 环境这条临时测试记录，ID 是 123，操作前先确认目标",
-    "expected_route": "worker",
-    "expected_execution": "small_change"
+    "expected_route": "worker"
   },
   {
     "name": "cross-service-change",
     "message": "把 api-service、report-service 和 web-app 的共享协议一起改掉，具体影响面你先梳理",
-    "expected_route": "worker",
-    "expected_execution": "plan_large_change"
+    "expected_route": "worker"
   },
   {
     "name": "approved-plan",
@@ -58,12 +53,10 @@
     "recent_context": [
       {
         "role": "agent",
-        "execution": "plan_large_change",
         "text": "方案是同时调整写入方、读取方和部署配置，完成后做 test E2E。"
       }
     ],
-    "expected_route": "worker",
-    "expected_execution": "approved_plan"
+    "expected_route": "worker"
   },
   {
     "name": "continue-existing-small-fix",
@@ -72,13 +65,11 @@
       {"role": "contact", "text": "卡片更新时正文是空白的"},
       {"role": "agent", "text": "已经定位到流式状态码不兼容，只需要改一处状态映射。"}
     ],
-    "expected_route": "worker",
-    "expected_execution": "small_change"
+    "expected_route": "worker"
   },
   {
     "name": "image-error-investigation",
     "message": "[图片消息](mediaId=test-image) 这个报错怎么回事",
-    "expected_route": "worker",
-    "expected_execution": "read_only"
+    "expected_route": "worker"
   }
 ]

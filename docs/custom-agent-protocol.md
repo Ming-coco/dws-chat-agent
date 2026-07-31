@@ -26,7 +26,7 @@ Example profile:
 The first input starts the session:
 
 ```json
-{"id":1,"type":"start","protocolVersion":1,"sessionId":"dm-...","stage":"worker","cwd":"/workspace","prompt":"...","outputSchema":{},"readOnly":false,"model":"my-model","reasoningEffort":"high"}
+{"id":1,"type":"start","protocolVersion":1,"sessionId":"dm-...","stage":"worker","cwd":"/workspace","prompt":"...","readOnly":false,"model":"my-model","reasoningEffort":"high"}
 ```
 
 The CLI must acknowledge it promptly:
@@ -39,11 +39,13 @@ The CLI must acknowledge it promptly:
 
 ## Progress and steering
 
-The CLI may emit concrete progress at any time:
+The CLI may emit native thinking at any time:
 
 ```json
-{"type":"progress","text":"正在定位订单同步接口及相关测试"}
+{"type":"thinking","text":"正在定位订单同步接口及相关测试"}
 ```
+
+`progress` remains accepted as a compatibility alias. A custom front adapter can mount the stdio MCP file from `DWS_ESCALATE_MCP_CONFIG` and report `{"type":"tool_call","name":"escalate"}` when it invokes the zero-argument tool.
 
 When a DingTalk message arrives during the run, the service sends it into the same process:
 
@@ -61,10 +63,10 @@ If steering fails or times out, the orchestrator safely stops the process and ca
 
 ## Result, error, and abort
 
-Finish with a JSON object that satisfies the stage's configured output schema:
+Finish with the natural-language body:
 
 ```json
-{"type":"result","result":{"action":"reply","reply":"已确认……"}}
+{"type":"result","result":"已确认……"}
 ```
 
 Report a terminal error as:

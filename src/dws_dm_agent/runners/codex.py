@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+import json
+import sys
 from pathlib import Path
 from typing import Any
 
 
-def command(profile: Any) -> list[str]:
-    return [*profile.command, "app-server", "--listen", "stdio://", *profile.extra_args]
+def command(profile: Any, mount_escalate: bool = False) -> list[str]:
+    result = [*profile.command, "app-server", "--listen", "stdio://"]
+    if mount_escalate:
+        script = Path(__file__).with_name("escalate_mcp.py").resolve()
+        result.extend(
+            [
+                "-c",
+                f"mcp_servers.dws-escalate.command={json.dumps(sys.executable)}",
+                "-c",
+                "mcp_servers.dws-escalate.args="
+                + json.dumps([str(script)]),
+            ]
+        )
+    result.extend(profile.extra_args)
+    return result
 
 
 def thread_options(profile: Any, workspace_root: Path) -> dict[str, Any]:

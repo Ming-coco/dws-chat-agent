@@ -23,7 +23,7 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
-dws_dm_agent = ["web/*", "schemas/*.json"]
+dws_dm_agent = ["web/*", "runners/*.ts"]
 
 [tool.unittest]
 start-directory = "tests"

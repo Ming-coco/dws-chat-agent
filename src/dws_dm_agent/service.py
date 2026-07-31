@@ -15,7 +15,6 @@ import tempfile
 import threading
 import uuid
 import webbrowser
-import zipfile
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as fixed_timezone, tzinfo
@@ -31,18 +30,14 @@ else:
 from .runners.runtime import AgentRuntime
 from .core import (
     AuditStore,
-    ChangeEvidence,
     Contact,
     GateResult,
     HistoryMessage,
     IncomingEvent,
     SecurityGate,
-    evidence_to_mapping,
     human_owns_conversation,
-    normalize_decision,
     parse_dws_event,
     parse_local_datetime,
-    render_reply,
     sanitize_text,
     sha256_text,
 )
@@ -57,7 +52,6 @@ from .config import (
     load_settings,
 )
 from .dashboard import AgentConfigStore, DashboardServer
-from .delivery import _is_beneath, build_change_archive
 from .dws import DwsClient, _find_dws_error_code
 
 
@@ -118,10 +112,11 @@ def _image_suffix(path: Path) -> str:
 @dataclass
 class AgentResult:
     session_id: str
-    decision: dict[str, Any] | None
+    reply: str | None
     exit_code: int | None
     started_at: datetime
     finished_at: datetime
+    escalated: bool = False
     manual_takeover: bool = False
     supplements: list[IncomingEvent] | None = None
     consumed_supplements: list[IncomingEvent] | None = None
@@ -850,23 +845,10 @@ class AgentService:
         prior_attempt = ""
         acknowledgement_sent = False
         stream_card_id = ""
-        front_enabled = True
-        front_attempted = not front_enabled
-        front_escalated = False
-        execution_mode = "read_only"
-        expanded_context = False
         max_replans = int(self.settings.raw.get("max_replans", 5))
         for attempt in range(max_replans):
             batch, history, latest_manual = await self._stabilize(batch)
-            recent_context, follows_plan = self._recent_context(
-                history,
-                batch,
-                limit=(
-                    int(self.settings.raw.get("history_limit", 80))
-                    if expanded_context
-                    else None
-                ),
-            )
+            recent_context, _ = self._recent_context(history, batch)
             self._set_runtime(batch, "screening", attempt=attempt + 1)
             earliest = min(item.created_at for item in batch)
             if self._human_owns_conversation(latest_manual, earliest):
@@ -896,28 +878,18 @@ class AgentService:
                 )
                 return
             if gate.action == "refuse":
-                decision = {
-                    "action": "refuse",
-                    "reply": gate.reply,
-                    "handled": "拒绝高风险请求",
-                    "reason": gate.reason,
-                    "changes": [],
-                    "validation": ["确定性安全规则拦截；未调用 Agent"],
-                    "external_calls": [],
-                    "warnings": [],
-                }
-                outcome = await self._send_after_freshness_check(batch, decision, [])
+                outcome = await self._send_after_freshness_check(
+                    batch, gate.reply, stream_card_id=stream_card_id
+                )
                 if outcome == "supplement":
                     batch = await self._merge_latest(batch)
                     continue
-                status = "refused" if outcome in {"sent", "shadow"} else outcome
                 self._record_without_agent(
                     batch,
-                    status=status,
+                    status="refused" if outcome in {"sent", "shadow"} else outcome,
                     action="refuse",
-                    handled=decision["handled"],
-                    reason=decision["reason"],
-                    validation=decision["validation"],
+                    handled="拒绝高风险请求",
+                    reason=gate.reason,
                 )
                 self.store.update_event_status(
                     (item.message_id for item in batch), "processed", gate.reason
@@ -943,13 +915,6 @@ class AgentService:
             ):
                 freshness, _ = await self._freshness_state(batch)
                 if freshness == "manual":
-                    self._record_without_agent(
-                        batch,
-                        status="human_cooldown",
-                        action="no_reply",
-                        handled="发送处理中提示前检测到人工接管",
-                        reason="manual_takeover_before_ack",
-                    )
                     self.store.update_event_status(
                         (item.message_id for item in batch),
                         "skipped",
@@ -978,374 +943,125 @@ class AgentService:
                         )
                     except Exception as exc:
                         LOG.warning(
-                            "streaming card start failed; falling back to text "
-                            "contact=%s error=%s",
+                            "streaming card start failed contact=%s error=%s",
                             batch[0].contact.alias,
                             sanitize_text(str(exc), 300),
                         )
-                        await self._send_supervisor_text(
-                            batch[0].contact,
-                            batch[0].conversation_id,
-                            acknowledgement,
-                            f"ack-{uuid.uuid4().hex[:12]}",
-                        )
                 acknowledgement_sent = True
-                self._set_runtime(batch, "acknowledged", attempt=attempt + 1)
 
-            has_images = bool(_image_resources(batch))
-            run_sol = front_attempted
-            front_started_at: datetime | None = None
-            if not front_attempted:
-                front_attempted = True
+            result: AgentResult | None = None
+            if (
+                self.agent_runtime.has_stage("front")
+                and not _image_resources(batch)
+            ):
                 self._set_runtime(batch, "routing", attempt=attempt + 1)
-                result = await self._run_agent(
+                front_result = await self._run_agent(
                     batch,
                     prior_attempt,
                     front=True,
                     recent_context=recent_context,
                     stream_card_id=stream_card_id,
                 )
-                if result.consumed_supplements:
-                    batch = self._deduplicate([*batch, *result.consumed_supplements])
-                front_value = result.decision or {}
-                execution_mode = str(front_value.get("execution", "read_only"))
-                requested_more_context = bool(front_value.get("need_more_context"))
-                if requested_more_context and not expanded_context and not has_images:
-                    expanded_context = True
-                    recent_context, follows_plan = self._recent_context(
-                        history,
-                        batch,
-                        limit=int(self.settings.raw.get("history_limit", 80)),
+                if front_result.consumed_supplements:
+                    batch = self._deduplicate(
+                        [*batch, *front_result.consumed_supplements]
                     )
-                    # The front agent is allowed one context expansion before
-                    # handing off. This lets it answer after seeing the real
-                    # preceding messages instead of turning an ambiguous
-                    # short continuation into an unnecessary worker run.
-                    front_attempted = False
-                    continue
-                force_sol = (
-                    has_images
-                    or requested_more_context
-                    or execution_mode != "read_only"
-                )
-                front_decision = (
-                    None if force_sol else self._front_reply_decision(result.decision)
-                )
-                if front_decision is not None:
-                    result.decision = front_decision
-                    run_sol = False
-                elif result.manual_takeover or result.supplements:
-                    run_sol = False
-                elif not result.manual_takeover and not result.supplements:
-                    front_started_at = result.started_at
-                    prior_attempt = self._front_route_note(result, prior_attempt)
-                    front_escalated = True
-                    run_sol = True
-            if run_sol:
-                if front_escalated and stream_card_id:
+                if front_result.manual_takeover:
                     await self._safe_update_streaming_card(
-                        stream_card_id,
-                        sanitize_text(
-                            str(
-                                (result.decision or {}).get("progress")
-                                or "我再确认一下。"
-                            ),
-                            200,
-                        ),
-                        2,
+                        stream_card_id, "已停止自动处理，已转人工。", 5
                     )
-                if not acknowledgement_sent:
-                    freshness, _ = await self._freshness_state(batch)
-                    if freshness == "manual":
-                        self._record_without_agent(
-                            batch,
-                            status="human_cooldown",
-                            action="no_reply",
-                            handled="发送处理中提示前检测到人工接管",
-                            reason="manual_takeover_before_ack",
-                        )
-                        self.store.update_event_status(
-                            (item.message_id for item in batch),
-                            "skipped",
-                            "human_cooldown",
-                        )
-                        return
-                    if freshness == "supplement":
-                        batch = await self._merge_latest(batch)
-                        front_attempted = not front_enabled
-                        front_escalated = False
-                        execution_mode = "read_only"
-                        expanded_context = False
-                        continue
-                    acknowledgement = self.agent_runtime.render_auto_message(
-                        "ack",
-                        {
-                            "request_count": len(batch),
-                            "contact_name": batch[0].contact.display_name,
-                            "contact_alias": batch[0].contact.alias,
-                            "self_name": self.settings.self_name,
-                        },
+                    self._record_agent_result(
+                        batch, front_result, status="human_cooldown"
                     )
-                    if acknowledgement:
-                        if getattr(
-                            getattr(self, "dws", None), "streaming_cards", False
-                        ):
-                            try:
-                                stream_card_id = await self._start_streaming_card(
-                                    batch[0].contact,
-                                    batch[0].conversation_id,
-                                    acknowledgement,
-                                    f"ack-{uuid.uuid4().hex[:12]}",
-                                )
-                            except Exception as exc:
-                                LOG.warning(
-                                    "streaming card start failed; falling back to text "
-                                    "contact=%s error=%s",
-                                    batch[0].contact.alias,
-                                    sanitize_text(str(exc), 300),
-                                )
-                                await self._send_supervisor_text(
-                                    batch[0].contact,
-                                    batch[0].conversation_id,
-                                    acknowledgement,
-                                    f"ack-{uuid.uuid4().hex[:12]}",
-                                )
-                        else:
-                            await self._send_supervisor_text(
-                                batch[0].contact,
-                                batch[0].conversation_id,
-                                acknowledgement,
-                                f"ack-{uuid.uuid4().hex[:12]}",
-                            )
-                    acknowledgement_sent = True
-                    self._set_runtime(batch, "acknowledged", attempt=attempt + 1)
+                    self.store.update_event_status(
+                        (item.message_id for item in batch),
+                        "skipped",
+                        "manual_takeover",
+                    )
+                    return
+                if front_result.supplements:
+                    batch = self._deduplicate([*batch, *front_result.supplements])
+                    prior_attempt = "前台收到补充消息，已按完整上下文重新处理。"
+                    await asyncio.sleep(self.settings.quiet_window)
+                    continue
+                if front_result.reply is not None and not front_result.escalated:
+                    result = front_result
+                else:
+                    prior_attempt = (
+                        "前台已升级，由执行 Agent 处理完整请求。"
+                        if front_result.escalated
+                        else f"前台失败：{front_result.error}"
+                    )
+
+            if result is None:
                 self._set_runtime(batch, "worker", attempt=attempt + 1)
                 result = await self._run_agent(
                     batch,
                     prior_attempt,
-                    front=False,
-                    escalated=front_escalated,
                     recent_context=recent_context,
-                    allow_write=self._write_allowed(execution_mode, follows_plan),
-                    execution_mode=execution_mode,
                     stream_card_id=stream_card_id,
                 )
                 if result.consumed_supplements:
-                    batch = self._deduplicate([*batch, *result.consumed_supplements])
-                if front_started_at:
-                    result.started_at = front_started_at
+                    batch = self._deduplicate(
+                        [*batch, *result.consumed_supplements]
+                    )
+
             if result.manual_takeover:
                 await self._safe_update_streaming_card(
                     stream_card_id, "已停止自动处理，已转人工。", 5
                 )
-                discovered = await self._discover_session_changes(result, [])
-                cancelled_changes = await self._verify_changes(discovered)
-                self._record_agent_result(
-                    batch,
-                    result,
-                    status="human_cooldown",
-                    decision={
-                        "action": "no_reply",
-                        "handled": "检测到人工回复，已中止 Agent",
-                        "reason": "manual_takeover",
-                        "changes": [],
-                        "validation": [],
-                        "external_calls": [],
-                        "warnings": [
-                            "被中止的 session worktree 如存在需在控制台复核",
-                        ],
-                    },
-                    changes=cancelled_changes,
-                )
+                self._record_agent_result(batch, result, status="human_cooldown")
                 self.store.update_event_status(
                     (item.message_id for item in batch), "skipped", "manual_takeover"
                 )
                 return
-            if result.decision is None:
-                discovered = await self._discover_session_changes(result, [])
-                failed_changes = await self._verify_changes(discovered)
-                self._record_agent_result(
-                    batch,
-                    result,
-                    status="error",
-                    decision={
-                        "action": "handoff",
-                        "handled": "Agent 处理失败",
-                        "reason": result.error,
-                        "changes": [],
-                        "validation": [],
-                        "external_calls": [],
-                        "warnings": [],
-                    },
-                    changes=failed_changes,
-                )
-                if result.supplements:
-                    prior_attempt = self._prior_attempt_note(result, failed_changes)
-                    batch = self._deduplicate([*batch, *result.supplements])
-                    front_attempted = not front_enabled
-                    front_escalated = False
-                    execution_mode = "read_only"
-                    expanded_context = False
-                    self._set_runtime(batch, "stabilizing", attempt=attempt + 1)
-                    await asyncio.sleep(self.settings.quiet_window)
-                    continue
+            if result.supplements:
+                self._record_agent_result(batch, result, status="stale_supplement")
+                batch = self._deduplicate([*batch, *result.supplements])
+                prior_attempt = "对方补充了消息，按新的完整上下文继续。"
+                await asyncio.sleep(self.settings.quiet_window)
+                continue
+            if result.reply is None:
                 await self._safe_update_streaming_card(
                     stream_card_id, "处理失败，请稍后重试或转人工处理。", 5
                 )
+                self._record_agent_result(batch, result, status="error")
                 self.store.update_event_status(
                     (item.message_id for item in batch), "error", result.error[:200]
                 )
                 return
 
-            decision = result.decision
-            decision["session_id"] = f"{execution_mode}:{result.session_id}"
-            self._set_runtime(
-                batch, "verifying", attempt=attempt + 1, session_id=result.session_id
-            )
-            declared_changes = list(decision.get("changes", []))
-            declared_changes.extend(
-                await self._discover_session_changes(result, declared_changes)
-            )
-            changes = await self._verify_changes(declared_changes)
-            if result.supplements:
-                self._record_agent_result(
-                    batch,
-                    result,
-                    status="stale_supplement",
-                    decision=decision,
-                    changes=changes,
-                )
-                prior_attempt = self._prior_attempt_note(result, changes)
-                batch = self._deduplicate([*batch, *result.supplements])
-                front_attempted = not front_enabled
-                front_escalated = False
-                execution_mode = "read_only"
-                expanded_context = False
-                self._set_runtime(batch, "stabilizing", attempt=attempt + 1)
-                await asyncio.sleep(self.settings.quiet_window)
-                continue
-
-            if decision["action"] == "no_reply":
-                if changes:
-                    decision["action"] = "handoff"
-                    decision["reply"] = (
-                        "这次已经产生了代码改动，不能当成无需回复。"
-                        "我把分支和文件信息一起发出来。"
-                    )
-                    decision["handled"] = "发现代码状态，转人工复核"
-                    decision["warnings"].append("有代码状态时禁止静默 no_reply")
-                else:
-                    await self._safe_update_streaming_card(
-                        stream_card_id, "已处理，本次无需额外回复。", 3
-                    )
-                    self._record_agent_result(
-                        batch, result, status="no_reply", decision=decision, changes=[]
-                    )
-                    self.store.update_event_status(
-                        (item.message_id for item in batch), "processed", decision["reason"]
-                    )
-                    return
-
-            if changes and any(not item.verified for item in changes):
-                decision["action"] = "handoff"
-                decision["reply"] = "这次改动还没有形成可核验的提交，我先不把它当成完成结果。"
-                decision["handled"] = "代码证据不完整，转人工复核"
-                decision["warnings"].append("存在未核验代码状态，未自动宣称完成")
-
-            required_pushes = {
-                "dev": {"origin/dev"},
-                "test": {"origin/dev", "origin/test"},
-            }.get(decision["delivery"], set())
-            if (
-                changes
-                and all(item.verified for item in changes)
-                and decision["delivery"] != "attachment"
-                and any(
-                    not item.pushed_to
-                    or not required_pushes.issubset(set(item.pushed_to))
-                    for item in changes
-                )
-            ):
-                self._record_agent_result(
-                    batch,
-                    result,
-                    status="delivery_replan",
-                    decision=decision,
-                    changes=changes,
-                )
-                prior_attempt = self._prior_attempt_note(
-                    result,
-                    changes,
-                    retry_instruction=(
-                        "上一版未发送：按你选择的 delivery 完成交付。"
-                        "attachment 由钉钉回复服务发送；其他代码交付需 push 并在 pushed_to 写真实远端分支。"
-                        "delivery=dev 必须包含 origin/dev；delivery=test 必须同时包含 origin/dev 和 origin/test。"
-                    ),
-                )
-                continue
-
             self._set_runtime(batch, "freshness", attempt=attempt + 1)
             try:
                 outcome = await self._send_after_freshness_check(
                     batch,
-                    decision,
-                    changes,
+                    result.reply,
                     stream_card_id=stream_card_id,
+                    session_id=result.session_id,
                 )
             except Exception as exc:
                 await self._safe_update_streaming_card(
                     stream_card_id, "结果发送失败，请稍后重试。", 5
                 )
-                reason = sanitize_text(str(exc), 500) or type(exc).__name__
-                failed_decision = dict(decision)
-                failed_decision["handled"] = (
-                    f"{decision.get('handled') or 'Agent 已完成处理'}；最终回复发送失败"
-                )
-                failed_decision["reason"] = f"send_failed: {reason}"
-                failed_decision["warnings"] = [
-                    *decision.get("warnings", []),
-                    "最终回复未送达",
-                ]
-                self._record_agent_result(
-                    batch,
-                    result,
-                    status="error",
-                    decision=failed_decision,
-                    changes=changes,
-                )
+                result.error = f"send_failed: {sanitize_text(str(exc), 500)}"
+                self._record_agent_result(batch, result, status="error")
                 self.store.update_event_status(
-                    (item.message_id for item in batch),
-                    "error",
-                    failed_decision["reason"],
+                    (item.message_id for item in batch), "error", result.error
                 )
                 return
             if outcome == "supplement":
-                self._record_agent_result(
-                    batch,
-                    result,
-                    status="stale_supplement",
-                    decision=decision,
-                    changes=changes,
-                )
-                prior_attempt = self._prior_attempt_note(result, changes)
+                self._record_agent_result(batch, result, status="stale_supplement")
                 batch = await self._merge_latest(batch)
-                front_attempted = not front_enabled
-                front_escalated = False
-                execution_mode = "read_only"
-                expanded_context = False
-                self._set_runtime(batch, "stabilizing", attempt=attempt + 1)
+                prior_attempt = "发送前收到补充消息，按新的完整上下文继续。"
                 await asyncio.sleep(self.settings.quiet_window)
                 continue
             if outcome == "human_cooldown":
                 await self._safe_update_streaming_card(
                     stream_card_id, "已停止自动处理，已转人工。", 5
                 )
-            status = outcome
-            self._record_agent_result(
-                batch, result, status=status, decision=decision, changes=changes
-            )
+            self._record_agent_result(batch, result, status=outcome)
             self.store.update_event_status(
-                (item.message_id for item in batch), "processed", decision["reason"]
+                (item.message_id for item in batch), "processed", outcome
             )
             return
 
@@ -1362,6 +1078,7 @@ class AgentService:
         self.store.update_event_status(
             (item.message_id for item in batch), "skipped", "max_replans_reached"
         )
+
 
     def _agent_rate_limited(self, contact: Contact) -> bool:
         limits = self.settings.raw.get("rate_limit", {})
@@ -1385,6 +1102,24 @@ class AgentService:
             self.store.claim_event(item)
         return self._deduplicate([*batch, *discovered])
 
+    async def _freshness_state(
+        self, batch: Sequence[IncomingEvent]
+    ) -> tuple[str, list[IncomingEvent]]:
+        history = await self.dws.history(batch[0].contact)
+        latest_manual = self._register_manual_messages(history)
+        earliest = min(item.created_at for item in batch)
+        if self._human_owns_conversation(latest_manual, earliest):
+            return "manual", []
+        known = {item.message_id for item in batch}
+        supplements = [
+            item
+            for item in self._history_events(
+                batch[0].contact, batch[0].conversation_id, history, earliest
+            )
+            if item.message_id not in known
+        ]
+        return ("supplement", supplements) if supplements else ("fresh", [])
+
     def _record_without_agent(
         self,
         batch: Sequence[IncomingEvent],
@@ -1393,7 +1128,6 @@ class AgentService:
         action: str,
         handled: str,
         reason: str,
-        validation: Sequence[str] = (),
     ) -> None:
         now = datetime.now(self.settings.timezone)
         self.store.record_run(
@@ -1406,10 +1140,6 @@ class AgentService:
             status=status,
             handled=handled,
             reason=reason,
-            changes=[],
-            validation=validation,
-            external_calls=[],
-            warnings=[],
             codex_exit_code=None,
             request_preview=self._request_preview(batch),
         )
@@ -1420,8 +1150,6 @@ class AgentService:
         result: AgentResult,
         *,
         status: str,
-        decision: Mapping[str, Any],
-        changes: Sequence[ChangeEvidence],
     ) -> None:
         self.store.record_run(
             session_id=result.session_id,
@@ -1429,84 +1157,12 @@ class AgentService:
             contact=batch[0].contact,
             started_at=result.started_at,
             finished_at=result.finished_at,
-            action=str(decision.get("action") or "handoff"),
+            action="reply" if result.reply else "handoff",
             status=status,
-            handled=str(decision.get("handled") or ""),
-            reason=str(decision.get("reason") or result.error),
-            changes=[evidence_to_mapping(item) for item in changes],
-            validation=[str(x) for x in decision.get("validation", [])],
-            external_calls=[str(x) for x in decision.get("external_calls", [])],
-            warnings=[str(x) for x in decision.get("warnings", [])],
+            handled=sanitize_text(result.reply, 1000),
+            reason=result.error,
             codex_exit_code=result.exit_code,
             request_preview=self._request_preview(batch),
-        )
-
-    def _prior_attempt_note(
-        self,
-        result: AgentResult,
-        changes: Sequence[ChangeEvidence] = (),
-        retry_instruction: str = "",
-    ) -> str:
-        decision = result.decision or {}
-        compact = {
-            "previous_session": result.session_id,
-            "handled": decision.get("handled", ""),
-            "reason": decision.get("reason", ""),
-            "changes": [evidence_to_mapping(item) for item in changes]
-            or decision.get("changes", []),
-            "instruction": retry_instruction
-            or "这是前一独立 session 的可核验结果；如已有 worktree，先检查并复用，禁止重复或覆盖。",
-        }
-        return json.dumps(compact, ensure_ascii=False)
-
-    @staticmethod
-    def _front_reply_decision(
-        value: Mapping[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        if not value or value.get("route") != "reply":
-            return None
-        action = str(value.get("action") or "reply")
-        reply = str(value.get("reply") or "")
-        if action not in {"reply", "no_reply"} or (
-            action == "reply" and not reply.strip()
-        ):
-            return None
-        return normalize_decision(
-            {
-                "action": action,
-                "delivery": "none",
-                "reply": reply,
-                "handled": value.get("handled", "快速前台直接回复"),
-                "reason": value.get("reason", "无需执行工具或外部操作"),
-                "changes": [],
-                "validation": value.get("validation", []),
-                "external_calls": [],
-                "warnings": value.get("warnings", []),
-            }
-        )
-
-    @staticmethod
-    def _write_allowed(execution_mode: str, follows_plan: bool) -> bool:
-        return execution_mode == "small_change" or (
-            execution_mode == "approved_plan" and follows_plan
-        )
-
-    @staticmethod
-    def _front_route_note(result: AgentResult, prior_attempt: str) -> str:
-        decision = result.decision or {}
-        return json.dumps(
-            {
-                "front_session": result.session_id,
-                "front_route": decision.get("route", "error"),
-                "handled": decision.get("handled", ""),
-                "reason": decision.get("reason", "") or result.error,
-                "execution": decision.get("execution", "read_only"),
-                "need_more_context": decision.get("need_more_context", False),
-                "validation": decision.get("validation", []),
-                "previous_attempt": prior_attempt or "无",
-                "instruction": "前置 Agent 未直接完成；由后置 Agent 继续处理完整任务。",
-            },
-            ensure_ascii=False,
         )
 
     def _prompt_variables(
@@ -1516,9 +1172,6 @@ class AgentService:
         batch: Sequence[IncomingEvent],
         prior_attempt: str,
         recent_context: Sequence[Mapping[str, str]],
-        *,
-        allow_write: bool,
-        execution_mode: str,
     ) -> dict[str, Any]:
         contact = batch[0].contact
         messages = [
@@ -1532,19 +1185,6 @@ class AgentService:
             }
             for item in batch
         ]
-        if allow_write:
-            execution_rule = "对方已明确授权这个边界清楚的小改动，可以按代码规则执行。"
-        elif execution_mode == "plan_large_change":
-            execution_rule = (
-                "这是大改方案阶段：只读核对影响面，给出改动方案、涉及模块和验证计划，"
-                "并明确询问对方是否按该方案执行。收到首肯前禁止修改文件、创建 worktree、"
-                "commit、push、合并或发布，changes 必须为 []。"
-            )
-        else:
-            execution_rule = (
-                "这是连续对话的只读分析阶段。结合最近上下文回答原问题；禁止修改文件、"
-                "创建 worktree、commit、push、合并或发布，changes 必须为 []。"
-            )
         return {
             "self_name": self.settings.self_name,
             "agent_name": self.agent_runtime.profile_name(stage),
@@ -1563,8 +1203,6 @@ class AgentService:
             "current_messages_json": json.dumps(
                 messages, ensure_ascii=False, indent=2
             ),
-            "execution_mode": execution_mode,
-            "execution_rule": execution_rule,
             "now": datetime.now(self.settings.timezone).strftime("%Y-%m-%d %H:%M:%S"),
         }
 
@@ -1574,10 +1212,7 @@ class AgentService:
         prior_attempt: str,
         *,
         front: bool = False,
-        escalated: bool = False,
         recent_context: Sequence[Mapping[str, str]] = (),
-        allow_write: bool = True,
-        execution_mode: str = "small_change",
         stream_card_id: str = "",
     ) -> AgentResult:
         stage = "front" if front else "worker"
@@ -1605,8 +1240,6 @@ class AgentService:
                 batch,
                 prior_attempt,
                 recent_context,
-                allow_write=allow_write,
-                execution_mode=execution_mode,
             ),
         )
         try:
@@ -1633,30 +1266,17 @@ class AgentService:
             interval = float(self.settings.raw.get("monitor_interval_seconds", 5))
             timeout = session.prepared.timeout_seconds
             progress_interval = (
-                (
-                    0.5
-                    if stream_card_id
-                    else self.agent_runtime.progress_interval_seconds
-                )
-                if not front and self.agent_runtime.progress_enabled
+                0.4
+                if stream_card_id and self.agent_runtime.progress_enabled
                 else 0.0
             )
-            heartbeat_interval = (
-                self.agent_runtime.progress_interval_seconds
-                if not front and self.agent_runtime.progress_enabled
-                else 0.0
-            )
-            stream_interval = 0.4 if front and stream_card_id else 0.0
             max_progress_updates = self.agent_runtime.max_progress_updates
             now_monotonic = asyncio.get_running_loop().time()
             deadline = now_monotonic + timeout
             next_history_at = now_monotonic + interval
             next_progress_at = now_monotonic
-            next_heartbeat_at = now_monotonic + heartbeat_interval
-            next_stream_at = now_monotonic + stream_interval
             progress_updates = 0
             last_progress = ""
-            last_stream_text = ""
             known_ids = {item.message_id for item in batch}
             earliest = min(item.created_at for item in batch)
             while not session.done:
@@ -1677,20 +1297,10 @@ class AgentService:
                     )
                 wake_at = next_history_at
                 if (
-                    stream_interval > 0
-                    and session.latest_stream_text != last_stream_text
-                ):
-                    wake_at = min(wake_at, next_stream_at)
-                if (
                     progress_interval > 0
                     and session.latest_progress != last_progress
                 ):
                     wake_at = min(wake_at, next_progress_at)
-                if (
-                    heartbeat_interval > 0
-                    and getattr(session, "has_active_operation", False)
-                ):
-                    wake_at = min(wake_at, next_heartbeat_at)
                 try:
                     await session.wait_for_update(
                         timeout=min(
@@ -1703,73 +1313,24 @@ class AgentService:
                 if session.done:
                     break
                 now_monotonic = asyncio.get_running_loop().time()
-                heartbeat_due = (
-                    heartbeat_interval > 0
-                    and getattr(session, "has_active_operation", False)
-                    and now_monotonic >= next_heartbeat_at
-                )
-                if stream_interval > 0 and now_monotonic >= next_stream_at:
-                    stream_text = sanitize_text(
-                        session.latest_stream_text, 8000
-                    ).strip()
-                    if stream_text and stream_text != last_stream_text:
-                        try:
-                            await self.dws.update_card(
-                                stream_card_id, stream_text, 2
-                            )
-                            last_stream_text = stream_text
-                        except Exception as exc:
-                            LOG.warning(
-                                "front stream update failed session=%s error=%s",
-                                session_id,
-                                exc,
-                            )
-                    next_stream_at = now_monotonic + stream_interval
                 if (
                     progress_interval > 0
                     and progress_updates < max_progress_updates
-                    and (now_monotonic >= next_progress_at or heartbeat_due)
+                    and now_monotonic >= next_progress_at
                 ):
-                    progress = (
-                        session.progress_heartbeat()
-                        if heartbeat_due
-                        else session.latest_progress
-                    )
+                    progress = session.latest_progress
                     if progress and progress != last_progress:
-                        progress_text = self.agent_runtime.render_auto_message(
-                            "progress",
-                            {
-                                "progress": progress,
-                                "request_count": len(batch) + len(consumed),
-                                "contact_name": batch[0].contact.display_name,
-                                "contact_alias": batch[0].contact.alias,
-                                "self_name": self.settings.self_name,
-                            },
-                        )
-                        if progress_text:
-                            try:
-                                if stream_card_id:
-                                    await self.dws.update_card(
-                                        stream_card_id, progress_text, 2
-                                    )
-                                else:
-                                    await self._send_supervisor_text(
-                                        batch[0].contact,
-                                        batch[0].conversation_id,
-                                        progress_text,
-                                        f"{session_id}:progress:{progress_updates + 1}",
-                                    )
-                                progress_updates += 1
-                                last_progress = progress
-                            except Exception as exc:
-                                LOG.warning(
-                                    "progress update failed session=%s error=%s",
-                                    session_id,
-                                    exc,
-                                )
+                        try:
+                            await self.dws.update_card(stream_card_id, progress, 2)
+                            progress_updates += 1
+                            last_progress = progress
+                        except Exception as exc:
+                            LOG.warning(
+                                "progress update failed session=%s error=%s",
+                                session_id,
+                                exc,
+                            )
                     next_progress_at = now_monotonic + progress_interval
-                if heartbeat_due:
-                    next_heartbeat_at = now_monotonic + heartbeat_interval
                 if now_monotonic < next_history_at:
                     continue
                 next_history_at = now_monotonic + interval
@@ -1868,14 +1429,13 @@ class AgentService:
                     ),
                     error=session.error,
                 )
-            parsed = session.decision()
-            decision = parsed if front else normalize_decision(parsed)
             return AgentResult(
                 session_id,
-                decision,
+                session.result(),
                 session.exit_code if session.exit_code is not None else 0,
                 started_at,
                 datetime.now(self.settings.timezone),
+                escalated=session.escalated,
                 consumed_supplements=sorted(
                     consumed.values(), key=lambda item: item.created_at
                 ),
@@ -1883,7 +1443,7 @@ class AgentService:
         except asyncio.CancelledError:
             await session.abort()
             raise
-        except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             return AgentResult(
                 session_id,
                 None,
@@ -1923,232 +1483,6 @@ class AgentService:
             images.append(image)
         return tuple(images)
 
-    async def _discover_session_changes(
-        self,
-        result: AgentResult,
-        declared_changes: Sequence[Mapping[str, Any]],
-    ) -> list[dict[str, Any]]:
-        declared_paths = {
-            str(Path(str(item.get("worktree"))).resolve())
-            for item in declared_changes
-            if item.get("worktree")
-        }
-        discovered: list[dict[str, Any]] = []
-        for candidate in self.settings.worktree_root.glob(f"{result.session_id}-*"):
-            candidate = candidate.resolve()
-            if str(candidate) in declared_paths or not candidate.is_dir():
-                continue
-            root_code, root_text = await self._run_git(candidate, "rev-parse", "--show-toplevel")
-            if root_code != 0:
-                continue
-            root = Path(root_text).resolve()
-            dirty_code, dirty = await self._run_git(root, "status", "--porcelain")
-            head_code, head = await self._run_git(root, "rev-parse", "HEAD")
-            branch_code, branch = await self._run_git(root, "branch", "--show-current")
-            reflog_code, reflog = await self._run_git(
-                root, "reflog", "--date=unix", "--format=%H%x09%gs%x09%gD"
-            )
-            session_commits: list[str] = []
-            base_sha = head
-            if reflog_code == 0:
-                earliest_second = int(result.started_at.timestamp()) - 1
-                records: list[tuple[str, str, int]] = []
-                for line in reflog.splitlines():
-                    parts = line.split("\t", 2)
-                    timestamp_match = re.search(r"@\{(\d+)\}$", parts[2]) if len(parts) == 3 else None
-                    if timestamp_match is None:
-                        continue
-                    records.append((parts[0], parts[1], int(timestamp_match.group(1))))
-                changed_at = [
-                    index
-                    for index, (_, action, timestamp) in enumerate(records)
-                    if timestamp >= earliest_second
-                    and action.lower().startswith(
-                        ("commit", "merge", "rebase", "cherry-pick", "revert")
-                    )
-                ]
-                if changed_at:
-                    oldest_change = max(changed_at)
-                    if oldest_change + 1 < len(records):
-                        base_sha = records[oldest_change + 1][0]
-                    else:
-                        first_changed_sha = records[oldest_change][0]
-                        base_code, base_text = await self._run_git(
-                            root, "rev-parse", f"{first_changed_sha}^"
-                        )
-                        if base_code == 0:
-                            base_sha = base_text
-                    if head_code == 0 and base_sha != head:
-                        commits_code, commits_text = await self._run_git(
-                            root, "rev-list", "--reverse", f"{base_sha}..{head}"
-                        )
-                        if commits_code == 0:
-                            session_commits = [
-                                line for line in commits_text.splitlines() if line
-                            ]
-            if not dirty and not session_commits:
-                continue
-            dirty_files = self._status_files(dirty) if dirty_code == 0 else []
-            discovered.append(
-                {
-                    "repo": root.name,
-                    "worktree": str(root),
-                    "branch": branch if branch_code == 0 else "",
-                    "base_sha": base_sha if head_code == 0 else "",
-                    "head_sha": head if head_code == 0 else "",
-                    "commits": session_commits,
-                    "files": dirty_files,
-                    "pushed_to": [],
-                }
-            )
-        return discovered
-
-    @staticmethod
-    def _status_files(status_text: str) -> list[str]:
-        files: list[str] = []
-        for line in status_text.splitlines():
-            path = line[3:].strip() if len(line) > 3 else ""
-            if " -> " in path:
-                path = path.rsplit(" -> ", 1)[-1]
-            if path:
-                files.append(path.strip('"'))
-        return sorted(set(files))
-
-    async def _run_git(self, worktree: Path, *arguments: str) -> tuple[int, str]:
-        process = await asyncio.create_subprocess_exec(
-            "git",
-            "-C",
-            str(worktree),
-            *arguments,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await process.communicate()
-        output = stdout.decode("utf-8", errors="replace").strip()
-        if process.returncode != 0:
-            output = stderr.decode("utf-8", errors="replace").strip()
-        return process.returncode or 0, output
-
-    async def _verify_changes(
-        self, raw_changes: Sequence[Mapping[str, Any]]
-    ) -> list[ChangeEvidence]:
-        verified: list[ChangeEvidence] = []
-        for raw in raw_changes:
-            worktree_text = str(raw.get("worktree") or "")
-            item = ChangeEvidence(
-                repo=str(raw.get("repo") or ""),
-                worktree=worktree_text,
-                branch=str(raw.get("branch") or ""),
-                base_sha=str(raw.get("base_sha") or ""),
-                head_sha=str(raw.get("head_sha") or ""),
-                commits=[str(x) for x in raw.get("commits", [])],
-                files=[str(x) for x in raw.get("files", [])],
-                pushed_to=[str(x) for x in raw.get("pushed_to", [])],
-            )
-            if not worktree_text:
-                item.warning = "缺少 worktree 路径"
-                verified.append(item)
-                continue
-            worktree = Path(worktree_text).resolve()
-            if not _is_beneath(worktree, self.settings.worktree_root):
-                # Existing tags and release inputs are not changes made by this session.
-                continue
-            root_code, root_text = await self._run_git(worktree, "rev-parse", "--show-toplevel")
-            if root_code != 0:
-                item.warning = "无法核验 git worktree"
-                verified.append(item)
-                continue
-            root = Path(root_text).resolve()
-            if not _is_beneath(root, self.settings.worktree_root):
-                item.warning = "git 根目录逃逸出规定的独立 worktree 根目录"
-                verified.append(item)
-                continue
-            branch_code, branch = await self._run_git(root, "branch", "--show-current")
-            head_code, head = await self._run_git(root, "rev-parse", "HEAD")
-            dirty_code, dirty = await self._run_git(root, "status", "--porcelain")
-            if branch_code == 0:
-                item.branch = branch
-            if head_code == 0:
-                declared_head = item.head_sha
-                item.head_sha = head
-            else:
-                declared_head = item.head_sha
-            item.worktree = str(root)
-            item.repo = item.repo or root.name
-            base_valid = False
-            if item.base_sha:
-                base_code, _ = await self._run_git(
-                    root, "cat-file", "-e", f"{item.base_sha}^{{commit}}"
-                )
-                base_valid = base_code == 0
-            if base_valid and head:
-                files_code, files_text = await self._run_git(
-                    root, "diff", "--name-only", item.base_sha, head
-                )
-                commits_code, commits_text = await self._run_git(
-                    root, "log", "--format=%H", f"{item.base_sha}..{head}"
-                )
-                if files_code == 0:
-                    item.files = [line for line in files_text.splitlines() if line]
-                if commits_code == 0:
-                    item.commits = [line for line in commits_text.splitlines() if line]
-            if dirty_code == 0 and dirty:
-                item.files = sorted(set([*item.files, *self._status_files(dirty)]))
-            warnings: list[str] = []
-            if dirty_code != 0 or dirty:
-                warnings.append("worktree 仍有未提交改动")
-            if not item.branch:
-                warnings.append("无法核验当前分支")
-            if not declared_head:
-                warnings.append("缺少声明的 head_sha")
-            elif head and not head.startswith(declared_head):
-                warnings.append("声明的 head_sha 与实际 HEAD 不一致")
-            if not item.base_sha:
-                warnings.append("缺少 base_sha，无法建立变更边界")
-            elif not base_valid:
-                warnings.append("base_sha 不是可核验提交")
-            if not item.commits:
-                warnings.append("没有可核验的提交回滚点")
-            if item.commits and not item.files:
-                warnings.append("提交范围内没有可列出的改动文件")
-            if item.pushed_to:
-                remote_code, remote_refs = await self._run_git(
-                    root, "branch", "-r", "--contains", head
-                )
-                actual_refs = {line.strip().lstrip("*").strip() for line in remote_refs.splitlines()}
-                for target in item.pushed_to:
-                    normalized = target.strip()
-                    target_found = any(
-                        ref == normalized
-                        or ref.endswith(f"/{normalized}")
-                        or normalized.endswith(f"/{ref}")
-                        for ref in actual_refs
-                    )
-                    if remote_code != 0 or not target_found:
-                        warnings.append(f"未核验到远端分支包含该提交：{normalized}")
-            item.warning = "；".join(warnings)
-            item.verified = not warnings and head_code == 0
-            verified.append(item)
-        return verified
-
-    async def _freshness_state(
-        self, batch: Sequence[IncomingEvent]
-    ) -> tuple[str, list[IncomingEvent]]:
-        history = await self.dws.history(batch[0].contact)
-        latest_manual = self._register_manual_messages(history)
-        earliest = min(item.created_at for item in batch)
-        if self._human_owns_conversation(latest_manual, earliest):
-            return "manual", []
-        known = {item.message_id for item in batch}
-        supplements = [
-            item
-            for item in self._history_events(
-                batch[0].contact, batch[0].conversation_id, history, earliest
-            )
-            if item.message_id not in known
-        ]
-        return ("supplement", supplements) if supplements else ("fresh", [])
-
     async def _send_supervisor_text(
         self,
         contact: Contact,
@@ -2159,7 +1493,11 @@ class AgentService:
         retry_network: bool = False,
     ) -> None:
         if self.mode == "shadow":
-            LOG.info("shadow supervisor message contact=%s chars=%d", contact.alias, len(content))
+            LOG.info(
+                "shadow supervisor message contact=%s chars=%d",
+                contact.alias,
+                len(content),
+            )
             return
         send_uuid = str(uuid.uuid4())
         sent_at = datetime.now(self.settings.timezone)
@@ -2192,7 +1530,9 @@ class AgentService:
                     session_id,
                 )
             except Exception:
-                LOG.exception("outgoing message-id update failed session=%s", session_id)
+                LOG.exception(
+                    "outgoing message-id update failed session=%s", session_id
+                )
 
     async def _start_streaming_card(
         self,
@@ -2246,122 +1586,57 @@ class AgentService:
     async def _send_after_freshness_check(
         self,
         batch: Sequence[IncomingEvent],
-        decision: Mapping[str, Any],
-        changes: Sequence[ChangeEvidence],
+        reply: str,
         *,
         stream_card_id: str = "",
+        session_id: str = "",
     ) -> str:
         state, _ = await self._freshness_state(batch)
         if state == "manual":
             return "human_cooldown"
         if state == "supplement":
             return "supplement"
-        attachment_path: Path | None = None
-        attachment_requested = bool(changes) and decision.get("delivery") == "attachment"
-        if attachment_requested:
-            if any(not item.verified for item in changes):
-                raise ValueError("refusing to attach unverified code changes")
-            primary = changes[0]
-            suffix = (primary.head_sha or "changes")[:12]
-            archive_name = f"{primary.repo or 'code'}-{suffix}.zip"
-            attachment_path = self.settings.state_dir / "deliveries" / archive_name
-            build_change_archive(changes, attachment_path)
-            state, _ = await self._freshness_state(batch)
-            if state != "fresh":
-                attachment_path.unlink(missing_ok=True)
-                return "human_cooldown" if state == "manual" else "supplement"
         content = sanitize_text(
-            render_reply(decision, changes),
+            reply,
             int(self.settings.raw.get("max_reply_chars", 16000)),
         )
+        if not content:
+            raise ValueError("refusing to send an empty reply")
         self._set_runtime(batch, "sending")
         if self.mode == "shadow":
             LOG.info(
-                "shadow reply contact=%s action=%s chars=%d",
+                "shadow reply contact=%s chars=%d",
                 batch[0].contact.alias,
-                decision.get("action"),
                 len(content),
             )
-            if attachment_path:
-                LOG.info(
-                    "shadow attachment contact=%s file=%s",
-                    batch[0].contact.alias,
-                    attachment_path.name,
-                )
-                attachment_path.unlink(missing_ok=True)
             return "shadow"
-        session_id = str(decision.get("session_id") or uuid.uuid4())
-        try:
-            if attachment_path:
-                file_uuid = str(uuid.uuid4())
-                file_sent_at = datetime.now(self.settings.timezone)
-                self.store.record_outgoing(
-                    file_uuid,
-                    None,
-                    batch[0].conversation_id,
-                    batch[0].contact.identity,
-                    file_sent_at,
-                    attachment_path.name,
-                    session_id,
+        outgoing_session = session_id or str(uuid.uuid4())
+        if stream_card_id:
+            try:
+                await self.dws.update_card(stream_card_id, content, 3)
+            except Exception as exc:
+                LOG.warning(
+                    "streaming card final update failed; falling back to text "
+                    "session=%s error=%s",
+                    outgoing_session,
+                    sanitize_text(str(exc), 300),
                 )
-                try:
-                    file_message_id, _ = await self.dws.send_file(
-                        batch[0].contact, attachment_path, file_uuid
-                    )
-                except Exception:
-                    with suppress(Exception):
-                        self.store.remove_outgoing(file_uuid)
-                    raise
-                if file_message_id:
-                    try:
-                        self.store.record_outgoing(
-                            file_uuid,
-                            file_message_id,
-                            batch[0].conversation_id,
-                            batch[0].contact.identity,
-                            file_sent_at,
-                            attachment_path.name,
-                            session_id,
-                        )
-                    except Exception:
-                        LOG.exception(
-                            "outgoing file message-id update failed session=%s",
-                            session_id,
-                        )
-                # A final report is another outbound action, so check again
-                # after the upload in case the other person added a request.
-                state, _ = await self._freshness_state(batch)
-                if state != "fresh":
-                    return "human_cooldown" if state == "manual" else "supplement"
-            if stream_card_id:
-                try:
-                    await self.dws.update_card(stream_card_id, content, 3)
-                except Exception as exc:
-                    LOG.warning(
-                        "streaming card final update failed; falling back to text "
-                        "session=%s error=%s",
-                        session_id,
-                        sanitize_text(str(exc), 300),
-                    )
-                    await self._send_supervisor_text(
-                        batch[0].contact,
-                        batch[0].conversation_id,
-                        content,
-                        session_id,
-                        retry_network=True,
-                    )
-            else:
                 await self._send_supervisor_text(
                     batch[0].contact,
                     batch[0].conversation_id,
                     content,
-                    session_id,
+                    outgoing_session,
                     retry_network=True,
                 )
-        finally:
-            if attachment_path:
-                attachment_path.unlink(missing_ok=True)
-        LOG.info("reply sent contact=%s action=%s", batch[0].contact.alias, decision.get("action"))
+        else:
+            await self._send_supervisor_text(
+                batch[0].contact,
+                batch[0].conversation_id,
+                content,
+                outgoing_session,
+                retry_network=True,
+            )
+        LOG.info("reply sent contact=%s", batch[0].contact.alias)
         return "sent"
 
 
@@ -2397,7 +1672,6 @@ async def _doctor(settings: Settings) -> int:
     checks.append(("config", not errors, "; ".join(errors) if errors else "ok"))
     binaries = {
         "dws": str(settings.raw.get("dws", {}).get("binary", "dws")),
-        "git": "git",
     }
     if not errors:
         runtime = AgentRuntime.from_config(
