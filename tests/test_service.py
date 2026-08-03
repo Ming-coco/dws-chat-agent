@@ -605,6 +605,52 @@ class PlainAgentFlowTests(unittest.TestCase):
         self.assertIn("最终只输出", worker)
         self.assertNotIn("最终输出严格符合提供的 JSON Schema", worker)
 
+    def test_streaming_card_without_message_id_is_bound_before_progress_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AuditStore(Path(directory) / "audit.sqlite3")
+            created_at = datetime.now(TZ) + timedelta(seconds=5)
+            history = HistoryMessage(
+                "card-message",
+                "conversation-1",
+                "Operator",
+                "self-open-id",
+                "正在处理",
+                created_at,
+            )
+            service = AgentService.__new__(AgentService)
+            service.mode = "live"
+            service.settings = SimpleNamespace(
+                timezone=TZ,
+                self_open_id="self-open-id",
+            )
+            service.store = store
+            service.dws = SimpleNamespace(
+                send_card=AsyncMock(return_value=("card-biz", None, {})),
+                update_card=AsyncMock(),
+                history=AsyncMock(return_value=[history]),
+            )
+
+            card_id = asyncio.run(
+                service._start_streaming_card(
+                    CONTACT,
+                    "conversation-1",
+                    "正在处理",
+                    "ack-session",
+                )
+            )
+
+            changed = HistoryMessage(
+                history.message_id,
+                history.conversation_id,
+                history.sender,
+                history.sender_open_dingtalk_id,
+                "已停止自动处理，已转人工。",
+                history.created_at,
+            )
+            self.assertEqual(card_id, "card-biz")
+            self.assertTrue(store.is_agent_outgoing(changed))
+            store.close()
+
     def test_final_body_replaces_streaming_thought(self) -> None:
         service = AgentService.__new__(AgentService)
         service.settings = SimpleNamespace(raw={"max_reply_chars": 16000})

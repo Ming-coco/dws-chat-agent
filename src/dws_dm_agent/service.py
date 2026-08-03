@@ -1567,6 +1567,26 @@ class AgentService:
                 biz_id, "卡片初始化失败，请等待普通文本回复。", 5
             )
             raise
+        if not message_id:
+            try:
+                history = await self.dws.history(contact)
+                for message in reversed(history):
+                    if (
+                        message.conversation_id == conversation_id
+                        and message.sender_open_dingtalk_id
+                        == self.settings.self_open_id
+                        and self.store.is_agent_outgoing(message)
+                        and self.store.outgoing_session_id(message.message_id)
+                        == session_id
+                    ):
+                        self.store.remove_manual(message.message_id)
+                        break
+            except Exception as exc:
+                LOG.warning(
+                    "streaming card message-id reconciliation failed session=%s error=%s",
+                    session_id,
+                    sanitize_text(str(exc), 300),
+                )
         return biz_id
 
     async def _safe_update_streaming_card(
