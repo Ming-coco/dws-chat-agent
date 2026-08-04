@@ -1553,6 +1553,15 @@ class AgentService:
                 len(content),
             )
             return ""
+        active_card = self.store.active_streaming_card(conversation_id)
+        if active_card:
+            biz_id, send_uuid = active_card
+            card_send_uuids = getattr(self, "streaming_card_send_uuids", None)
+            if card_send_uuids is None:
+                card_send_uuids = self.streaming_card_send_uuids = {}
+            card_send_uuids[biz_id] = send_uuid
+            await self._update_streaming_card(biz_id, content, 2)
+            return biz_id
         try:
             async with asyncio.timeout(_STREAM_CARD_BIND_TIMEOUT_SECONDS):
                 baseline = {
@@ -1581,6 +1590,8 @@ class AgentService:
             sent_at,
             marked_content,
             session_id,
+            card_biz_id=biz_id,
+            card_flow_status=2,
         )
         card_send_uuids = getattr(self, "streaming_card_send_uuids", None)
         if card_send_uuids is None:
@@ -1636,8 +1647,6 @@ class AgentService:
         await self._safe_update_streaming_card(
             biz_id, "卡片识别失败，请等待普通文本回复。", 5
         )
-        if new_messages:
-            self.store.remove_outgoing(send_uuid)
         LOG.warning(
             "streaming card message-id ambiguous session=%s new_self_messages=%d",
             session_id,
@@ -1653,7 +1662,7 @@ class AgentService:
             await self.dws.update_card(biz_id, content, flow_status)
             send_uuid = card_send_uuids.get(biz_id)
             if send_uuid:
-                self.store.update_outgoing_content(send_uuid, content)
+                self.store.update_streaming_card(send_uuid, content, flow_status)
         finally:
             if flow_status in {3, 5}:
                 card_send_uuids.pop(biz_id, None)

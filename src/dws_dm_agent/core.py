@@ -265,7 +265,9 @@ class AuditStore:
                 contact_user_id TEXT NOT NULL,
                 sent_at TEXT NOT NULL,
                 content_sha256 TEXT NOT NULL,
-                session_id TEXT NOT NULL
+                session_id TEXT NOT NULL,
+                card_biz_id TEXT,
+                card_flow_status INTEGER
             );
             CREATE INDEX IF NOT EXISTS outgoing_conversation_time
                 ON outgoing(conversation_id, sent_at);
@@ -298,16 +300,23 @@ class AuditStore:
             """
         )
         migrations = {
-            "events": "request_preview TEXT NOT NULL DEFAULT ''",
-            "runs": "request_preview TEXT NOT NULL DEFAULT ''",
+            "events": {"request_preview": "request_preview TEXT NOT NULL DEFAULT ''"},
+            "runs": {"request_preview": "request_preview TEXT NOT NULL DEFAULT ''"},
+            "outgoing": {
+                "card_biz_id": "card_biz_id TEXT",
+                "card_flow_status": "card_flow_status INTEGER",
+            },
         }
-        for table, column in migrations.items():
+        for table, columns in migrations.items():
             names = {
                 row["name"]
                 for row in self.connection.execute(f"PRAGMA table_info({table})")
             }
-            if "request_preview" not in names:
-                self.connection.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+            for name, definition in columns.items():
+                if name not in names:
+                    self.connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {definition}"
+                    )
         self.connection.commit()
 
     def claim_event(self, event: IncomingEvent) -> bool:
@@ -363,13 +372,19 @@ class AuditStore:
         sent_at: datetime,
         content: str,
         session_id: str,
+        *,
+        card_biz_id: str | None = None,
+        card_flow_status: int | None = None,
     ) -> None:
         self.connection.execute(
             """
             INSERT OR REPLACE INTO outgoing(
                 send_uuid, message_id, conversation_id, contact_user_id,
-                sent_at, content_sha256, session_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                sent_at, content_sha256, session_id, card_biz_id, card_flow_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?,
+                COALESCE(?, (SELECT card_biz_id FROM outgoing WHERE send_uuid = ?)),
+                COALESCE(?, (SELECT card_flow_status FROM outgoing WHERE send_uuid = ?))
+            )
             """,
             (
                 send_uuid,
@@ -379,6 +394,10 @@ class AuditStore:
                 sent_at.isoformat(),
                 sha256_text(canonical_message_text(content)),
                 session_id,
+                card_biz_id,
+                send_uuid,
+                card_flow_status,
+                send_uuid,
             ),
         )
         self.connection.commit()
@@ -394,6 +413,37 @@ class AuditStore:
             """,
             (
                 sha256_text(canonical_message_text(content)),
+                send_uuid,
+            ),
+        )
+        self.connection.commit()
+
+    def active_streaming_card(self, conversation_id: str) -> tuple[str, str] | None:
+        row = self.connection.execute(
+            """
+            SELECT card_biz_id, send_uuid FROM outgoing
+            WHERE conversation_id = ? AND card_biz_id IS NOT NULL
+              AND (card_flow_status IS NULL OR card_flow_status NOT IN (3, 5))
+            ORDER BY sent_at DESC LIMIT 1
+            """,
+            (conversation_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return str(row["card_biz_id"]), str(row["send_uuid"])
+
+    def update_streaming_card(
+        self, send_uuid: str, content: str, flow_status: int
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE outgoing
+            SET content_sha256 = ?, card_flow_status = ?
+            WHERE send_uuid = ?
+            """,
+            (
+                sha256_text(canonical_message_text(content)),
+                flow_status,
                 send_uuid,
             ),
         )
