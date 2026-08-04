@@ -97,10 +97,17 @@ class DwsClient:
         )
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-        except TimeoutError:
-            process.terminate()
-            with suppress(TimeoutError):
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            with suppress(ProcessLookupError):
+                process.terminate()
+            try:
                 await asyncio.wait_for(process.wait(), timeout=5)
+            except TimeoutError:
+                with suppress(ProcessLookupError):
+                    process.kill()
+                await process.wait()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             raise RuntimeError(f"DWS command timed out: {' '.join(arguments[:3])}")
         if process.returncode != 0:
             operation = " ".join(arguments[:3])

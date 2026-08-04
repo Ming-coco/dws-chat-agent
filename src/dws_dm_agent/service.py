@@ -35,6 +35,7 @@ from .core import (
     HistoryMessage,
     IncomingEvent,
     SecurityGate,
+    canonical_message_text,
     human_owns_conversation,
     parse_dws_event,
     parse_local_datetime,
@@ -59,6 +60,7 @@ LOG = logging.getLogger("dws-chat-agent")
 _IMAGE_MEDIA_ID = re.compile(r"\[图片消息\]\(mediaId=([^)\s]+)\)")
 _MAX_IMAGES = 4
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
+_STREAM_CARD_BIND_TIMEOUT_SECONDS = 6.0
 
 
 def _event_consume_command(
@@ -171,6 +173,7 @@ class AgentService:
         self.global_slots = asyncio.Semaphore(self.capacity)
         self.runtime_path = settings.state_dir / "runtime.json"
         self.runtime_states: dict[str, dict[str, Any]] = {}
+        self.streaming_card_send_uuids: dict[str, str] = {}
         # Ponytail ceiling: this lock only covers idle-check/config-swap/enqueue;
         # move config application onto the event loop if those operations grow.
         self.configuration_lock = threading.RLock()
@@ -1321,7 +1324,9 @@ class AgentService:
                     progress = session.latest_progress
                     if progress and progress != last_progress:
                         try:
-                            await self.dws.update_card(stream_card_id, progress, 2)
+                            await self._update_streaming_card(
+                                stream_card_id, progress, 2
+                            )
                             progress_updates += 1
                             last_progress = progress
                         except Exception as exc:
@@ -1548,8 +1553,25 @@ class AgentService:
                 len(content),
             )
             return ""
+        try:
+            async with asyncio.timeout(_STREAM_CARD_BIND_TIMEOUT_SECONDS):
+                baseline = {
+                    message.message_id
+                    for message in await self.dws.history(contact)
+                    if message.conversation_id == conversation_id
+                    and message.sender_open_dingtalk_id
+                    == self.settings.self_open_id
+                }
+        except Exception as exc:
+            LOG.warning(
+                "streaming card baseline failed contact=%s error=%s",
+                contact.alias,
+                sanitize_text(str(exc), 300),
+            )
+            return ""
         sent_at = datetime.now(self.settings.timezone)
         send_uuid = str(uuid.uuid4())
+        marked_content = f"{content}\n\n处理编号：{send_uuid[:8]}"
         biz_id, message_id, _ = await self.dws.send_card(contact)
         self.store.record_outgoing(
             send_uuid,
@@ -1557,37 +1579,84 @@ class AgentService:
             conversation_id,
             contact.identity,
             sent_at,
-            content,
+            marked_content,
             session_id,
         )
+        card_send_uuids = getattr(self, "streaming_card_send_uuids", None)
+        if card_send_uuids is None:
+            card_send_uuids = self.streaming_card_send_uuids = {}
+        card_send_uuids[biz_id] = send_uuid
         try:
-            await self.dws.update_card(biz_id, content, 2)
+            await self._update_streaming_card(biz_id, marked_content, 2)
         except Exception:
             await self._safe_update_streaming_card(
                 biz_id, "卡片初始化失败，请等待普通文本回复。", 5
             )
             raise
-        if not message_id:
-            try:
-                history = await self.dws.history(contact)
-                for message in reversed(history):
-                    if (
-                        message.conversation_id == conversation_id
+        if message_id:
+            await self._safe_update_streaming_card(biz_id, content, 2)
+            return biz_id
+        new_messages: dict[str, HistoryMessage] = {}
+        try:
+            async with asyncio.timeout(_STREAM_CARD_BIND_TIMEOUT_SECONDS):
+                for delay in (0.25, 0.5, 1.0, 2.0):
+                    await asyncio.sleep(delay)
+                    history = await self.dws.history(contact)
+                    new_messages = {
+                        message.message_id: message
+                        for message in history
+                        if message.message_id not in baseline
+                        and message.conversation_id == conversation_id
                         and message.sender_open_dingtalk_id
                         == self.settings.self_open_id
-                        and self.store.is_agent_outgoing(message)
-                        and self.store.outgoing_session_id(message.message_id)
-                        == session_id
+                    }
+                    marked_candidates = [
+                        message
+                        for message in new_messages.values()
+                        if canonical_message_text(message.content)
+                        == canonical_message_text(marked_content)
+                    ]
+                    if (
+                        len(marked_candidates) == 1
+                        and self.store.bind_outgoing_id(
+                            send_uuid, marked_candidates[0].message_id
+                        )
                     ):
-                        self.store.remove_manual(message.message_id)
-                        break
-            except Exception as exc:
-                LOG.warning(
-                    "streaming card message-id reconciliation failed session=%s error=%s",
-                    session_id,
-                    sanitize_text(str(exc), 300),
-                )
-        return biz_id
+                        self.store.remove_manual(marked_candidates[0].message_id)
+                        await self._safe_update_streaming_card(
+                            biz_id, content, 2
+                        )
+                        return biz_id
+        except Exception as exc:
+            LOG.warning(
+                "streaming card message-id reconciliation failed session=%s error=%s",
+                session_id,
+                sanitize_text(str(exc), 300),
+            )
+        await self._safe_update_streaming_card(
+            biz_id, "卡片识别失败，请等待普通文本回复。", 5
+        )
+        if new_messages:
+            self.store.remove_outgoing(send_uuid)
+        LOG.warning(
+            "streaming card message-id ambiguous session=%s new_self_messages=%d",
+            session_id,
+            len(new_messages),
+        )
+        return ""
+
+    async def _update_streaming_card(
+        self, biz_id: str, content: str, flow_status: int
+    ) -> None:
+        card_send_uuids = getattr(self, "streaming_card_send_uuids", {})
+        try:
+            await self.dws.update_card(biz_id, content, flow_status)
+            send_uuid = card_send_uuids.get(biz_id)
+            if send_uuid:
+                self.store.update_outgoing_content(send_uuid, content)
+        finally:
+            if flow_status in {3, 5}:
+                card_send_uuids.pop(biz_id, None)
 
     async def _safe_update_streaming_card(
         self, biz_id: str, content: str, flow_status: int
@@ -1595,7 +1664,7 @@ class AgentService:
         if not biz_id or getattr(self, "mode", "live") == "shadow":
             return
         try:
-            await self.dws.update_card(biz_id, content, flow_status)
+            await self._update_streaming_card(biz_id, content, flow_status)
         except Exception as exc:
             LOG.warning(
                 "streaming card update failed status=%d error=%s",
@@ -1633,7 +1702,7 @@ class AgentService:
         outgoing_session = session_id or str(uuid.uuid4())
         if stream_card_id:
             try:
-                await self.dws.update_card(stream_card_id, content, 3)
+                await self._update_streaming_card(stream_card_id, content, 3)
             except Exception as exc:
                 LOG.warning(
                     "streaming card final update failed; falling back to text "

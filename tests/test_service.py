@@ -338,6 +338,64 @@ class AuditStoreTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row["message_id"], "message-out-2")
 
+    def test_unbound_card_content_is_recognized_without_binding_message_id(self) -> None:
+        sent_at = datetime(2026, 7, 20, 10, 0, tzinfo=TZ)
+        self.store.record_outgoing(
+            "card-1",
+            None,
+            "conversation-1",
+            CONTACT.user_id,
+            sent_at,
+            "正在处理",
+            "ack-session",
+        )
+        card = HistoryMessage(
+            "card-message",
+            "conversation-1",
+            "Operator",
+            "self-open-id",
+            "正在处理",
+            sent_at,
+        )
+        unrelated = HistoryMessage(
+            "manual-message",
+            "conversation-1",
+            "Operator",
+            "self-open-id",
+            "人工回复",
+            sent_at + timedelta(seconds=2),
+        )
+
+        self.assertTrue(self.store.is_agent_outgoing(card))
+        self.assertFalse(self.store.is_agent_outgoing(unrelated))
+        row = self.store.connection.execute(
+            "SELECT message_id FROM outgoing WHERE send_uuid = 'card-1'"
+        ).fetchone()
+        self.assertIsNone(row["message_id"])
+
+    def test_unbound_card_keeps_original_time_when_content_changes(self) -> None:
+        sent_at = datetime(2026, 7, 20, 10, 0, tzinfo=TZ)
+        self.store.record_outgoing(
+            "card-1",
+            None,
+            "conversation-1",
+            CONTACT.user_id,
+            sent_at,
+            "正在处理",
+            "ack-session",
+        )
+        self.store.update_outgoing_content("card-1", "最终回复")
+        final_card = HistoryMessage(
+            "card-message",
+            "conversation-1",
+            "Operator",
+            "self-open-id",
+            "最终回复",
+            sent_at,
+        )
+
+        self.assertTrue(self.store.is_agent_outgoing(final_card))
+
     def test_reconciliation_prefers_content_before_adjacent_file_timestamp(self) -> None:
         sent_at = datetime(2026, 7, 20, 10, 0, tzinfo=TZ)
         self.store.record_outgoing(
@@ -387,6 +445,40 @@ class AuditStoreTests(unittest.TestCase):
 
 
 class DwsSendTests(unittest.TestCase):
+    def test_cancelled_command_reaps_subprocess(self) -> None:
+        started = asyncio.Event()
+
+        async def communicate():
+            started.set()
+            await asyncio.Event().wait()
+
+        process = SimpleNamespace(
+            communicate=AsyncMock(side_effect=communicate),
+            wait=AsyncMock(return_value=0),
+            terminate=Mock(),
+            kill=Mock(),
+            returncode=None,
+        )
+        client = object.__new__(DwsClient)
+        client.binary = "dws"
+        client.profile = None
+
+        async def exercise() -> None:
+            with patch(
+                "dws_dm_agent.dws.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ):
+                task = asyncio.create_task(client._json_command(["chat", "message", "list"]))
+                await started.wait()
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+        asyncio.run(exercise())
+        process.terminate.assert_called_once_with()
+        process.wait.assert_awaited_once_with()
+        process.kill.assert_not_called()
+
     def test_error_code_comes_from_structured_field(self) -> None:
         output = json.dumps(
             {
@@ -605,12 +697,93 @@ class PlainAgentFlowTests(unittest.TestCase):
         self.assertIn("最终只输出", worker)
         self.assertNotIn("最终输出严格符合提供的 JSON Schema", worker)
 
-    def test_streaming_card_without_message_id_is_bound_before_progress_updates(self) -> None:
+    def test_streaming_card_content_is_recognized_during_progress_updates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = AuditStore(Path(directory) / "audit.sqlite3")
-            created_at = datetime.now(TZ) + timedelta(seconds=5)
-            history = HistoryMessage(
+            created_at = datetime.now(TZ)
+            card_history = HistoryMessage(
                 "card-message",
+                "conversation-1",
+                "Operator",
+                "self-open-id",
+                "正在处理\n\n处理编号：cardtoke",
+                created_at,
+            )
+            service = AgentService.__new__(AgentService)
+            service.mode = "live"
+            service.settings = SimpleNamespace(
+                timezone=TZ,
+                self_open_id="self-open-id",
+            )
+            service.store = store
+            service.dws = SimpleNamespace(
+                send_card=AsyncMock(return_value=("card-biz", None, {})),
+                update_card=AsyncMock(),
+                history=AsyncMock(
+                    side_effect=[[], *([[card_history]] * 4)]
+                ),
+            )
+
+            with (
+                patch(
+                    "dws_dm_agent.service.asyncio.sleep", new_callable=AsyncMock
+                ),
+                patch(
+                    "dws_dm_agent.service.uuid.uuid4",
+                    return_value="cardtoken",
+                ),
+            ):
+                card_id = asyncio.run(
+                    service._start_streaming_card(
+                        CONTACT,
+                        "conversation-1",
+                        "正在处理",
+                        "ack-session",
+                    )
+                )
+            asyncio.run(
+                service._update_streaming_card(
+                    card_id, "正在查询相关数据", 2
+                )
+            )
+            progress = HistoryMessage(
+                "card-message",
+                "conversation-1",
+                "Operator",
+                "self-open-id",
+                "正在查询相关数据",
+                created_at,
+            )
+            manual = HistoryMessage(
+                "manual-message",
+                "conversation-1",
+                "Operator",
+                "self-open-id",
+                "我来处理",
+                created_at,
+            )
+
+            self.assertEqual(card_id, "card-biz")
+            service._register_manual_messages([progress])
+            self.assertIsNone(store.latest_manual("conversation-1"))
+            service._register_manual_messages([manual])
+            self.assertIsNotNone(store.latest_manual("conversation-1"))
+            store.close()
+
+    def test_streaming_card_binding_preserves_simultaneous_manual_takeover(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AuditStore(Path(directory) / "audit.sqlite3")
+            created_at = datetime.now(TZ)
+            card = HistoryMessage(
+                "card-message",
+                "conversation-1",
+                "Operator",
+                "self-open-id",
+                "正在处理\n\n处理编号：cardtoke",
+                created_at,
+            )
+            manual = HistoryMessage(
+                "manual-message",
                 "conversation-1",
                 "Operator",
                 "self-open-id",
@@ -627,28 +800,89 @@ class PlainAgentFlowTests(unittest.TestCase):
             service.dws = SimpleNamespace(
                 send_card=AsyncMock(return_value=("card-biz", None, {})),
                 update_card=AsyncMock(),
-                history=AsyncMock(return_value=[history]),
+                history=AsyncMock(
+                    side_effect=[[], *([[card, manual]] * 4)]
+                ),
             )
 
-            card_id = asyncio.run(
-                service._start_streaming_card(
-                    CONTACT,
-                    "conversation-1",
-                    "正在处理",
-                    "ack-session",
+            with (
+                patch(
+                    "dws_dm_agent.service.asyncio.sleep", new_callable=AsyncMock
+                ),
+                patch(
+                    "dws_dm_agent.service.uuid.uuid4",
+                    return_value="cardtoken",
+                ),
+            ):
+                card_id = asyncio.run(
+                    service._start_streaming_card(
+                        CONTACT,
+                        "conversation-1",
+                        "正在处理",
+                        "ack-session",
+                    )
                 )
+
+            self.assertEqual(card_id, "card-biz")
+            service._register_manual_messages([card, manual])
+            row = store.connection.execute(
+                "SELECT message_id FROM outgoing"
+            ).fetchone()
+            self.assertEqual(row["message_id"], "card-message")
+            self.assertIsNotNone(store.latest_manual("conversation-1"))
+            store.close()
+
+    def test_streaming_card_never_binds_unmarked_manual_ack(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AuditStore(Path(directory) / "audit.sqlite3")
+            manual = HistoryMessage(
+                "manual-message",
+                "conversation-1",
+                "Operator",
+                "self-open-id",
+                "正在处理",
+                datetime.now(TZ),
+            )
+            service = AgentService.__new__(AgentService)
+            service.mode = "live"
+            service.settings = SimpleNamespace(
+                timezone=TZ,
+                self_open_id="self-open-id",
+            )
+            service.store = store
+            service.dws = SimpleNamespace(
+                send_card=AsyncMock(return_value=("card-biz", None, {})),
+                update_card=AsyncMock(),
+                history=AsyncMock(
+                    side_effect=[[], *([[manual]] * 4)]
+                ),
             )
 
-            changed = HistoryMessage(
-                history.message_id,
-                history.conversation_id,
-                history.sender,
-                history.sender_open_dingtalk_id,
-                "已停止自动处理，已转人工。",
-                history.created_at,
+            with (
+                patch(
+                    "dws_dm_agent.service.asyncio.sleep", new_callable=AsyncMock
+                ),
+                patch(
+                    "dws_dm_agent.service.uuid.uuid4",
+                    return_value="cardtoken",
+                ),
+            ):
+                card_id = asyncio.run(
+                    service._start_streaming_card(
+                        CONTACT,
+                        "conversation-1",
+                        "正在处理",
+                        "ack-session",
+                    )
+                )
+
+            self.assertEqual(card_id, "")
+            self.assertEqual(
+                store.connection.execute(
+                    "SELECT COUNT(*) FROM outgoing"
+                ).fetchone()[0],
+                0,
             )
-            self.assertEqual(card_id, "card-biz")
-            self.assertTrue(store.is_agent_outgoing(changed))
             store.close()
 
     def test_final_body_replaces_streaming_thought(self) -> None:
