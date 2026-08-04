@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -289,6 +290,33 @@ class AuditStoreTests(unittest.TestCase):
         self.store.update_event_status(["message-1"], "processed")
         self.assertFalse(self.store.event_is_pending("message-1"))
 
+    def test_legacy_outgoing_table_adds_streaming_card_columns(self) -> None:
+        self.store.close()
+        self.store.path.unlink()
+        connection = sqlite3.connect(self.store.path)
+        connection.execute(
+            """
+            CREATE TABLE outgoing (
+                send_uuid TEXT PRIMARY KEY,
+                message_id TEXT UNIQUE,
+                conversation_id TEXT NOT NULL,
+                contact_user_id TEXT NOT NULL,
+                sent_at TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL,
+                session_id TEXT NOT NULL
+            )
+            """
+        )
+        connection.close()
+
+        self.store = AuditStore(self.store.path)
+
+        columns = {
+            row["name"]
+            for row in self.store.connection.execute("PRAGMA table_info(outgoing)")
+        }
+        self.assertTrue({"card_biz_id", "card_flow_status"} <= columns)
+
     def test_agent_outgoing_is_not_manual(self) -> None:
         sent_at = datetime(2026, 7, 20, 10, 0, tzinfo=TZ)
         self.store.record_outgoing(
@@ -395,6 +423,27 @@ class AuditStoreTests(unittest.TestCase):
         )
 
         self.assertTrue(self.store.is_agent_outgoing(final_card))
+
+    def test_active_streaming_card_survives_reopen_and_terminal_status(self) -> None:
+        sent_at = datetime(2026, 7, 20, 10, 0, tzinfo=TZ)
+        self.store.record_outgoing(
+            "card-1", None, "conversation-1", CONTACT.user_id, sent_at,
+            "正在处理", "ack-session", card_biz_id="card-biz", card_flow_status=2,
+        )
+        self.store.record_outgoing(
+            "card-1", "card-message", "conversation-1", CONTACT.user_id, sent_at,
+            "正在处理", "ack-session",
+        )
+        path = self.store.path
+        self.store.close()
+        self.store = AuditStore(path)
+
+        self.assertEqual(
+            self.store.active_streaming_card("conversation-1"),
+            ("card-biz", "card-1"),
+        )
+        self.store.update_streaming_card("card-1", "完成", 3)
+        self.assertIsNone(self.store.active_streaming_card("conversation-1"))
 
     def test_reconciliation_prefers_content_before_adjacent_file_timestamp(self) -> None:
         sent_at = datetime(2026, 7, 20, 10, 0, tzinfo=TZ)
@@ -832,7 +881,7 @@ class PlainAgentFlowTests(unittest.TestCase):
             self.assertIsNotNone(store.latest_manual("conversation-1"))
             store.close()
 
-    def test_streaming_card_never_binds_unmarked_manual_ack(self) -> None:
+    def test_ambiguous_streaming_card_keeps_robot_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = AuditStore(Path(directory) / "audit.sqlite3")
             manual = HistoryMessage(
@@ -881,9 +930,88 @@ class PlainAgentFlowTests(unittest.TestCase):
                 store.connection.execute(
                     "SELECT COUNT(*) FROM outgoing"
                 ).fetchone()[0],
-                0,
+                1,
             )
+            failed_card = HistoryMessage(
+                "card-message",
+                "conversation-1",
+                "Operator",
+                "self-open-id",
+                "卡片识别失败，请等待普通文本回复。",
+                datetime.now(TZ),
+            )
+            service._register_manual_messages([failed_card])
+            self.assertIsNone(store.latest_manual("conversation-1"))
+            service._register_manual_messages([manual])
+            self.assertIsNotNone(store.latest_manual("conversation-1"))
             store.close()
+
+    def test_streaming_card_reuses_persisted_active_card(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "audit.sqlite3"
+            store = AuditStore(path)
+            store.record_outgoing(
+                "card-1", None, "conversation-1", CONTACT.user_id,
+                datetime.now(TZ), "正在处理", "ack-session",
+                card_biz_id="card-biz", card_flow_status=2,
+            )
+            queued = IncomingEvent(
+                "event-queued", "message-queued", "conversation-1", CONTACT,
+                "继续处理", datetime.now(TZ),
+            )
+            store.claim_event(queued)
+            store.close()
+            service = AgentService.__new__(AgentService)
+            service.mode = "live"
+            service.settings = SimpleNamespace(timezone=TZ, self_open_id="self-open-id")
+            service.store = AuditStore(path)
+            service.dws = SimpleNamespace(
+                send_card=AsyncMock(),
+                update_card=AsyncMock(),
+                history=AsyncMock(),
+            )
+
+            card_id = asyncio.run(
+                service._start_streaming_card(
+                    CONTACT, "conversation-1", "正在处理", "ack-session-2"
+                )
+            )
+
+            self.assertEqual(card_id, "card-biz")
+            self.assertTrue(service.store.event_is_pending(queued.message_id))
+            service.dws.send_card.assert_not_awaited()
+            service.dws.history.assert_not_awaited()
+            service.dws.update_card.assert_awaited_once_with(
+                "card-biz", "正在处理", 2
+            )
+            service.store.close()
+
+    def test_streaming_card_double_initialization_failure_stays_recoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "audit.sqlite3"
+            service = AgentService.__new__(AgentService)
+            service.mode = "live"
+            service.settings = SimpleNamespace(timezone=TZ, self_open_id="self-open-id")
+            service.store = AuditStore(path)
+            service.dws = SimpleNamespace(
+                send_card=AsyncMock(return_value=("card-biz", None, {})),
+                update_card=AsyncMock(side_effect=RuntimeError("update failed")),
+                history=AsyncMock(return_value=[]),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "update failed"):
+                asyncio.run(
+                    service._start_streaming_card(
+                        CONTACT, "conversation-1", "正在处理", "ack-session"
+                    )
+                )
+            service.store.close()
+            reopened = AuditStore(path)
+            self.assertEqual(
+                reopened.active_streaming_card("conversation-1"),
+                ("card-biz", unittest.mock.ANY),
+            )
+            reopened.close()
 
     def test_final_body_replaces_streaming_thought(self) -> None:
         service = AgentService.__new__(AgentService)
