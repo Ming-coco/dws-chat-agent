@@ -387,6 +387,34 @@ class AuditStore:
         self.connection.execute("DELETE FROM outgoing WHERE send_uuid = ?", (send_uuid,))
         self.connection.commit()
 
+    def update_outgoing_content(self, send_uuid: str, content: str) -> None:
+        self.connection.execute(
+            """
+            UPDATE outgoing SET content_sha256 = ? WHERE send_uuid = ?
+            """,
+            (
+                sha256_text(canonical_message_text(content)),
+                send_uuid,
+            ),
+        )
+        self.connection.commit()
+
+    def bind_outgoing_id(self, send_uuid: str, message_id: str) -> bool:
+        if not message_id:
+            return False
+        try:
+            cursor = self.connection.execute(
+                """
+                UPDATE outgoing SET message_id = ?
+                WHERE send_uuid = ? AND message_id IS NULL
+                """,
+                (message_id, send_uuid),
+            )
+            self.connection.commit()
+        except sqlite3.IntegrityError:
+            return False
+        return cursor.rowcount == 1
+
     def outgoing_session_id(self, message_id: str) -> str:
         if not message_id:
             return ""
@@ -406,7 +434,8 @@ class AuditStore:
         raw_hash = sha256_text(message.content)
         rows = self.connection.execute(
             """
-            SELECT send_uuid, message_id, sent_at, content_sha256 FROM outgoing
+            SELECT send_uuid, message_id, sent_at, content_sha256, session_id
+            FROM outgoing
             WHERE conversation_id = ?
             ORDER BY sent_at DESC LIMIT 20
             """,
@@ -427,12 +456,23 @@ class AuditStore:
         # unbound timestamp when an older DWS response omitted message_id and
         # the historical content representation differs (notably file cards).
         content_candidates = [
-            item for item in candidates if item[2] and item[1] <= tolerance_seconds
+            item
+            for item in candidates
+            if item[2]
+            and item[1] <= tolerance_seconds
         ]
         selected = min(content_candidates, key=lambda item: item[1], default=None)
+        if selected is not None and str(selected[0]["session_id"]).startswith("ack-"):
+            # Card creation omits openMessageId. Recognize exact recent content,
+            # but never bind it to an arbitrary self-authored message.
+            return True
         if selected is None:
             legacy_candidates = [
-                item for item in candidates if not item[0]["message_id"] and item[1] <= 3
+                item
+                for item in candidates
+                if not item[0]["message_id"]
+                and not str(item[0]["session_id"]).startswith("ack-")
+                and item[1] <= 3
             ]
             selected = min(legacy_candidates, key=lambda item: item[1], default=None)
         if selected is None:
