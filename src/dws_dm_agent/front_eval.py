@@ -108,7 +108,8 @@ async def _evaluate_case(
             )
             try:
                 await session.start()
-                await session.wait(timeout=session.prepared.timeout_seconds + 5)
+                timeout = session.prepared.timeout_seconds
+                await session.wait(timeout=timeout + 5 if timeout > 0 else None)
                 if session.error:
                     raise RuntimeError(session.error)
                 reply = session.result()

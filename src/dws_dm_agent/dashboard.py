@@ -317,8 +317,8 @@ class AgentConfigStore:
             if protocol not in SUPPORTED_PROTOCOLS:
                 raise ValueError(f"unsupported agent protocol: {protocol or name}")
             timeout = float(profile.get("timeout_seconds", 60))
-            if timeout <= 0 or timeout > 86400:
-                raise ValueError(f"agent timeout must be between 1 and 86400: {name}")
+            if timeout < 0 or timeout > 86400:
+                raise ValueError(f"agent timeout must be between 0 and 86400: {name}")
             profile["timeout_seconds"] = int(timeout) if timeout.is_integer() else timeout
             profile["driver"] = str(profile.get("driver") or "custom")[:80]
             profile["model"] = str(profile.get("model") or "")[:200]

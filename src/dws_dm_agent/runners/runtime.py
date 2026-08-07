@@ -733,8 +733,8 @@ class AgentRuntime:
                     "custom",
                 )
             timeout = float(value.get("timeout_seconds", 60))
-            if timeout <= 0:
-                raise ValueError(f"agent timeout must be positive: {name}")
+            if timeout < 0:
+                raise ValueError(f"agent timeout must be non-negative: {name}")
             environment = value.get("environment", {})
             options = value.get("options", {})
             extra_args = value.get("extra_args", [])

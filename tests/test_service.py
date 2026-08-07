@@ -290,7 +290,7 @@ class AuditStoreTests(unittest.TestCase):
         self.store.update_event_status(["message-1"], "processed")
         self.assertFalse(self.store.event_is_pending("message-1"))
 
-    def test_legacy_outgoing_table_adds_streaming_card_columns(self) -> None:
+    def test_legacy_outgoing_table_adds_delivery_columns_and_recovers_sending(self) -> None:
         self.store.close()
         self.store.path.unlink()
         connection = sqlite3.connect(self.store.path)
@@ -315,7 +315,58 @@ class AuditStoreTests(unittest.TestCase):
             row["name"]
             for row in self.store.connection.execute("PRAGMA table_info(outgoing)")
         }
-        self.assertTrue({"card_biz_id", "card_flow_status"} <= columns)
+        self.assertTrue(
+            {
+                "card_biz_id",
+                "card_flow_status",
+                "payload_text",
+                "delivery_status",
+                "attempt_count",
+                "next_attempt_at",
+                "last_error",
+                "event_ids_json",
+                "source_received_at",
+            }
+            <= columns
+        )
+
+    def test_pending_delivery_survives_reopen_and_keeps_send_uuid(self) -> None:
+        event = IncomingEvent(
+            "event-1",
+            "message-1",
+            "conversation-1",
+            CONTACT,
+            "查一下",
+            datetime(2026, 7, 20, 10, 0, tzinfo=TZ),
+        )
+        self.store.claim_event(event)
+        self.store.enqueue_delivery(
+            "send-1",
+            event,
+            "最终正文",
+            "session-1",
+            event_ids=[event.message_id],
+        )
+        row = self.store.claim_due_delivery(datetime.now(TZ))
+        self.assertEqual(row["send_uuid"], "send-1")
+        self.store.mark_delivery_retry(
+            "send-1", "NETWORK_ERROR", datetime.now(TZ)
+        )
+        path = self.store.path
+        self.store.close()
+        self.store = AuditStore(path)
+
+        row = self.store.claim_due_delivery(datetime.now(TZ))
+
+        self.assertEqual(row["send_uuid"], "send-1")
+        self.assertEqual(row["payload_text"], "最终正文")
+        self.assertEqual(row["attempt_count"], 1)
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT status FROM events WHERE message_id = 'message-1'"
+            ).fetchone()["status"],
+            "delivery_pending",
+        )
 
     def test_agent_outgoing_is_not_manual(self) -> None:
         sent_at = datetime(2026, 7, 20, 10, 0, tzinfo=TZ)
@@ -609,6 +660,45 @@ class DwsSendTests(unittest.TestCase):
         self.assertIn("--open-dingtalk-id", arguments)
         self.assertIn("open-only-id", arguments)
         self.assertNotIn("--user", arguments)
+
+    def test_history_retries_transient_network_error(self) -> None:
+        client = object.__new__(DwsClient)
+        client.settings = SimpleNamespace(
+            timezone=TZ,
+            raw={"history_limit": 80},
+        )
+        client._json_command = AsyncMock(
+            side_effect=[
+                RuntimeError(
+                    "DWS command failed (1): chat message list: NETWORK_ERROR"
+                ),
+                {"result": {"messages": []}},
+            ]
+        )
+
+        with patch("dws_dm_agent.dws.asyncio.sleep", new=AsyncMock()) as sleep:
+            messages = asyncio.run(client.history(CONTACT))
+
+        self.assertEqual(messages, [])
+        self.assertEqual(client._json_command.await_count, 2)
+        sleep.assert_awaited_once_with(1)
+
+    def test_history_does_not_retry_non_network_error(self) -> None:
+        client = object.__new__(DwsClient)
+        client.settings = SimpleNamespace(
+            timezone=TZ,
+            raw={"history_limit": 80},
+        )
+        client._json_command = AsyncMock(
+            side_effect=RuntimeError(
+                "DWS command failed (1): chat message list: AUTH_ERROR"
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "AUTH_ERROR"):
+            asyncio.run(client.history(CONTACT))
+
+        self.assertEqual(client._json_command.await_count, 1)
 
     def test_streaming_card_create_and_update_use_dws_card_commands(self) -> None:
         client = object.__new__(DwsClient)
@@ -1013,14 +1103,18 @@ class PlainAgentFlowTests(unittest.TestCase):
             )
             reopened.close()
 
-    def test_final_body_replaces_streaming_thought(self) -> None:
+    def test_final_body_is_queued_without_calling_dws(self) -> None:
         service = AgentService.__new__(AgentService)
-        service.settings = SimpleNamespace(raw={"max_reply_chars": 16000})
+        service.settings = SimpleNamespace(
+            raw={"max_reply_chars": 16000}, timezone=TZ
+        )
         service.mode = "live"
-        service.dws = SimpleNamespace(update_card=AsyncMock())
-        service._freshness_state = AsyncMock(return_value=("fresh", None))
+        service.dws = SimpleNamespace(
+            update_card=AsyncMock(), send=AsyncMock(), history=AsyncMock()
+        )
+        service.store = SimpleNamespace(enqueue_delivery=Mock())
+        service.outbox_wakeup = asyncio.Event()
         service._set_runtime = Mock()
-        service._send_supervisor_text = AsyncMock()
         event = IncomingEvent(
             "event-1",
             "message-1",
@@ -1036,9 +1130,181 @@ class PlainAgentFlowTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(outcome, "sent")
-        service.dws.update_card.assert_awaited_once_with("card-1", "最终正文", 3)
-        service._send_supervisor_text.assert_not_awaited()
+        self.assertEqual(outcome, "delivery_pending")
+        service.store.enqueue_delivery.assert_called_once()
+        self.assertEqual(
+            service.store.enqueue_delivery.call_args.args[2], "最终正文"
+        )
+        service.dws.update_card.assert_not_awaited()
+        service.dws.send.assert_not_awaited()
+        service.dws.history.assert_not_awaited()
+
+    def test_delivery_history_failure_retries_then_sends_same_uuid(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service = AgentService.__new__(AgentService)
+            service.mode = "live"
+            service.settings = SimpleNamespace(
+                timezone=TZ,
+                self_open_id="self-open-id",
+                cooldown=600,
+                contacts=[CONTACT],
+            )
+            service.store = AuditStore(Path(directory) / "audit.sqlite3")
+            service.streaming_card_send_uuids = {}
+            service._history_events = Mock(return_value=[])
+            service.dws = SimpleNamespace(
+                history=AsyncMock(
+                    side_effect=[RuntimeError("NETWORK_ERROR"), []]
+                ),
+                send=AsyncMock(return_value=("sent-message", {})),
+                update_card=AsyncMock(),
+            )
+            event = IncomingEvent(
+                "event-1",
+                "message-1",
+                "conversation-1",
+                CONTACT,
+                "查一下",
+                datetime(2026, 7, 20, 10, 0, tzinfo=TZ),
+            )
+            service.store.claim_event(event)
+            service.store.enqueue_delivery(
+                "send-1",
+                event,
+                "最终正文",
+                "session-1",
+                event_ids=[event.message_id],
+            )
+
+            asyncio.run(service._dispatch_due_delivery())
+            first = service.store.connection.execute(
+                "SELECT delivery_status, attempt_count FROM outgoing "
+                "WHERE send_uuid = 'send-1'"
+            ).fetchone()
+            service.store.connection.execute(
+                "UPDATE outgoing SET next_attempt_at = '' WHERE send_uuid = 'send-1'"
+            )
+            service.store.connection.commit()
+            asyncio.run(service._dispatch_due_delivery())
+            final = service.store.connection.execute(
+                "SELECT delivery_status, message_id FROM outgoing "
+                "WHERE send_uuid = 'send-1'"
+            ).fetchone()
+
+            self.assertEqual(tuple(first), ("retry_wait", 1))
+            self.assertEqual(tuple(final), ("sent", "sent-message"))
+            service.dws.send.assert_awaited_once()
+            self.assertEqual(service.dws.send.call_args.args[2], "send-1")
+            self.assertEqual(
+                service.store.connection.execute(
+                    "SELECT status FROM events WHERE message_id = 'message-1'"
+                ).fetchone()["status"],
+                "processed",
+            )
+            service.store.close()
+
+    def test_manual_takeover_cancels_pending_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service = AgentService.__new__(AgentService)
+            service.mode = "live"
+            service.settings = SimpleNamespace(
+                timezone=TZ,
+                self_open_id="self-open-id",
+                cooldown=600,
+                contacts=[CONTACT],
+            )
+            service.store = AuditStore(Path(directory) / "audit.sqlite3")
+            service.streaming_card_send_uuids = {}
+            service._history_events = Mock(return_value=[])
+            service.dws = SimpleNamespace(
+                history=AsyncMock(
+                    return_value=[
+                        HistoryMessage(
+                            "manual-1",
+                            "conversation-1",
+                            "Operator",
+                            "self-open-id",
+                            "我来处理",
+                            datetime(2026, 7, 20, 10, 1, tzinfo=TZ),
+                        )
+                    ]
+                ),
+                send=AsyncMock(),
+                update_card=AsyncMock(),
+            )
+            event = IncomingEvent(
+                "event-1",
+                "message-1",
+                "conversation-1",
+                CONTACT,
+                "查一下",
+                datetime(2026, 7, 20, 10, 0, tzinfo=TZ),
+            )
+            service.store.claim_event(event)
+            service.store.enqueue_delivery(
+                "send-1",
+                event,
+                "最终正文",
+                "session-1",
+                event_ids=[event.message_id],
+                card_biz_id="card-1",
+            )
+
+            asyncio.run(service._dispatch_due_delivery())
+
+            self.assertEqual(
+                service.store.connection.execute(
+                    "SELECT delivery_status FROM outgoing WHERE send_uuid = 'send-1'"
+                ).fetchone()["delivery_status"],
+                "cancelled",
+            )
+            service.dws.send.assert_not_awaited()
+            service.dws.update_card.assert_awaited_once_with(
+                "card-1", "已停止自动处理，已转人工。", 5
+            )
+            service.store.close()
+
+    def test_stabilize_degrades_when_history_is_unavailable(self) -> None:
+        service = AgentService.__new__(AgentService)
+        service.settings = SimpleNamespace(quiet_window=0, cooldown=600)
+        service.dws = SimpleNamespace(
+            history=AsyncMock(side_effect=RuntimeError("NETWORK_ERROR"))
+        )
+        service.store = SimpleNamespace(latest_manual=Mock(return_value=None))
+        event = IncomingEvent(
+            "event-1",
+            "message-1",
+            "conversation-1",
+            CONTACT,
+            "独立问题",
+            datetime(2026, 7, 20, 10, 0, tzinfo=TZ),
+        )
+
+        batch, history, latest_manual = asyncio.run(service._stabilize([event]))
+
+        self.assertEqual(batch, [event])
+        self.assertEqual(history, [])
+        self.assertIsNone(latest_manual)
+
+    def test_optional_ack_freshness_degrades_when_history_is_unavailable(self) -> None:
+        service = AgentService.__new__(AgentService)
+        service._freshness_state = AsyncMock(
+            side_effect=RuntimeError("NETWORK_ERROR")
+        )
+        event = IncomingEvent(
+            "event-1",
+            "message-1",
+            "conversation-1",
+            CONTACT,
+            "独立问题",
+            datetime(2026, 7, 20, 10, 0, tzinfo=TZ),
+        )
+
+        state, additions = asyncio.run(
+            service._optional_ack_freshness([event])
+        )
+
+        self.assertEqual((state, additions), ("unavailable", []))
 
     def test_freshness_still_detects_supplements_and_manual_takeover(self) -> None:
         service = AgentService.__new__(AgentService)
@@ -1151,6 +1417,11 @@ class MultimodalImageTests(unittest.TestCase):
 
 
 class HumanTakeoverTests(unittest.TestCase):
+    def test_zero_cooldown_disables_manual_takeover(self) -> None:
+        incoming = datetime(2026, 7, 20, 10, 0, tzinfo=TZ)
+        manual = datetime(2026, 7, 20, 10, 2, tzinfo=TZ)
+        self.assertFalse(human_owns_conversation(manual, incoming, 0))
+
     def test_manual_reply_keeps_control_for_ten_minutes(self) -> None:
         manual = datetime(2026, 7, 20, 10, 0, tzinfo=TZ)
         incoming = datetime(2026, 7, 20, 10, 9, 59, tzinfo=TZ)

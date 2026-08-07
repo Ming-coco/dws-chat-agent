@@ -92,6 +92,8 @@ def human_owns_conversation(
     cooldown_seconds: float,
 ) -> bool:
     """Only a real self-authored message starts cooldown; read state is irrelevant."""
+    if cooldown_seconds <= 0:
+        return False
     if latest_manual is None:
         return False
     if latest_manual >= earliest_incoming - timedelta(seconds=2):
@@ -267,7 +269,14 @@ class AuditStore:
                 content_sha256 TEXT NOT NULL,
                 session_id TEXT NOT NULL,
                 card_biz_id TEXT,
-                card_flow_status INTEGER
+                card_flow_status INTEGER,
+                payload_text TEXT NOT NULL DEFAULT '',
+                delivery_status TEXT NOT NULL DEFAULT 'sent',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT '',
+                event_ids_json TEXT NOT NULL DEFAULT '[]',
+                source_received_at TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS outgoing_conversation_time
                 ON outgoing(conversation_id, sent_at);
@@ -305,6 +314,13 @@ class AuditStore:
             "outgoing": {
                 "card_biz_id": "card_biz_id TEXT",
                 "card_flow_status": "card_flow_status INTEGER",
+                "payload_text": "payload_text TEXT NOT NULL DEFAULT ''",
+                "delivery_status": "delivery_status TEXT NOT NULL DEFAULT 'sent'",
+                "attempt_count": "attempt_count INTEGER NOT NULL DEFAULT 0",
+                "next_attempt_at": "next_attempt_at TEXT NOT NULL DEFAULT ''",
+                "last_error": "last_error TEXT NOT NULL DEFAULT ''",
+                "event_ids_json": "event_ids_json TEXT NOT NULL DEFAULT '[]'",
+                "source_received_at": "source_received_at TEXT NOT NULL DEFAULT ''",
             },
         }
         for table, columns in migrations.items():
@@ -317,6 +333,13 @@ class AuditStore:
                     self.connection.execute(
                         f"ALTER TABLE {table} ADD COLUMN {definition}"
                     )
+        self.connection.execute(
+            """
+            UPDATE outgoing
+            SET delivery_status = 'retry_wait', next_attempt_at = ''
+            WHERE delivery_status = 'sending'
+            """
+        )
         self.connection.commit()
 
     def claim_event(self, event: IncomingEvent) -> bool:
@@ -399,6 +422,173 @@ class AuditStore:
                 card_flow_status,
                 send_uuid,
             ),
+        )
+        self.connection.commit()
+
+    def enqueue_delivery(
+        self,
+        send_uuid: str,
+        source_event: IncomingEvent,
+        content: str,
+        session_id: str,
+        *,
+        event_ids: Sequence[str],
+        card_biz_id: str = "",
+    ) -> None:
+        now = datetime.now(source_event.created_at.tzinfo)
+        self.connection.execute("BEGIN IMMEDIATE")
+        self.connection.execute(
+            """
+            INSERT INTO outgoing(
+                send_uuid, message_id, conversation_id, contact_user_id,
+                sent_at, content_sha256, session_id, card_biz_id,
+                card_flow_status, payload_text, delivery_status,
+                attempt_count, next_attempt_at, last_error, event_ids_json,
+                source_received_at
+            ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, NULL, ?, 'pending',
+                      0, '', '', ?, ?)
+            """,
+            (
+                send_uuid,
+                source_event.conversation_id,
+                source_event.contact.identity,
+                now.isoformat(),
+                sha256_text(canonical_message_text(content)),
+                session_id,
+                card_biz_id or None,
+                content,
+                json.dumps(list(event_ids), ensure_ascii=False),
+                source_event.created_at.isoformat(),
+            ),
+        )
+        self.connection.executemany(
+            "UPDATE events SET status = 'delivery_pending', reason = '' "
+            "WHERE message_id = ?",
+            [(message_id,) for message_id in event_ids],
+        )
+        self.connection.commit()
+
+    def claim_due_delivery(self, now: datetime) -> sqlite3.Row | None:
+        self.connection.execute("BEGIN IMMEDIATE")
+        row = self.connection.execute(
+            """
+            SELECT * FROM outgoing
+            WHERE delivery_status IN ('pending', 'retry_wait')
+              AND (next_attempt_at = '' OR next_attempt_at <= ?)
+            ORDER BY sent_at ASC
+            LIMIT 1
+            """,
+            (now.isoformat(),),
+        ).fetchone()
+        if row is None:
+            self.connection.commit()
+            return None
+        self.connection.execute(
+            "UPDATE outgoing SET delivery_status = 'sending' WHERE send_uuid = ?",
+            (row["send_uuid"],),
+        )
+        self.connection.commit()
+        return row
+
+    def mark_delivery_retry(
+        self, send_uuid: str, error: str, next_attempt_at: datetime
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE outgoing
+            SET delivery_status = 'retry_wait',
+                attempt_count = attempt_count + 1,
+                next_attempt_at = ?,
+                last_error = ?
+            WHERE send_uuid = ?
+            """,
+            (
+                next_attempt_at.isoformat(),
+                sanitize_text(error, 500),
+                send_uuid,
+            ),
+        )
+        self.connection.commit()
+
+    def mark_delivery_sent(
+        self,
+        send_uuid: str,
+        message_id: str = "",
+        *,
+        card_flow_status: int | None = None,
+    ) -> None:
+        row = self.connection.execute(
+            """
+            SELECT event_ids_json, session_id, card_biz_id, content_sha256
+            FROM outgoing WHERE send_uuid = ?
+            """,
+            (send_uuid,),
+        ).fetchone()
+        if row is None:
+            return
+        event_ids = json.loads(row["event_ids_json"] or "[]")
+        self.connection.execute("BEGIN IMMEDIATE")
+        self.connection.execute(
+            """
+            UPDATE outgoing
+            SET delivery_status = 'sent', message_id = COALESCE(NULLIF(?, ''), message_id),
+                payload_text = '', next_attempt_at = '', last_error = '',
+                card_flow_status = COALESCE(?, card_flow_status)
+            WHERE send_uuid = ?
+            """,
+            (message_id, card_flow_status, send_uuid),
+        )
+        if row["card_biz_id"] and card_flow_status is not None:
+            self.connection.execute(
+                """
+                UPDATE outgoing
+                SET content_sha256 = ?, card_flow_status = ?
+                WHERE card_biz_id = ?
+                """,
+                (
+                    row["content_sha256"],
+                    card_flow_status,
+                    row["card_biz_id"],
+                ),
+            )
+        self.connection.executemany(
+            "UPDATE events SET status = 'processed', reason = 'sent' "
+            "WHERE message_id = ?",
+            [(event_id,) for event_id in event_ids],
+        )
+        self.connection.execute(
+            "UPDATE runs SET status = 'sent', reason = '' WHERE session_id = ?",
+            (row["session_id"],),
+        )
+        self.connection.commit()
+
+    def mark_delivery_cancelled(
+        self, send_uuid: str, run_status: str, reason: str
+    ) -> None:
+        row = self.connection.execute(
+            "SELECT event_ids_json, session_id FROM outgoing WHERE send_uuid = ?",
+            (send_uuid,),
+        ).fetchone()
+        if row is None:
+            return
+        event_ids = json.loads(row["event_ids_json"] or "[]")
+        self.connection.execute("BEGIN IMMEDIATE")
+        self.connection.execute(
+            """
+            UPDATE outgoing
+            SET delivery_status = 'cancelled', payload_text = '',
+                next_attempt_at = '', last_error = ?
+            WHERE send_uuid = ?
+            """,
+            (sanitize_text(reason, 500), send_uuid),
+        )
+        self.connection.executemany(
+            "UPDATE events SET status = 'skipped', reason = ? WHERE message_id = ?",
+            [(reason, event_id) for event_id in event_ids],
+        )
+        self.connection.execute(
+            "UPDATE runs SET status = ?, reason = ? WHERE session_id = ?",
+            (run_status, reason, row["session_id"]),
         )
         self.connection.commit()
 

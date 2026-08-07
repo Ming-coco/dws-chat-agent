@@ -123,8 +123,8 @@ class DwsClient:
         except json.JSONDecodeError as exc:
             raise RuntimeError("DWS returned invalid JSON") from exc
 
-    async def _send_json_command(
-        self, arguments: Sequence[str], timeout: float = 45
+    async def _retry_network_json_command(
+        self, arguments: Sequence[str], timeout: float = 45, *, operation: str
     ) -> Any:
         for attempt in range(3):
             try:
@@ -132,9 +132,20 @@ class DwsClient:
             except RuntimeError as exc:
                 if not str(exc).endswith(": NETWORK_ERROR") or attempt == 2:
                     raise
-                LOG.warning("DWS send retry attempt=%d/3 error=NETWORK_ERROR", attempt + 2)
+                LOG.warning(
+                    "DWS %s retry attempt=%d/3 error=NETWORK_ERROR",
+                    operation,
+                    attempt + 2,
+                )
                 await asyncio.sleep(2**attempt)
         raise AssertionError("unreachable")
+
+    async def _send_json_command(
+        self, arguments: Sequence[str], timeout: float = 45
+    ) -> Any:
+        return await self._retry_network_json_command(
+            arguments, timeout=timeout, operation="send"
+        )
 
     async def history(self, contact: Contact) -> list[HistoryMessage]:
         query_time = (datetime.now(self.settings.timezone) + timedelta(seconds=5)).strftime(
@@ -145,12 +156,13 @@ class DwsClient:
             if contact.user_id
             else ["--open-dingtalk-id", contact.open_dingtalk_id]
         )
-        payload = await self._json_command(
+        payload = await self._retry_network_json_command(
             [
                 "chat", "message", "list", *target,
                 "--time", query_time, "--direction", "older", "--limit",
                 str(int(self.settings.raw.get("history_limit", 80))),
-            ]
+            ],
+            operation="history",
         )
         messages = payload.get("result", {}).get("messages", []) if isinstance(payload, Mapping) else []
         result: list[HistoryMessage] = []

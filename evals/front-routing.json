@@ -71,5 +71,25 @@
     "name": "image-error-investigation",
     "message": "[图片消息](mediaId=test-image) 这个报错怎么回事",
     "expected_route": "worker"
+  },
+  {
+    "name": "local-code-read-only-investigation",
+    "message": "只读打开 dws-chat-agent/src/dws_dm_agent/service.py，告诉我 _send_after_freshness_check 当前是直接发送还是先入队，先不要改",
+    "expected_route": "reply"
+  },
+  {
+    "name": "gitlab-read-only-investigation",
+    "message": "用 glab 看一下当前项目最近一次流水线状态，只查询不要重跑",
+    "expected_route": "reply"
+  },
+  {
+    "name": "grafana-read-only-investigation",
+    "message": "通过 Grafana MCP 查一下生产环境最近十分钟的错误日志，只读查询",
+    "expected_route": "reply"
+  },
+  {
+    "name": "gitlab-write-still-escalates",
+    "message": "用 glab 把当前 MR 合并掉",
+    "expected_route": "worker"
   }
 ]

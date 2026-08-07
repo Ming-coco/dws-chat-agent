@@ -2,6 +2,8 @@
 
 *DingTalk-Integrated Agent for Messaging, Orchestration & Networked Delegation*
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 An autonomous DingTalk interface for coordinating local AI coding agents. It watches an explicit allowlist, answers direct messages, and can hand implementation work to a worker agent. It supports Codex, Claude Code, Pi, and thin custom adapters without fixing either role to one product.
 
 The service runs on the operator's machine and reuses existing DWS and coding-agent logins. Personal identities, contact IDs, local paths, and internal domains stay in an ignored `.env` file.
@@ -39,7 +41,7 @@ Each front or worker run gets a fresh agent session. Messages that arrive while 
 
 The front receives a session-local stdio MCP server with one zero-argument tool, `escalate()`. Codex and Claude mount it through their native CLI options. Pi loads the bundled thin adapter, which calls the same stdio MCP server. Nothing is added to global agent configuration.
 
-If native steering fails, the current run is stopped safely and restarted with the accumulated context. A manual operator reply always aborts agent handling and starts the configured cooldown.
+If native steering fails, the current run is stopped safely and restarted with the accumulated context. When `human_cooldown_seconds` is greater than zero, a manual operator reply aborts agent handling and starts that cooldown; setting it to `0` disables manual takeover.
 
 Agent output is deliberately unstructured. A front agent either writes the final natural-language body or calls `escalate()` before writing a body. A worker writes only the final natural-language body. There is no output JSON schema, route object, change manifest, local Git verification, or delivery replanning layer; repository rules and the repository's normal Git/CI review flow remain authoritative.
 
@@ -63,11 +65,13 @@ src/dws_dm_agent/
   service.py                 serial queues, context, steering, takeover, and orchestration
   prompts.py                 shared prompt variables, rendering, and validation
   dashboard.py               localhost API, audit snapshot, and safe config editor
+  front_eval.py              live front-routing replay runner
   runners/runtime.py         Codex, Claude, Pi, and custom JSONL session protocols
   runners/escalate_mcp.py    session-local zero-argument stdio MCP server
   runners/pi_escalate.ts     Pi-to-stdio-MCP adapter
   web/                       dashboard, settings, themes, motion, and favicon
 tests/                       service, dashboard, MCP, and runner regressions
+evals/front-routing.json     checked-in front-routing replay cases
 prompts/                     editable front, worker, and supplement business rules
 deploy/macos/                LaunchAgent template
 scripts/manage.sh            macOS LaunchAgent lifecycle implementation
@@ -133,6 +137,8 @@ PYTHONPATH=src python3 -m dws_dm_agent doctor
 PYTHONPATH=src python3 -m dws_dm_agent run --mode shadow --open-dashboard
 ```
 
+Set `DWS_CHAT_AGENT_HOME` when `config.json` and `.env` live outside the source checkout. Otherwise the service uses the source project when it contains `config.json`, then falls back to the current directory.
+
 Replay the checked-in front-routing cases against the configured live front model:
 
 ```bash
@@ -154,11 +160,21 @@ Start in `shadow` mode until configuration is verified. Shadow mode performs ana
         "supplement_strategy": "steer",
         "supplement_prompt": "prompts/supplement.md",
         "auto_messages": {
-          "ack": "收到，我在处理中。",
-          "progress_enabled": true
+          "ack_enabled": true,
+          "ack": "已收到消息，正在处理中。",
+          "progress_enabled": true,
+          "max_progress_updates": 60
         },
-        "front": {"agent": "pi-front", "prompt": "prompts/front.md"},
-        "worker": {"agent": "codex-worker", "prompt": "prompts/worker.md"}
+        "front": {
+          "label": "快速前台",
+          "agent": "pi-front",
+          "prompt": "prompts/front.md"
+        },
+        "worker": {
+          "label": "执行 Agent",
+          "agent": "codex-worker",
+          "prompt": "prompts/worker.md"
+        }
       }
     }
   }
@@ -191,15 +207,17 @@ A preset always requires a `worker`; `front` is optional. Omitting `front` sends
 
 `command` is an exact argument array and is never executed through a shell. Therefore a proxy launcher such as `ccr code`, an absolute executable path, a `.cmd` shim on Windows, or a wrapper with fixed arguments all work without quoting tricks. The adapter appends the flags required by `protocol`. Keep credentials in `environment` or the process login, never in `command`.
 
+`label` is display text for a workflow stage. `options` contains protocol-specific settings, while `extra_args` appends literal CLI arguments after the adapter's required flags. `timeout_seconds: 0` means no agent deadline. For Pi, `options.tools: null` omits the `--tools` allowlist and exposes its built-in tools; the front prompt and `read_only: true` remain the authorization boundary.
+
 The bundled protocols are `codex-app-server`, `claude-stream-json`, and `pi-rpc`. The current `ccr code` launcher forwards Claude Code flags, while Oh My Pi exposes native `--mode rpc`. A completely independent CLI can use `custom-jsonl-v1`; its small stdin/stdout contract is documented in [docs/custom-agent-protocol.md](docs/custom-agent-protocol.md). The front adapter receives the session-local MCP path in `DWS_ESCALATE_MCP_CONFIG`.
 
 Future custom flows can be introduced as additional presets without turning the current pipeline into a general DAG engine.
 
 Prompt text is stored in normal UTF-8 files and the active files are shown verbatim on the localhost settings page. A stage prompt may use `{{self_name}}`, `{{agent_name}}`, `{{worker_name}}`, `{{contact_name}}`, `{{contact_alias}}`, `{{contact_user_id}}`, `{{session_id}}`, `{{prior_attempt}}`, `{{workspace_root}}`, `{{worktree_root}}`, `{{recent_context_json}}`, `{{current_messages_json}}`, and `{{now}}`. The supplement prompt receives `{{supplement_messages_json}}`, `{{session_id}}`, contact identity fields, and `{{self_name}}`.
 
-When configured, the front profile must set `read_only: true`. The worker has normal coding-agent permissions and judges authorization from the original conversation plus repository rules; escalation itself never grants write permission.
+When configured, the front profile must set `read_only: true`. It may use the tools available to its provider for bounded read-only investigation, then answer directly; any write or external side effect must escalate. The worker has normal coding-agent permissions and judges authorization from the original conversation plus repository rules; escalation itself never grants write permission.
 
-With streaming cards enabled, acceptance is shown immediately. Both roles use the same provider-neutral stream surface: Codex maps reasoning summaries, Pi maps native thinking, Claude maps thinking blocks, and custom adapters may emit `thinking`. The service does not invent progress labels, fixed progress intervals, or heartbeat text. Models that emit no native thinking produce no fabricated progress. The final natural-language body replaces the thinking card.
+With streaming cards enabled, acceptance is shown immediately. Both roles use the same provider-neutral stream surface: Codex maps reasoning summaries, Pi maps native thinking, Claude maps thinking blocks, and custom adapters may emit `thinking`. The service does not invent progress labels, fixed progress intervals, or heartbeat text. Models that emit no native thinking produce no fabricated progress. The final natural-language body is persisted in the local outbox before delivery, retried with the same send UUID after transient failures, and replaces the thinking card after the final freshness check.
 
 ## Safety
 

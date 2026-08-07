@@ -167,6 +167,8 @@ class AgentService:
         self.listeners: list[asyncio.Task[None]] = []
         self.runtime_heartbeat: asyncio.Task[None] | None = None
         self.history_reconciler: asyncio.Task[None] | None = None
+        self.outbox_dispatcher: asyncio.Task[None] | None = None
+        self.outbox_wakeup = asyncio.Event()
         self.listener_processes: set[asyncio.subprocess.Process] = set()
         self.stop_event = asyncio.Event()
         self.capacity = int(settings.raw.get("max_parallel_conversations", 2))
@@ -227,6 +229,9 @@ class AgentService:
         self.history_reconciler = asyncio.create_task(
             self._reconcile_history_loop(), name="history-reconciler"
         )
+        self.outbox_dispatcher = asyncio.create_task(
+            self._dispatch_outbox(), name="outbox-dispatcher"
+        )
         self.runtime_heartbeat = asyncio.create_task(
             self._keep_runtime_alive(), name="runtime-heartbeat"
         )
@@ -237,11 +242,13 @@ class AgentService:
         for task in self.workers.values():
             task.cancel()
         self.history_reconciler.cancel()
+        self.outbox_dispatcher.cancel()
         self.runtime_heartbeat.cancel()
         await asyncio.gather(
             *self.listeners,
             *self.workers.values(),
             self.history_reconciler,
+            self.outbox_dispatcher,
             self.runtime_heartbeat,
             return_exceptions=True,
         )
@@ -823,7 +830,18 @@ class AgentService:
         known = {item.message_id for item in batch}
         history: list[HistoryMessage] = []
         for _ in range(4):
-            history = await self.dws.history(contact)
+            try:
+                history = await self.dws.history(contact)
+            except Exception as exc:
+                LOG.warning(
+                    "history unavailable; continuing without remote context "
+                    "contact=%s error=%s",
+                    contact.alias,
+                    sanitize_text(str(exc), 300),
+                )
+                return self._deduplicate(batch), [], self.store.latest_manual(
+                    batch[0].conversation_id
+                )
             latest_manual = self._register_manual_messages(history)
             if self._human_owns_conversation(latest_manual, earliest):
                 return batch, history, latest_manual
@@ -881,8 +899,12 @@ class AgentService:
                 )
                 return
             if gate.action == "refuse":
+                refusal_session = f"code-{uuid.uuid4().hex[:12]}"
                 outcome = await self._send_after_freshness_check(
-                    batch, gate.reply, stream_card_id=stream_card_id
+                    batch,
+                    gate.reply,
+                    stream_card_id=stream_card_id,
+                    session_id=refusal_session,
                 )
                 if outcome == "supplement":
                     batch = await self._merge_latest(batch)
@@ -893,10 +915,12 @@ class AgentService:
                     action="refuse",
                     handled="拒绝高风险请求",
                     reason=gate.reason,
+                    session_id=refusal_session,
                 )
-                self.store.update_event_status(
-                    (item.message_id for item in batch), "processed", gate.reason
-                )
+                if outcome != "delivery_pending":
+                    self.store.update_event_status(
+                        (item.message_id for item in batch), "processed", gate.reason
+                    )
                 return
 
             if self._agent_rate_limited(batch[0].contact):
@@ -916,7 +940,7 @@ class AgentService:
                 not acknowledgement_sent
                 and getattr(getattr(self, "dws", None), "streaming_cards", False)
             ):
-                freshness, _ = await self._freshness_state(batch)
+                freshness, _ = await self._optional_ack_freshness(batch)
                 if freshness == "manual":
                     self.store.update_event_status(
                         (item.message_id for item in batch),
@@ -927,29 +951,30 @@ class AgentService:
                 if freshness == "supplement":
                     batch = await self._merge_latest(batch)
                     continue
-                acknowledgement = self.agent_runtime.render_auto_message(
-                    "ack",
-                    {
-                        "request_count": len(batch),
-                        "contact_name": batch[0].contact.display_name,
-                        "contact_alias": batch[0].contact.alias,
-                        "self_name": self.settings.self_name,
-                    },
-                )
-                if acknowledgement:
-                    try:
-                        stream_card_id = await self._start_streaming_card(
-                            batch[0].contact,
-                            batch[0].conversation_id,
-                            acknowledgement,
-                            f"ack-{uuid.uuid4().hex[:12]}",
-                        )
-                    except Exception as exc:
-                        LOG.warning(
-                            "streaming card start failed contact=%s error=%s",
-                            batch[0].contact.alias,
-                            sanitize_text(str(exc), 300),
-                        )
+                if freshness != "unavailable":
+                    acknowledgement = self.agent_runtime.render_auto_message(
+                        "ack",
+                        {
+                            "request_count": len(batch),
+                            "contact_name": batch[0].contact.display_name,
+                            "contact_alias": batch[0].contact.alias,
+                            "self_name": self.settings.self_name,
+                        },
+                    )
+                    if acknowledgement:
+                        try:
+                            stream_card_id = await self._start_streaming_card(
+                                batch[0].contact,
+                                batch[0].conversation_id,
+                                acknowledgement,
+                                f"ack-{uuid.uuid4().hex[:12]}",
+                            )
+                        except Exception as exc:
+                            LOG.warning(
+                                "streaming card start failed contact=%s error=%s",
+                                batch[0].contact.alias,
+                                sanitize_text(str(exc), 300),
+                            )
                 acknowledgement_sent = True
 
             result: AgentResult | None = None
@@ -1052,20 +1077,11 @@ class AgentService:
                     (item.message_id for item in batch), "error", result.error
                 )
                 return
-            if outcome == "supplement":
-                self._record_agent_result(batch, result, status="stale_supplement")
-                batch = await self._merge_latest(batch)
-                prior_attempt = "发送前收到补充消息，按新的完整上下文继续。"
-                await asyncio.sleep(self.settings.quiet_window)
-                continue
-            if outcome == "human_cooldown":
-                await self._safe_update_streaming_card(
-                    stream_card_id, "已停止自动处理，已转人工。", 5
-                )
             self._record_agent_result(batch, result, status=outcome)
-            self.store.update_event_status(
-                (item.message_id for item in batch), "processed", outcome
-            )
+            if outcome != "delivery_pending":
+                self.store.update_event_status(
+                    (item.message_id for item in batch), "processed", outcome
+                )
             return
 
         await self._safe_update_streaming_card(
@@ -1123,6 +1139,19 @@ class AgentService:
         ]
         return ("supplement", supplements) if supplements else ("fresh", [])
 
+    async def _optional_ack_freshness(
+        self, batch: Sequence[IncomingEvent]
+    ) -> tuple[str, list[IncomingEvent]]:
+        try:
+            return await self._freshness_state(batch)
+        except Exception as exc:
+            LOG.warning(
+                "ack freshness unavailable; skipping acknowledgement contact=%s error=%s",
+                batch[0].contact.alias,
+                sanitize_text(str(exc), 300),
+            )
+            return "unavailable", []
+
     def _record_without_agent(
         self,
         batch: Sequence[IncomingEvent],
@@ -1131,10 +1160,11 @@ class AgentService:
         action: str,
         handled: str,
         reason: str,
+        session_id: str = "",
     ) -> None:
         now = datetime.now(self.settings.timezone)
         self.store.record_run(
-            session_id=f"code-{uuid.uuid4().hex[:12]}",
+            session_id=session_id or f"code-{uuid.uuid4().hex[:12]}",
             conversation_id=batch[0].conversation_id,
             contact=batch[0].contact,
             started_at=now,
@@ -1275,7 +1305,7 @@ class AgentService:
             )
             max_progress_updates = self.agent_runtime.max_progress_updates
             now_monotonic = asyncio.get_running_loop().time()
-            deadline = now_monotonic + timeout
+            deadline = now_monotonic + timeout if timeout > 0 else None
             next_history_at = now_monotonic + interval
             next_progress_at = now_monotonic
             progress_updates = 0
@@ -1284,8 +1314,12 @@ class AgentService:
             earliest = min(item.created_at for item in batch)
             while not session.done:
                 self._touch_runtime(batch[0].conversation_id)
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
+                remaining = (
+                    deadline - asyncio.get_running_loop().time()
+                    if deadline is not None
+                    else None
+                )
+                if remaining is not None and remaining <= 0:
                     await session.abort()
                     return AgentResult(
                         session_id,
@@ -1305,12 +1339,12 @@ class AgentService:
                 ):
                     wake_at = min(wake_at, next_progress_at)
                 try:
-                    await session.wait_for_update(
-                        timeout=min(
-                            max(0.0, wake_at - asyncio.get_running_loop().time()),
-                            remaining,
-                        )
+                    wait_timeout = max(
+                        0.0, wake_at - asyncio.get_running_loop().time()
                     )
+                    if remaining is not None:
+                        wait_timeout = min(wait_timeout, remaining)
+                    await session.wait_for_update(timeout=wait_timeout)
                 except TimeoutError:
                     pass
                 if session.done:
@@ -1347,7 +1381,7 @@ class AgentService:
                     )
                     continue
                 latest_manual = self._register_manual_messages(history)
-                if latest_manual and latest_manual >= started_at - timedelta(seconds=2):
+                if self._human_owns_conversation(latest_manual, started_at):
                     await session.abort()
                     return AgentResult(
                         session_id,
@@ -1689,11 +1723,6 @@ class AgentService:
         stream_card_id: str = "",
         session_id: str = "",
     ) -> str:
-        state, _ = await self._freshness_state(batch)
-        if state == "manual":
-            return "human_cooldown"
-        if state == "supplement":
-            return "supplement"
         content = sanitize_text(
             reply,
             int(self.settings.raw.get("max_reply_chars", 16000)),
@@ -1709,33 +1738,127 @@ class AgentService:
             )
             return "shadow"
         outgoing_session = session_id or str(uuid.uuid4())
-        if stream_card_id:
+        self.store.enqueue_delivery(
+            str(uuid.uuid4()),
+            min(batch, key=lambda item: item.created_at),
+            content,
+            outgoing_session,
+            event_ids=[item.message_id for item in batch],
+            card_biz_id=stream_card_id,
+        )
+        self.outbox_wakeup.set()
+        LOG.info("reply queued contact=%s", batch[0].contact.alias)
+        return "delivery_pending"
+
+    async def _dispatch_outbox(self) -> None:
+        LOG.info("outbox dispatcher ready")
+        while not self.stop_event.is_set():
+            if await self._dispatch_due_delivery():
+                continue
+            self.outbox_wakeup.clear()
             try:
-                await self._update_streaming_card(stream_card_id, content, 3)
-            except Exception as exc:
-                LOG.warning(
-                    "streaming card final update failed; falling back to text "
-                    "session=%s error=%s",
-                    outgoing_session,
-                    sanitize_text(str(exc), 300),
-                )
-                await self._send_supervisor_text(
-                    batch[0].contact,
-                    batch[0].conversation_id,
-                    content,
-                    outgoing_session,
-                    retry_network=True,
-                )
-        else:
-            await self._send_supervisor_text(
-                batch[0].contact,
-                batch[0].conversation_id,
-                content,
-                outgoing_session,
-                retry_network=True,
+                await asyncio.wait_for(self.outbox_wakeup.wait(), timeout=2)
+            except TimeoutError:
+                pass
+
+    async def _dispatch_due_delivery(self) -> bool:
+        now = datetime.now(self.settings.timezone)
+        row = self.store.claim_due_delivery(now)
+        if row is None:
+            return False
+        send_uuid = str(row["send_uuid"])
+        contact = next(
+            (
+                item
+                for item in self.settings.contacts
+                if item.identity == row["contact_user_id"]
+            ),
+            None,
+        )
+        if contact is None:
+            self.store.mark_delivery_cancelled(
+                send_uuid, "error", "delivery_contact_not_configured"
             )
-        LOG.info("reply sent contact=%s", batch[0].contact.alias)
-        return "sent"
+            return True
+        try:
+            history = await self.dws.history(contact)
+            latest_manual = self._register_manual_messages(history)
+            source_received_at = datetime.fromisoformat(row["source_received_at"])
+            if self._human_owns_conversation(latest_manual, source_received_at):
+                await self._safe_update_streaming_card(
+                    str(row["card_biz_id"] or ""),
+                    "已停止自动处理，已转人工。",
+                    5,
+                )
+                self.store.mark_delivery_cancelled(
+                    send_uuid, "human_cooldown", "manual_takeover"
+                )
+                return True
+            known = set(json.loads(row["event_ids_json"] or "[]"))
+            supplements = [
+                item
+                for item in self._history_events(
+                    contact,
+                    str(row["conversation_id"]),
+                    history,
+                    source_received_at,
+                )
+                if item.message_id not in known
+            ]
+            if supplements:
+                self.store.mark_delivery_cancelled(
+                    send_uuid, "stale_supplement", "new_message_before_delivery"
+                )
+                for item in supplements:
+                    if self.store.claim_event(item) or self.store.event_is_pending(
+                        item.message_id
+                    ):
+                        self._enqueue(item)
+                return True
+
+            content = str(row["payload_text"])
+            message_id = ""
+            card_flow_status: int | None = None
+            if row["card_biz_id"]:
+                try:
+                    await self._update_streaming_card(
+                        str(row["card_biz_id"]), content, 3
+                    )
+                    card_flow_status = 3
+                except Exception as exc:
+                    LOG.warning(
+                        "streaming card final update failed; falling back to text "
+                        "session=%s error=%s",
+                        row["session_id"],
+                        sanitize_text(str(exc), 300),
+                    )
+                    message_id, _ = await self.dws.send(
+                        contact, content, send_uuid, retry_network=True
+                    )
+                    card_flow_status = 5
+            else:
+                message_id, _ = await self.dws.send(
+                    contact, content, send_uuid, retry_network=True
+                )
+            self.store.mark_delivery_sent(
+                send_uuid,
+                message_id,
+                card_flow_status=card_flow_status,
+            )
+            LOG.info("reply sent contact=%s", contact.alias)
+        except Exception as exc:
+            delay = min(2 ** int(row["attempt_count"]), 60)
+            self.store.mark_delivery_retry(
+                send_uuid,
+                f"{type(exc).__name__}: {exc}",
+                now + timedelta(seconds=delay),
+            )
+            LOG.warning(
+                "delivery deferred contact=%s error=%s",
+                contact.alias,
+                sanitize_text(str(exc), 300),
+            )
+        return True
 
 
 def _validate_configuration(settings: Settings) -> list[str]:
@@ -1751,8 +1874,8 @@ def _validate_configuration(settings: Settings) -> list[str]:
         errors.append("duplicate DingTalk identity")
     if settings.self_open_id in open_ids:
         errors.append("self identity appears in listener whitelist")
-    if settings.quiet_window <= 0 or settings.cooldown <= 0:
-        errors.append("quiet window and cooldown must be positive")
+    if settings.quiet_window <= 0 or settings.cooldown < 0:
+        errors.append("quiet window must be positive and cooldown must be non-negative")
     try:
         AgentRuntime.from_config(
             settings.raw, settings.config_path, settings.workspace_root
