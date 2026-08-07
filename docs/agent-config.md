@@ -69,11 +69,11 @@ For an initial installation, or when the service cannot start, configure reusabl
   "model": "model or empty string",
   "reasoning_effort": "medium or high",
   "read_only": true,
-  "timeout_seconds": 60
+  "timeout_seconds": 0
 }
 ```
 
-The front profile must be `read_only: true`; the worker must be `read_only: false`. Runtime write restrictions apply only to the front stage. The worker receives the original conversation and follows `prompts/worker.md`, the target repository's `AGENTS.md`, and the repository's normal Git/CI review policy. Escalation never grants write permission.
+The front profile must be `read_only: true`; the worker must be `read_only: false`. Set `timeout_seconds` to `0` for no time limit. Runtime write restrictions apply only to the front stage. The worker receives the original conversation and follows `prompts/worker.md`, the target repository's `AGENTS.md`, and the repository's normal Git/CI review policy. Escalation never grants write permission.
 
 Every preset requires a worker. The front is optional: keep it for cheap direct replies and routing, or omit the `front` object to send every accepted message directly to the worker. Do not choose Pi, Codex, or Claude by role name alone; choose the launcher that best fits latency, reasoning, tool support, and local authentication.
 

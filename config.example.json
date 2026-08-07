@@ -33,11 +33,11 @@
       "model": "",
       "reasoning_effort": "low",
       "read_only": true,
-      "timeout_seconds": 15,
+      "timeout_seconds": 0,
       "options": {
-        "tools": "escalate"
+        "tools": null
       },
-      "extra_args": ["--no-skills", "--no-extensions", "--no-prompt-templates"]
+      "extra_args": []
     },
     "codex-front": {
       "driver": "codex",
@@ -46,7 +46,7 @@
       "model": "gpt-5.6-terra",
       "reasoning_effort": "medium",
       "read_only": true,
-      "timeout_seconds": 60,
+      "timeout_seconds": 0,
       "options": {"web_search": "disabled"}
     },
     "codex-worker": {

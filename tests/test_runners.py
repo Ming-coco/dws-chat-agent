@@ -167,6 +167,20 @@ class AgentRuntimeTests(unittest.TestCase):
             self.assertEqual(front.timeout_seconds, 30)
             self.assertEqual(worker.timeout_seconds, 300)
 
+    def test_zero_timeout_is_unlimited(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._runtime(root, "pi")
+            raw = json.loads((root / "config.json").read_text(encoding="utf-8"))
+            raw["agents"]["front-agent"]["timeout_seconds"] = 0
+
+            runtime = AgentRuntime.from_config(raw, root / "config.json", root)
+
+            self.assertEqual(
+                runtime.prepare("front", "front", "prompt", root / "run").timeout_seconds,
+                0,
+            )
+
     def test_claude_and_pi_adapters_apply_read_only_only_to_front(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -195,6 +209,13 @@ class AgentRuntimeTests(unittest.TestCase):
             pi_front = pi.prepare("front", "front-fast", "prompt", root / "pf-fast")
             self.assertIn("escalate", pi_front.argv)
             self.assertNotIn("read,grep,find,ls", pi_front.argv)
+
+            raw["agents"]["front-agent"]["options"]["tools"] = None
+            pi = AgentRuntime.from_config(raw, root / "pi" / "config.json", root / "pi")
+            pi_front = pi.prepare("front", "front-all", "prompt", root / "pf-all")
+            self.assertNotIn("--tools", pi_front.argv)
+            self.assertNotIn("--no-tools", pi_front.argv)
+            self.assertIn("--extension", pi_front.argv)
 
     def test_launcher_command_is_independent_from_the_session_protocol(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -274,6 +295,21 @@ class AgentRuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "worker.*read_only=false"):
                 self._runtime(root, "codex", worker_read_only=True)
 
+    def test_example_pi_front_loads_all_tools_and_extensions(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        raw = json.loads((root / "config.example.json").read_text(encoding="utf-8"))
+        front = raw["agents"]["pi-front"]
+        prompt = (root / "prompts" / "front.md").read_text(encoding="utf-8")
+
+        self.assertIsNone(front["options"]["tools"])
+        self.assertEqual(front["extra_args"], [])
+        self.assertTrue(front["read_only"])
+        self.assertEqual(front["timeout_seconds"], 0)
+        self.assertIn("Bash/CLI、skills、extensions、MCP", prompt)
+        self.assertIn("`glab api` 时必须显式指定 `--method GET`", prompt)
+        self.assertIn("工具可见不代表获得写权限", prompt)
+        self.assertNotIn("预计耗时", prompt)
+
 
 class FrontRoutingEvalTests(unittest.TestCase):
     def test_historical_cases_have_valid_expectations(self) -> None:
@@ -281,7 +317,7 @@ class FrontRoutingEvalTests(unittest.TestCase):
             Path(__file__).parents[1] / "evals" / "front-routing.json"
         )
 
-        self.assertEqual(len(cases), 12)
+        self.assertEqual(len(cases), 16)
         self.assertEqual(len({case["name"] for case in cases}), len(cases))
         self.assertTrue(matches_expected("", True, cases[4]))
         self.assertFalse(matches_expected("不用查。", False, cases[4]))

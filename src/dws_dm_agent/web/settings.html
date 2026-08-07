@@ -845,7 +845,7 @@
           field("启动命令（每行一个参数）", textControl(command, value => { profile.command = value.split("\n").map(item => item.trim()).filter(Boolean); }, true), true),
           field("模型", textControl(profile.model, value => { profile.model = value; })),
           field("推理强度", textControl(profile.reasoning_effort, value => { profile.reasoning_effort = value; })),
-          field("超时（秒）", numberControl(profile.timeout_seconds, value => { profile.timeout_seconds = value; }, 1)),
+          field("超时（秒，0=无限制）", numberControl(profile.timeout_seconds, value => { profile.timeout_seconds = value; }, 0)),
           checkboxControl(profile.read_only, "运行时只读（当前 active 前置必须开启，后置必须关闭）", value => { profile.read_only = value; })
         );
         card.append(form);
