@@ -4,12 +4,20 @@ from pathlib import Path
 from typing import Any
 
 
-def command(profile: Any, mount_escalate: bool = False) -> list[str]:
+def command(profile: Any, mount_escalate: bool = False, *, model_override: str | None = None) -> list[str]:
     result = [*profile.command, "--mode", "rpc", "--no-session"]
-    if profile.model:
-        result.extend(["--model", profile.model])
+    model = model_override or profile.model
+    if model:
+        result.extend(["--model", model])
     if profile.reasoning_effort:
         result.extend(["--thinking", profile.reasoning_effort])
+    # 扩展白名单：options.extensions 非空时禁用自动发现，只加载显式列出的扩展；
+    # 空/缺省时保持 pi 默认的扩展发现行为（加载全部已安装扩展）。
+    extensions = profile.options.get("extensions")
+    if extensions:
+        result.append("--no-extensions")
+        for extension in extensions:
+            result.extend(["--extension", str(extension)])
     if mount_escalate:
         result.extend(["--extension", str(Path(__file__).with_name("pi_escalate.ts"))])
     configured_tools = profile.options.get(

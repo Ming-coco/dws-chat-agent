@@ -1276,11 +1276,31 @@ class AgentService:
             ),
         )
         try:
+            stage_profile = self.agent_runtime._stage(stage)
             local_images = (
                 () if front else await self._download_images(batch, session_dir)
             )
+            has_images = bool(local_images)
+            # 非 Codex 协议不支持 local_images，改为把图片路径嵌入 prompt，
+            # pi/claude worker 通过 read 工具自行读取图片文件。
+            if local_images and stage_profile.profile.protocol != "codex-app-server":
+                image_paths = "\n".join(
+                    f"- {img.resolve()}" for img in local_images
+                )
+                prompt = (
+                    prompt
+                    + f"\n\n## 图片附件\n\n以下图片文件已下载到本地，请用 vision_query 工具读取（不要用 read）：\n{image_paths}\n"
+                )
+                local_images = ()
+            # 有图片时使用多模态模型
+            model_override: str | None = None
+            if has_images and stage_profile.profile.protocol == "pi-rpc":
+                multimodal_model = stage_profile.profile.options.get("multimodal_model")
+                if multimodal_model:
+                    model_override = str(multimodal_model)
             session = self.agent_runtime.open_session(
-                stage, session_id, prompt, session_dir, local_images
+                stage, session_id, prompt, session_dir, local_images,
+                model_override=model_override,
             )
         except (OSError, RuntimeError, ValueError) as exc:
             shutil.rmtree(session_dir, ignore_errors=True)

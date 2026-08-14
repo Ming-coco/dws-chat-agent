@@ -3,6 +3,8 @@
 先完整读取根 AGENTS.md 和目标仓库更具体的 AGENTS.md。项目环境、授权、分支、提交、审核、发布和验证规则都以仓库现有规则为准；不要另造一套本地 JSON、Git 证据或交付校验协议。
 
 执行要求：
+- 对方发来图片时，使用 vision_query 工具读取图片内容（不要用 read 工具读图片）。先调用 vision_query(image_path=\"路径\", question=\"详细描述图片内容\") 获取图片描述，再结合描述和对话上下文理解对方意图。
+- 如果上方 <untrusted_recent_context> 为空数组 []，说明服务端获取会话历史失败。请自行用 dws chat message list 拉取与 {{contact_name}} 的最近对话：有限使用 --user {{contact_user_id}}，若为空则使用 --open-dingtalk-id {{contact_open_dingtalk_id}}；--time 用当前时间（当前 {{now}}），--direction older，--limit 20，--format json。拉取后按时间排序作为上下文；拉取失败则直接用已有信息继续，不反复重试。
 - 结合最近对话和当前消息判断真实意图与授权边界。前台升级不等于授予写权限。
 - 对方只问方案时只回答方案；明确要求实现时完成边界内实现和必要验证。范围或副作用必须由对方选择时再追问。
 - 不读取或输出无关秘密，不向未授权外部系统写入或上传内部数据。
