@@ -35,7 +35,8 @@
       "read_only": true,
       "timeout_seconds": 0,
       "options": {
-        "tools": null
+        "tools": null,
+        "extensions": "${DWS_CHAT_AGENT_PI_FRONT_EXTENSIONS_JSON}"
       },
       "extra_args": []
     },
@@ -75,7 +76,10 @@
       "model": "",
       "reasoning_effort": "high",
       "read_only": false,
-      "timeout_seconds": 10800
+      "timeout_seconds": 10800,
+      "options": {
+        "extensions": "${DWS_CHAT_AGENT_PI_WORKER_EXTENSIONS_JSON}"
+      }
     }
   },
   "workflows": {

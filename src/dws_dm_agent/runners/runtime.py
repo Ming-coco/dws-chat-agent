@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -24,6 +25,8 @@ from . import claude, codex, custom, pi
 _STAGE_ORDER = ("front", "worker")
 _EVENT_STREAM_LIMIT = 8 * 1024 * 1024
 _PI_EMPTY_RESPONSE_RETRIES = 4
+# pi-worker 冷启动（含扩展/MCP 加载）偶发超过默认 15s，首条 prompt 握手放宽到 3 分钟。
+_PI_START_HANDSHAKE_TIMEOUT_SECONDS = 180.0
 _DRIVER_PROTOCOLS = {
     "codex": "codex-app-server",
     "claude": "claude-stream-json",
@@ -203,7 +206,8 @@ class AgentSession:
                     raise RuntimeError("Codex app-server did not return a turn id")
             elif self.prepared.protocol == "pi-rpc":
                 response = await self._pi_call(
-                    {"type": "prompt", "message": self.prepared.prompt}
+                    {"type": "prompt", "message": self.prepared.prompt},
+                    timeout=_PI_START_HANDSHAKE_TIMEOUT_SECONDS,
                 )
                 if not response.get("success", False):
                     raise RuntimeError(str(response.get("error") or "Pi rejected prompt"))
@@ -855,6 +859,7 @@ class AgentRuntime:
         prompt: str,
         session_dir: Path,
         local_images: Sequence[Path] = (),
+        model_override: str | None = None,
     ) -> PreparedAgent:
         stage = self._stage(stage_name)
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -865,11 +870,17 @@ class AgentRuntime:
         prompt_path.write_text(prompt, encoding="utf-8")
         protocol = stage.profile.protocol
         if local_images and protocol != "codex-app-server":
-            raise ValueError("local images require the Codex app-server protocol")
+            # 非 Codex 协议应在上游 _run_agent 中将图片路径嵌入 prompt；
+            # 这里只保留防御性日志，不再硬阻断。
+            logging.getLogger(__name__).warning(
+                "local_images passed to non-codex protocol %s; images=%d",
+                protocol,
+                len(local_images),
+            )
         mcp_config_path = (
             _write_escalate_mcp_config(session_dir) if stage_name == "front" else None
         )
-        argv = _command(stage.profile, mcp_config_path)
+        argv = _command(stage.profile, mcp_config_path, model_override)
         environment = self._environment(
             stage.profile,
             session_dir / "codex-home"
@@ -904,9 +915,10 @@ class AgentRuntime:
         prompt: str,
         session_dir: Path,
         local_images: Sequence[Path] = (),
+        model_override: str | None = None,
     ) -> AgentSession:
         return AgentSession(
-            self.prepare(stage_name, session_id, prompt, session_dir, local_images),
+            self.prepare(stage_name, session_id, prompt, session_dir, local_images, model_override=model_override),
             session_id,
         )
 
@@ -1015,7 +1027,7 @@ def _resolve_path(base: Path, value: Any) -> Path:
     return path.resolve() if path.is_absolute() else (base / path).resolve()
 
 
-def _command(profile: AgentProfile, mcp_config_path: Path | None) -> list[str]:
+def _command(profile: AgentProfile, mcp_config_path: Path | None, model_override: str | None = None) -> list[str]:
     protocol = profile.protocol
     if protocol == "codex-app-server":
         return codex.command(profile, bool(mcp_config_path))
@@ -1024,7 +1036,7 @@ def _command(profile: AgentProfile, mcp_config_path: Path | None) -> list[str]:
     if protocol == "custom-jsonl-v1":
         return custom.command(profile)
     if protocol == "pi-rpc":
-        return pi.command(profile, bool(mcp_config_path))
+        return pi.command(profile, bool(mcp_config_path), model_override=model_override)
     raise ValueError(f"unsupported agent protocol: {protocol}")
 
 
