@@ -210,7 +210,9 @@ PYTHONPATH=src python3 -m dws_dm_agent.front_eval --concurrency 1
 
 未来可以增加更多预设流程，无需把当前流水线扩展成通用 DAG 引擎。
 
-提示词使用普通 UTF-8 文件，当前启用的文件会原样显示在本地设置页。阶段提示词可使用 `{{self_name}}`、`{{agent_name}}`、`{{worker_name}}`、`{{contact_name}}`、`{{contact_alias}}`、`{{contact_user_id}}`、`{{session_id}}`、`{{prior_attempt}}`、`{{workspace_root}}`、`{{worktree_root}}`、`{{recent_context_json}}`、`{{current_messages_json}}` 和 `{{now}}`。补充消息提示词可使用 `{{supplement_messages_json}}`、`{{session_id}}`、联系人身份字段和 `{{self_name}}`。
+提示词使用普通 UTF-8 文件，当前启用的文件会原样显示在本地设置页。阶段提示词可使用 `{{self_name}}`、`{{agent_name}}`、`{{worker_name}}`、`{{contact_name}}`、`{{contact_alias}}`、`{{contact_user_id}}`、`{{contact_open_dingtalk_id}}`、`{{session_id}}`、`{{prior_attempt}}`、`{{workspace_root}}`、`{{worktree_root}}`、`{{recent_context_json}}`、`{{current_messages_json}}` 和 `{{now}}`。补充消息提示词可使用 `{{supplement_messages_json}}`、`{{session_id}}`、联系人身份字段和 `{{self_name}}`。
+
+跨组织联系人：钉钉对组织外的用户区别对待。拉取其会话历史需要临时数据授权（`dws chat data-auth cross-org --all --grant-type timed --ttl 24h`），授权约 24 小时后过期；过期期间历史同步失败、投递会被延迟，需要重新授权。跨组织用户的 userId 通常无法用于消息拉取（报 `peerUid is required`），可用时服务会回退到 `{{contact_open_dingtalk_id}}`。
 
 配置前台时必须设置 `read_only: true`。它可以使用 Provider 提供的工具完成范围明确的只读调查并直接回复，任何写入或外部副作用都必须升级。执行 Agent 拥有正常编码权限，并依据原始会话和仓库规则判断授权；升级本身不会授予写权限。
 
