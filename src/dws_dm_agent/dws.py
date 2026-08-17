@@ -151,19 +151,8 @@ class DwsClient:
         query_time = (datetime.now(self.settings.timezone) + timedelta(seconds=5)).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
-        target = (
-            ["--user", contact.user_id]
-            if contact.user_id
-            else ["--open-dingtalk-id", contact.open_dingtalk_id]
-        )
-        payload = await self._retry_network_json_command(
-            [
-                "chat", "message", "list", *target,
-                "--time", query_time, "--direction", "older", "--limit",
-                str(int(self.settings.raw.get("history_limit", 80))),
-            ],
-            operation="history",
-        )
+        limit = str(int(self.settings.raw.get("history_limit", 80)))
+        payload = await self._fetch_history(contact, query_time, limit)
         messages = payload.get("result", {}).get("messages", []) if isinstance(payload, Mapping) else []
         result: list[HistoryMessage] = []
         for raw in messages:
@@ -183,25 +172,95 @@ class DwsClient:
             )
         return sorted(result, key=lambda item: item.created_at)
 
+    async def _fetch_history(
+        self, contact: Contact, query_time: str, limit: str
+    ) -> Any:
+        """Fetch a contact's message history, preferring userId.
+
+        Cross-organization contacts often expose a userId that DingTalk's message
+        API rejects (peerUid is required). When that userId path fails with a
+        business error and an open DingTalk id is available, retry once with
+        --open-dingtalk-id. Network errors are not downgraded; they retry in the
+        caller and would fail identically on either identity.
+        """
+        if contact.user_id:
+            try:
+                return await self._retry_network_json_command(
+                    [
+                        "chat", "message", "list", "--user", contact.user_id,
+                        "--time", query_time, "--direction", "older", "--limit", limit,
+                    ],
+                    operation="history",
+                )
+            except RuntimeError as exc:
+                if not contact.open_dingtalk_id or str(exc).endswith(": NETWORK_ERROR"):
+                    raise
+                LOG.warning(
+                    "history user-id lookup failed contact=%s; falling back to open DingTalk id error=%s",
+                    contact.alias,
+                    str(exc),
+                )
+        return await self._retry_network_json_command(
+            [
+                "chat", "message", "list", "--open-dingtalk-id", contact.open_dingtalk_id,
+                "--time", query_time, "--direction", "older", "--limit", limit,
+            ],
+            operation="history",
+        )
+
     async def send(
         self, contact: Contact, content: str, send_uuid: str, *,
         dry_run: bool = False, retry_network: bool = False,
     ) -> tuple[str | None, Any]:
         content = re.sub(r"\$(?=\d+\.\d)", "USD ", content)
-        if contact.user_id:
-            target = ["--user", contact.user_id]
-        elif contact.open_dingtalk_id:
-            target = ["--open-dingtalk-id", contact.open_dingtalk_id]
-        else:
+        if not contact.user_id and not contact.open_dingtalk_id:
             raise ValueError("DingTalk recipient has no user or open DingTalk id")
+        command = self._send_json_command if retry_network else self._json_command
+        if contact.user_id:
+            try:
+                payload = await command(
+                    self._send_arguments(
+                        "--user", contact.user_id, content, send_uuid, dry_run=dry_run
+                    )
+                )
+                return _find_message_id(payload), payload
+            except RuntimeError as exc:
+                # Cross-organization contacts often have a userId DingTalk cannot
+                # resolve (cannot resolve userId ... to openDingTalkId). Retry with
+                # the open DingTalk id; the shared send_uuid keeps the retry idempotent.
+                if not contact.open_dingtalk_id or str(exc).endswith(": NETWORK_ERROR"):
+                    raise
+                LOG.warning(
+                    "send user-id lookup failed contact=%s; falling back to open DingTalk id error=%s",
+                    contact.alias,
+                    str(exc),
+                )
+        payload = await command(
+            self._send_arguments(
+                "--open-dingtalk-id", contact.open_dingtalk_id,
+                content, send_uuid, dry_run=dry_run,
+            )
+        )
+        return _find_message_id(payload), payload
+
+    def _send_arguments(
+        self,
+        target_flag: str,
+        target_value: str,
+        content: str,
+        send_uuid: str,
+        *,
+        dry_run: bool,
+    ) -> list[str]:
         arguments = [
-            "chat", "message", "send", *target, "--text", content,
-            f"--ai-tag={'true' if self.ai_tag else 'false'}", "--uuid", send_uuid, "--yes",
+            "chat", "message", "send", target_flag, target_value,
+            "--text", content,
+            f"--ai-tag={'true' if self.ai_tag else 'false'}",
+            "--uuid", send_uuid, "--yes",
         ]
         if dry_run:
             arguments.append("--dry-run")
-        payload = await self._send_json_command(arguments) if retry_network else await self._json_command(arguments)
-        return _find_message_id(payload), payload
+        return arguments
 
     async def send_card(
         self, contact: Contact

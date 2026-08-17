@@ -694,11 +694,137 @@ class DwsSendTests(unittest.TestCase):
                 "DWS command failed (1): chat message list: AUTH_ERROR"
             )
         )
+        # No open DingTalk id, so a userId business error has no fallback path.
+        user_only = Contact("teammate", "Teammate", "u-1", "")
+
+        with self.assertRaisesRegex(RuntimeError, "AUTH_ERROR"):
+            asyncio.run(client.history(user_only))
+
+        self.assertEqual(client._json_command.await_count, 1)
+
+    def test_history_falls_back_to_open_id_when_user_lookup_fails(self) -> None:
+        client = object.__new__(DwsClient)
+        client.settings = SimpleNamespace(
+            timezone=TZ,
+            raw={"history_limit": 80},
+        )
+        client._json_command = AsyncMock(
+            side_effect=[
+                RuntimeError(
+                    "DWS command failed (1): chat message list: 1001"
+                ),
+                {"result": {"messages": []}},
+            ]
+        )
+
+        messages = asyncio.run(client.history(CONTACT))
+
+        self.assertEqual(messages, [])
+        self.assertEqual(client._json_command.await_count, 2)
+        arguments = client._json_command.await_args.args[0]
+        self.assertIn("--open-dingtalk-id", arguments)
+        self.assertIn("open-contact", arguments)
+        self.assertNotIn("--user", arguments)
+
+    def test_history_does_not_fallback_on_network_error(self) -> None:
+        client = object.__new__(DwsClient)
+        client.settings = SimpleNamespace(
+            timezone=TZ,
+            raw={"history_limit": 80},
+        )
+        client._json_command = AsyncMock(
+            side_effect=RuntimeError(
+                "DWS command failed (1): chat message list: NETWORK_ERROR"
+            )
+        )
+
+        with patch("dws_dm_agent.dws.asyncio.sleep", new=AsyncMock()) as sleep:
+            with self.assertRaisesRegex(RuntimeError, "NETWORK_ERROR"):
+                asyncio.run(client.history(CONTACT))
+
+        self.assertEqual(client._json_command.await_count, 3)
+        self.assertEqual(sleep.await_count, 2)
+
+    def test_history_fallback_error_propagates_when_open_id_also_fails(self) -> None:
+        client = object.__new__(DwsClient)
+        client.settings = SimpleNamespace(
+            timezone=TZ,
+            raw={"history_limit": 80},
+        )
+        client._json_command = AsyncMock(
+            side_effect=[
+                RuntimeError("DWS command failed (1): chat message list: 1001"),
+                RuntimeError("DWS command failed (1): chat message list: AUTH_ERROR"),
+            ]
+        )
 
         with self.assertRaisesRegex(RuntimeError, "AUTH_ERROR"):
             asyncio.run(client.history(CONTACT))
 
+        self.assertEqual(client._json_command.await_count, 2)
+
+    def test_send_falls_back_to_open_id_when_user_lookup_fails(self) -> None:
+        client = object.__new__(DwsClient)
+        client.settings = SimpleNamespace(
+            timezone=TZ,
+            raw={"history_limit": 80},
+        )
+        client.ai_tag = True
+        client._json_command = AsyncMock(
+            side_effect=[
+                RuntimeError(
+                    "DWS command failed (5): chat message send: cannot resolve userId"
+                ),
+                {"result": {"messageId": "msg-open-id"}},
+            ]
+        )
+
+        message_id, _ = asyncio.run(
+            client.send(CONTACT, "hello", "send-uuid-1")
+        )
+
+        self.assertEqual(message_id, "msg-open-id")
+        self.assertEqual(client._json_command.await_count, 2)
+        arguments = client._json_command.await_args.args[0]
+        self.assertIn("--open-dingtalk-id", arguments)
+        self.assertIn("open-contact", arguments)
+        self.assertNotIn("--user", arguments)
+        # 同 uuid 幂等重试
+        self.assertIn("send-uuid-1", arguments)
+
+    def test_send_does_not_fallback_on_network_error(self) -> None:
+        client = object.__new__(DwsClient)
+        client.settings = SimpleNamespace(
+            timezone=TZ,
+            raw={"history_limit": 80},
+        )
+        client.ai_tag = True
+        client._json_command = AsyncMock(
+            side_effect=RuntimeError(
+                "DWS command failed (1): chat message send: NETWORK_ERROR"
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "NETWORK_ERROR"):
+            asyncio.run(client.send(CONTACT, "hello", "send-uuid-2"))
+
         self.assertEqual(client._json_command.await_count, 1)
+
+    def test_send_uses_open_id_directly_when_no_user_id(self) -> None:
+        client = object.__new__(DwsClient)
+        client.settings = SimpleNamespace(
+            timezone=TZ,
+            raw={"history_limit": 80},
+        )
+        client.ai_tag = True
+        client._json_command = AsyncMock(return_value={"result": {}})
+        recipient = Contact("summary", "Operator", "", "open-only-id")
+
+        asyncio.run(client.send(recipient, "hello", "send-uuid-3"))
+
+        arguments = client._json_command.await_args.args[0]
+        self.assertIn("--open-dingtalk-id", arguments)
+        self.assertNotIn("--user", arguments)
 
     def test_streaming_card_create_and_update_use_dws_card_commands(self) -> None:
         client = object.__new__(DwsClient)
