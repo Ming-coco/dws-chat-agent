@@ -654,5 +654,76 @@ class AgentConfigStoreTests(unittest.TestCase):
                 server.stop()
 
 
+class AgentFallbackConfigTests(unittest.TestCase):
+    def _raw(self, fallbacks: list[str]) -> dict:
+        return {
+            "contacts": [],
+            "agents": {
+                "front-agent": {
+                    "driver": "pi",
+                    "model": "fast-model",
+                    "read_only": True,
+                    "timeout_seconds": 30,
+                    "options": {},
+                },
+                "worker-agent": {
+                    "driver": "pi",
+                    "model": "strong-model",
+                    "read_only": False,
+                    "timeout_seconds": 300,
+                    "options": {},
+                    "fallbacks": fallbacks,
+                },
+                "backup-agent": {
+                    "driver": "pi",
+                    "model": "backup-model",
+                    "read_only": False,
+                    "timeout_seconds": 300,
+                    "options": {},
+                },
+            },
+            "workflows": {
+                "active": "dm-default",
+                "presets": {
+                    "dm-default": {
+                        "supplement_strategy": "steer",
+                        "supplement_prompt": "prompts/supplement.md",
+                        "front": {"agent": "front-agent", "prompt": "prompts/front.md"},
+                        "worker": {"agent": "worker-agent", "prompt": "prompts/worker.md"},
+                    }
+                },
+            },
+        }
+
+    def _from_raw(self, tmp: str, raw: dict) -> AgentRuntime:
+        root = Path(tmp)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "prompts").mkdir(parents=True, exist_ok=True)
+        for name in ("front.md", "worker.md", "supplement.md"):
+            (root / "prompts" / name).write_text("x {{self_name}}", encoding="utf-8")
+        config_path = root / "config.json"
+        config_path.write_text(json.dumps(raw), encoding="utf-8")
+        return AgentRuntime.from_config(raw, config_path, root)
+
+    def test_fallbacks_are_parsed_and_stage_override_swaps_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._from_raw(tmp, self._raw(["backup-agent"]))
+            worker = runtime._stage("worker")
+            self.assertEqual(worker.profile.fallbacks, ("backup-agent",))
+            overridden = runtime.resolve_stage("worker", "backup-agent")
+            self.assertEqual(overridden.profile.name, "backup-agent")
+            self.assertEqual(overridden.profile.model, "backup-model")
+            self.assertEqual(overridden.prompt_path, worker.prompt_path)
+            self.assertEqual(
+                runtime.resolve_stage("worker").profile.name, "worker-agent"
+            )
+
+    def test_unknown_fallback_agent_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                self._from_raw(tmp, self._raw(["missing-agent"]))
+
+
+
 if __name__ == "__main__":
     unittest.main()

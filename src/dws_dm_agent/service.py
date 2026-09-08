@@ -1023,7 +1023,7 @@ class AgentService:
 
             if result is None:
                 self._set_runtime(batch, "worker", attempt=attempt + 1)
-                result = await self._run_agent(
+                result = await self._run_worker_with_fallback(
                     batch,
                     prior_attempt,
                     recent_context=recent_context,
@@ -1239,6 +1239,51 @@ class AgentService:
             "now": datetime.now(self.settings.timezone).strftime("%Y-%m-%d %H:%M:%S"),
         }
 
+    async def _run_worker_with_fallback(
+        self,
+        batch: Sequence[IncomingEvent],
+        prior_attempt: str,
+        *,
+        recent_context: Sequence[Mapping[str, str]] = (),
+        stream_card_id: str = "",
+    ) -> AgentResult:
+        """按主 worker + fallbacks 链执行；无回复视为该 agent 失败，切换链上下一个。"""
+        result = await self._run_agent(
+            batch,
+            prior_attempt,
+            recent_context=recent_context,
+            stream_card_id=stream_card_id,
+        )
+        fallbacks = self.agent_runtime._stage("worker").profile.fallbacks
+        for index, agent_name in enumerate(fallbacks, start=1):
+            if (
+                result.reply is not None
+                or result.manual_takeover
+                or result.supplements
+            ):
+                return result
+            LOG.warning(
+                "worker fallback engaged agent=%s attempt=%d/%d error=%s",
+                agent_name,
+                index,
+                len(fallbacks),
+                result.error[:200],
+            )
+            if stream_card_id:
+                await self._safe_update_streaming_card(
+                    stream_card_id,
+                    f"执行模型失败，已切换备用模型（{index}/{len(fallbacks)}）继续处理。",
+                    5,
+                )
+            result = await self._run_agent(
+                batch,
+                prior_attempt,
+                recent_context=recent_context,
+                stream_card_id=stream_card_id,
+                agent_override=agent_name,
+            )
+        return result
+
     async def _run_agent(
         self,
         batch: Sequence[IncomingEvent],
@@ -1247,12 +1292,16 @@ class AgentService:
         front: bool = False,
         recent_context: Sequence[Mapping[str, str]] = (),
         stream_card_id: str = "",
+        agent_override: str | None = None,
     ) -> AgentResult:
         stage = "front" if front else "worker"
         profile = re.sub(
             r"[^a-z0-9]+",
             "-",
-            self.agent_runtime.profile_name(stage).lower(),
+            (
+                agent_override
+                or self.agent_runtime.profile_name(stage)
+            ).lower(),
         ).strip("-")
         session_id = (
             f"dm-{datetime.now(self.settings.timezone):%Y%m%d}-{profile}-"
@@ -1276,7 +1325,7 @@ class AgentService:
             ),
         )
         try:
-            stage_profile = self.agent_runtime._stage(stage)
+            stage_profile = self.agent_runtime.resolve_stage(stage, agent_override)
             local_images = (
                 () if front else await self._download_images(batch, session_dir)
             )
@@ -1301,6 +1350,7 @@ class AgentService:
             session = self.agent_runtime.open_session(
                 stage, session_id, prompt, session_dir, local_images,
                 model_override=model_override,
+                agent_override=agent_override,
             )
         except (OSError, RuntimeError, ValueError) as exc:
             shutil.rmtree(session_dir, ignore_errors=True)
