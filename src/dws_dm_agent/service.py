@@ -1336,9 +1336,15 @@ class AgentService:
                 image_paths = "\n".join(
                     f"- {img.resolve()}" for img in local_images
                 )
+                if stage_profile.profile.protocol == "pi-rpc":
+                    # vision_query 由 pi 的 vision 扩展提供
+                    read_hint = "请用 vision_query 工具读取（不要用 read）"
+                else:
+                    # claude 等协议没有 vision_query 工具，其 read 原生支持图片
+                    read_hint = "请用 read 工具直接读取以下图片文件"
                 prompt = (
                     prompt
-                    + f"\n\n## 图片附件\n\n以下图片文件已下载到本地，请用 vision_query 工具读取（不要用 read）：\n{image_paths}\n"
+                    + f"\n\n## 图片附件\n\n以下图片文件已下载到本地，{read_hint}：\n{image_paths}\n"
                 )
                 local_images = ()
             # 有图片时使用多模态模型
