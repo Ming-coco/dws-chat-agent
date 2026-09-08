@@ -51,6 +51,8 @@ class AgentProfile:
     options: Mapping[str, Any]
     environment: Mapping[str, str]
     extra_args: tuple[str, ...]
+    # 执行失败时按顺序切换的备用 agent 名（仅对 worker 阶段生效）
+    fallbacks: tuple[str, ...] = ()
 
     @property
     def binary(self) -> str:
@@ -760,6 +762,14 @@ class AgentRuntime:
                         f"agent command entries must be non-empty strings: {name}"
                     )
                 command = tuple(command_value)
+            fallbacks_raw = value.get("fallbacks", [])
+            if not isinstance(fallbacks_raw, list) or any(
+                not isinstance(item, str) or not item.strip()
+                for item in fallbacks_raw
+            ):
+                raise ValueError(
+                    f"agent fallbacks must be an array of agent names: {name}"
+                )
             profiles[str(name)] = AgentProfile(
                 name=str(name),
                 driver=driver,
@@ -772,6 +782,7 @@ class AgentRuntime:
                 options=dict(options),
                 environment={str(key): str(item) for key, item in environment.items()},
                 extra_args=tuple(str(item) for item in extra_args),
+                fallbacks=tuple(str(item).strip() for item in fallbacks_raw),
             )
         active = str(workflow_values.get("active") or "")
         presets = workflow_values.get("presets")
@@ -821,6 +832,17 @@ class AgentRuntime:
             raise ValueError("workflow front agent must set read_only=true")
         if stages["worker"].profile.read_only:
             raise ValueError("workflow worker agent must set read_only=false")
+        for profile in profiles.values():
+            unknown = [
+                fallback
+                for fallback in profile.fallbacks
+                if fallback not in profiles
+            ]
+            if unknown:
+                raise ValueError(
+                    f"agent {profile.name} references unknown fallback agents: "
+                    f"{', '.join(unknown)}"
+                )
         return cls(
             active,
             stages,
@@ -860,8 +882,9 @@ class AgentRuntime:
         session_dir: Path,
         local_images: Sequence[Path] = (),
         model_override: str | None = None,
+        agent_override: str | None = None,
     ) -> PreparedAgent:
-        stage = self._stage(stage_name)
+        stage = self.resolve_stage(stage_name, agent_override)
         session_dir.mkdir(parents=True, exist_ok=True)
         prompt_path = session_dir / "prompt.md"
         result_path = session_dir / "result.txt"
@@ -916,9 +939,18 @@ class AgentRuntime:
         session_dir: Path,
         local_images: Sequence[Path] = (),
         model_override: str | None = None,
+        agent_override: str | None = None,
     ) -> AgentSession:
         return AgentSession(
-            self.prepare(stage_name, session_id, prompt, session_dir, local_images, model_override=model_override),
+            self.prepare(
+                stage_name,
+                session_id,
+                prompt,
+                session_dir,
+                local_images,
+                model_override=model_override,
+                agent_override=agent_override,
+            ),
             session_id,
         )
 
@@ -977,6 +1009,7 @@ class AgentRuntime:
                     "model": profile.model,
                     "reasoningEffort": profile.reasoning_effort,
                     "readOnly": profile.read_only,
+                    "fallbacks": list(profile.fallbacks),
                     "active": profile.name in active_profiles,
                 }
                 for profile in self._profiles.values()
@@ -988,6 +1021,23 @@ class AgentRuntime:
             return self._stages[name]
         except KeyError as exc:
             raise ValueError(f"unknown workflow stage: {name}") from exc
+
+    def resolve_stage(
+        self, name: str, agent_override: str | None = None
+    ) -> WorkflowStage:
+        """返回 stage 定义；agent_override 用指定 agent 替换该阶段的执行 profile。"""
+        stage = self._stage(name)
+        if not agent_override or agent_override == stage.profile.name:
+            return stage
+        profile = self._profiles.get(agent_override)
+        if profile is None:
+            raise ValueError(f"unknown agent override: {agent_override}")
+        return WorkflowStage(
+            name=stage.name,
+            label=stage.label,
+            profile=profile,
+            prompt_path=stage.prompt_path,
+        )
 
     def _environment(
         self, profile: AgentProfile, session_home: Path | None = None

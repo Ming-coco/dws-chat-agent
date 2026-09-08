@@ -24,6 +24,7 @@ from dws_dm_agent.core import (
     sanitize_text,
 )
 from dws_dm_agent.service import (
+    AgentResult,
     AgentService,
     DwsClient,
     _find_dws_error_code,
@@ -1702,6 +1703,90 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(
                 snapshot["workflow"]["stages"][1]["prompt"], "worker prompt"
             )
+
+
+class WorkerFallbackTests(unittest.TestCase):
+    def _event(self) -> IncomingEvent:
+        return IncomingEvent(
+            "event-fb", "message-fb", "conversation-fb",
+            CONTACT, "帮我看看", datetime(2026, 9, 8, 18, 0, tzinfo=TZ),
+        )
+
+    def _service_with_chain(self, fallbacks: tuple[str, ...]) -> AgentService:
+        service = object.__new__(AgentService)
+        service.agent_runtime = SimpleNamespace(
+            _stage=Mock(
+                return_value=SimpleNamespace(
+                    profile=SimpleNamespace(fallbacks=fallbacks)
+                )
+            )
+        )
+        return service
+
+    def _failed_result(self) -> AgentResult:
+        return AgentResult(
+            "session", None, None,
+            datetime.now(TZ), datetime.now(TZ), error="boom",
+        )
+
+    def test_worker_retries_whole_chain_when_reply_is_missing(self) -> None:
+        service = self._service_with_chain(("backup-a", "backup-b"))
+        calls: list[str | None] = []
+
+        async def fake_run_agent(batch, prior_attempt, *, recent_context=(),
+                                 stream_card_id="", agent_override=None):
+            calls.append(agent_override)
+            return self._failed_result()
+
+        with patch.object(AgentService, "_run_agent", side_effect=fake_run_agent):
+            result = asyncio.run(
+                service._run_worker_with_fallback([self._event()], "")
+            )
+
+        self.assertIsNone(result.reply)
+        self.assertEqual(calls, [None, "backup-a", "backup-b"])
+
+    def test_worker_stops_on_first_success(self) -> None:
+        service = self._service_with_chain(("backup-a",))
+        calls: list[str | None] = []
+
+        async def fake_run_agent(batch, prior_attempt, *, recent_context=(),
+                                 stream_card_id="", agent_override=None):
+            calls.append(agent_override)
+            return AgentResult(
+                "session", "这是回复", 0,
+                datetime.now(TZ), datetime.now(TZ),
+            )
+
+        with patch.object(AgentService, "_run_agent", side_effect=fake_run_agent):
+            result = asyncio.run(
+                service._run_worker_with_fallback([self._event()], "")
+            )
+
+        self.assertEqual(result.reply, "这是回复")
+        self.assertEqual(calls, [None])
+
+    def test_worker_does_not_fallback_on_manual_takeover(self) -> None:
+        service = self._service_with_chain(("backup-a",))
+        calls: list[str | None] = []
+
+        async def fake_run_agent(batch, prior_attempt, *, recent_context=(),
+                                 stream_card_id="", agent_override=None):
+            calls.append(agent_override)
+            return AgentResult(
+                "session", None, None,
+                datetime.now(TZ), datetime.now(TZ),
+                manual_takeover=True,
+            )
+
+        with patch.object(AgentService, "_run_agent", side_effect=fake_run_agent):
+            result = asyncio.run(
+                service._run_worker_with_fallback([self._event()], "")
+            )
+
+        self.assertTrue(result.manual_takeover)
+        self.assertEqual(calls, [None])
+
 
 
 if __name__ == "__main__":
