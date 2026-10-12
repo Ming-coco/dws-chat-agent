@@ -12,7 +12,7 @@ STAGE_PROMPT_VARIABLES = frozenset(
         "contact_alias", "contact_user_id", "contact_open_dingtalk_id",
         "session_id", "prior_attempt",
         "workspace_root", "worktree_root", "recent_context_json",
-        "current_messages_json", "now",
+        "current_messages_json", "active_tasks_json", "now",
     }
 )
 SUPPLEMENT_PROMPT_VARIABLES = frozenset(

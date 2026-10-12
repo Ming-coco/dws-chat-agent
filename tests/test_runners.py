@@ -14,6 +14,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from dws_dm_agent.front_eval import load_cases, matches_expected
+from dws_dm_agent.runners import pi as pi_module
 from dws_dm_agent.runners.runtime import AgentRuntime, AgentSession
 from dws_dm_agent.dashboard import (
     AgentConfigStore,
@@ -203,7 +204,11 @@ class AgentRuntimeTests(unittest.TestCase):
             pi_worker = pi.prepare("worker", "worker", "prompt", root / "pw")
             self.assertEqual(pi_front.protocol, "pi-rpc")
             self.assertIn("rpc", pi_front.argv)
-            self.assertIn("read,grep,find,ls,escalate", pi_front.argv)
+            # 前台显式工具集在 escalate 之外追加服务工具（no_reply/事项记忆）。
+            self.assertIn(
+                "read,grep,find,ls,escalate,no_reply,task_record,task_lookup",
+                pi_front.argv,
+            )
             self.assertNotIn("read,grep,find,ls", pi_worker.argv)
             self.assertFalse(any(value.startswith("@") for value in pi_worker.argv))
 
@@ -211,7 +216,10 @@ class AgentRuntimeTests(unittest.TestCase):
             raw["agents"]["front-agent"]["options"]["tools"] = ""
             pi = AgentRuntime.from_config(raw, root / "pi" / "config.json", root / "pi")
             pi_front = pi.prepare("front", "front-fast", "prompt", root / "pf-fast")
-            self.assertIn("escalate", pi_front.argv)
+            # tools 为空串时 escalate 仍强制挂载，服务工具随之进入列表。
+            self.assertIn(
+                "escalate,no_reply,task_record,task_lookup", pi_front.argv
+            )
             self.assertNotIn("read,grep,find,ls", pi_front.argv)
 
             raw["agents"]["front-agent"]["options"]["tools"] = None
@@ -709,6 +717,343 @@ class AgentSessionProtocolTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(codex.done)
             self.assertTrue(pi.done)
             self.assertTrue(claude.done)
+
+
+class PiNoReplyControlTests(unittest.IsolatedAsyncioTestCase):
+    def _session(self, root: Path) -> AgentSession:
+        runtime = AgentRuntimeTests()._runtime(root, "pi")
+        return AgentSession(
+            runtime.prepare("worker", "session", "prompt", root / "run"),
+            "session",
+        )
+
+    async def _finish_with_final_text(self, session: AgentSession) -> None:
+        await session._handle_event(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "stopReason": "stop",
+                    "content": [{"type": "text", "text": "最终正文"}],
+                },
+            }
+        )
+        await session._handle_event(
+            {
+                "type": "agent_end",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "stopReason": "stop",
+                        "content": [{"type": "text", "text": "最终正文"}],
+                    }
+                ],
+            }
+        )
+
+    async def test_pi_no_reply_tool_end_captures_silent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory))
+            await session._handle_event(
+                {
+                    "type": "tool_execution_end",
+                    "toolCallId": "tool-1",
+                    "toolName": "no_reply",
+                    "result": {},
+                    "isError": False,
+                }
+            )
+
+            self.assertTrue(session.silent)
+            self.assertTrue(session.done)
+            self.assertEqual(session.error, "")
+            with self.assertRaises(ValueError):
+                session.result()
+
+    async def test_pi_no_reply_tool_error_keeps_normal_reply_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory))
+            await session._handle_event(
+                {
+                    "type": "tool_execution_end",
+                    "toolCallId": "tool-1",
+                    "toolName": "no_reply",
+                    "result": {},
+                    "isError": True,
+                }
+            )
+
+            # 工具执行失败不算沉默，模型继续正常收尾交付正文。
+            self.assertFalse(session.silent)
+            self.assertFalse(session.done)
+            await self._finish_with_final_text(session)
+            self.assertEqual(session.result(), "最终正文")
+
+    async def test_pi_agent_end_after_silent_keeps_error_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory))
+            await session._handle_event(
+                {
+                    "type": "tool_execution_end",
+                    "toolCallId": "tool-1",
+                    "toolName": "dws__no_reply",
+                    "result": {},
+                    "isError": False,
+                }
+            )
+            await session._handle_event({"type": "agent_end", "messages": []})
+
+            self.assertTrue(session.silent)
+            self.assertTrue(session.done)
+            # silent 是成功终态，不能被记成 agent_result_missing。
+            self.assertEqual(session.error, "")
+
+    async def test_pi_body_after_silent_is_not_deliverable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory))
+            await session._handle_event(
+                {
+                    "type": "tool_execution_end",
+                    "toolCallId": "tool-1",
+                    "toolName": "no_reply",
+                    "result": {},
+                    "isError": False,
+                }
+            )
+            await self._finish_with_final_text(session)
+
+            # 调用 silent 后忽略后续正文：没有任何路径把它当回复交付。
+            self.assertTrue(session.silent)
+            with self.assertRaises(ValueError):
+                session.result()
+
+
+class PiDwsToolsMountTests(unittest.TestCase):
+    def test_pi_mounts_dws_tools_for_front_and_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = AgentRuntimeTests()._runtime(root, "pi")
+            front = runtime.prepare("front", "front", "prompt", root / "front-run")
+            worker = runtime.prepare("worker", "worker", "prompt", root / "worker-run")
+
+            self.assertIn("pi_dws_tools.ts", " ".join(front.argv))
+            self.assertIn("pi_dws_tools.ts", " ".join(worker.argv))
+            self.assertIn("pi_escalate.ts", " ".join(front.argv))
+            self.assertNotIn("pi_escalate.ts", " ".join(worker.argv))
+            # 显式工具集只出现在 front；worker 默认全量工具，不能被收窄。
+            self.assertIn(
+                "read,grep,find,ls,escalate,no_reply,task_record,task_lookup",
+                front.argv,
+            )
+            self.assertNotIn("--tools", worker.argv)
+
+    def test_pi_prepare_injects_task_tool_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = AgentRuntimeTests()._runtime(root, "pi")
+            task_context = {
+                "db_path": "/tmp/audit.sqlite3",
+                "self_id": "self-open",
+                "contact_id": "u-1",
+                "conversation_id": "conversation-1",
+                "run_id": "session-1",
+                "evidence_time": "2026-10-12T12:00:00+08:00",
+                "message_ids": ["message-1"],
+            }
+
+            prepared = runtime.prepare(
+                "worker", "session-1", "prompt", root / "run",
+                task_context=task_context,
+            )
+
+            self.assertEqual(
+                json.loads(prepared.environment["DWS_TASK_CONTEXT"]), task_context
+            )
+            self.assertTrue(prepared.environment["DWS_TASK_SCRIPT"].endswith("task_tools.py"))
+            self.assertTrue(prepared.environment["DWS_TASK_PYTHON"])
+
+    def test_pi_prepare_writes_refreshable_task_context_file(self) -> None:
+        # 环境变量在 pi 进程启动后无法修改；上下文文件由服务在 steer 后
+        # 原子重写，task_tools.py 每次调用优先读它。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = AgentRuntimeTests()._runtime(root, "pi")
+            task_context = {
+                "db_path": "/tmp/audit.sqlite3",
+                "self_id": "self-open",
+                "contact_id": "u-1",
+                "conversation_id": "conversation-1",
+                "run_id": "session-1",
+                "evidence_time": "2026-10-12T12:00:00+08:00",
+                "message_ids": ["message-1"],
+            }
+
+            prepared = runtime.prepare(
+                "worker", "session-1", "prompt", root / "run",
+                task_context=task_context,
+            )
+
+            context_file = Path(prepared.environment["DWS_TASK_CONTEXT_FILE"])
+            self.assertEqual(context_file, prepared.task_context_path)
+            self.assertEqual(
+                json.loads(context_file.read_text(encoding="utf-8")), task_context
+            )
+
+    def test_dws_tool_runtime_files_ship_with_the_package(self) -> None:
+        # pi 扩展与后端脚本是运行时依赖（--extension / DWS_TASK_SCRIPT 直接
+        # 按路径引用）：文件缺失会让 pi 会话起不来，必须随 Git 交付。
+        runners_dir = Path(pi_module.__file__).resolve().parent
+        for name in (
+            "pi_dws_tools.ts",
+            "task_tools.py",
+            "pi_escalate.ts",
+            "escalate_mcp.py",
+        ):
+            self.assertTrue((runners_dir / name).is_file(), name)
+
+    def test_non_pi_protocols_do_not_receive_task_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = AgentRuntimeTests()._runtime(root, "codex")
+            task_context = {"db_path": "/tmp/audit.sqlite3"}
+
+            front = runtime.prepare(
+                "front", "front", "prompt", root / "front-run",
+                task_context=task_context,
+            )
+
+            self.assertNotIn("DWS_TASK_CONTEXT", front.environment)
+            self.assertNotIn("DWS_TASK_SCRIPT", front.environment)
+
+
+class ServiceToolPromptConstraintTests(unittest.TestCase):
+    """提示词引用服务工具（no_reply/task_record/task_lookup）时的协议约束。
+
+    这些工具只在 pi-rpc 挂载；非 pi 的阶段 agent 或备用链配服务工具
+    提示词必须在加载期报错，而不是让模型收到指向不存在工具的指令。
+    """
+
+    def test_non_pi_worker_loads_when_its_prompts_skip_service_tools(self) -> None:
+        # 逐阶段校验：前台提示词引用服务工具只约束前台 agent；worker 提示词
+        # 与补充提示词都不引用时，worker 及其备用链可继续使用非 pi 协议。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            AgentRuntimeTests()._runtime(root, "codex")
+            (root / "prompts" / "front.md").write_text(
+                "front {{self_name}} 可调用 no_reply()、task_record、task_lookup",
+                encoding="utf-8",
+            )
+            raw = json.loads((root / "config.json").read_text(encoding="utf-8"))
+            raw["agents"]["front-agent"] = {
+                "driver": "pi",
+                "model": "fast-model",
+                "read_only": True,
+                "timeout_seconds": 30,
+                "options": {},
+            }
+
+            runtime = AgentRuntime.from_config(raw, root / "config.json", root)
+
+            self.assertEqual(runtime.profile_name("front"), "front-agent")
+            self.assertEqual(runtime.profile_name("worker"), "worker-agent")
+
+    def test_shipped_prompts_with_example_pi_default_load(self) -> None:
+        # 当前默认预设（config.example.json 的 pi-default，全 pi 链）叠加
+        # 仓库自带提示词（front/worker/supplement 都引用服务工具）必须原样
+        # 通过加载期校验。
+        root = Path(__file__).resolve().parents[1]
+        raw = json.loads((root / "config.example.json").read_text(encoding="utf-8"))
+
+        runtime = AgentRuntime.from_config(
+            raw, root / "config.example.json", root
+        )
+
+        self.assertEqual(runtime.profile_name("front"), "pi-front")
+        self.assertEqual(runtime.profile_name("worker"), "pi-worker")
+
+    def test_non_pi_agents_with_service_tool_prompt_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            AgentRuntimeTests()._runtime(root, "codex")
+            self.assertIsNotNone(
+                AgentRuntime.from_config(
+                    json.loads((root / "config.json").read_text(encoding="utf-8")),
+                    root / "config.json",
+                    root,
+                )
+            )
+            (root / "prompts" / "worker.md").write_text(
+                "worker {{self_name}} 可调用 no_reply() 沉默收尾，"
+                "并用 task_record/task_lookup 维护事项",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                AgentRuntime.from_config(
+                    json.loads((root / "config.json").read_text(encoding="utf-8")),
+                    root / "config.json",
+                    root,
+                )
+            self.assertIn("service tools", str(ctx.exception))
+            self.assertIn("codex-app-server", str(ctx.exception))
+            self.assertIn("cannot mount them", str(ctx.exception))
+
+    def test_pi_agents_with_service_tool_prompt_load(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            AgentRuntimeTests()._runtime(root, "pi")
+            (root / "prompts" / "worker.md").write_text(
+                "worker {{self_name}} 可调用 no_reply()、task_record、task_lookup",
+                encoding="utf-8",
+            )
+
+            runtime = AgentRuntime.from_config(
+                json.loads((root / "config.json").read_text(encoding="utf-8")),
+                root / "config.json",
+                root,
+            )
+
+            self.assertEqual(runtime.profile_name("worker"), "worker-agent")
+
+    def test_non_pi_fallback_with_service_tool_prompt_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            AgentRuntimeTests()._runtime(root, "pi")
+            (root / "prompts" / "worker.md").write_text(
+                "worker {{self_name}} 可调用 no_reply()", encoding="utf-8"
+            )
+            raw = json.loads((root / "config.json").read_text(encoding="utf-8"))
+            raw["agents"]["codex-backup"] = {
+                "driver": "codex",
+                "binary": "codex",
+                "model": "backup-model",
+                "reasoning_effort": "high",
+                "read_only": False,
+                "timeout_seconds": 30,
+                "options": {},
+            }
+            raw["agents"]["worker-agent"]["fallbacks"] = ["codex-backup"]
+
+            with self.assertRaises(ValueError) as ctx:
+                AgentRuntime.from_config(raw, root / "config.json", root)
+            self.assertIn("codex-backup", str(ctx.exception))
+
+    def test_service_tool_supplement_prompt_constrains_all_stages(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            AgentRuntimeTests()._runtime(root, "codex")
+            (root / "prompts" / "supplement.md").write_text(
+                "supplement {{supplement_messages_json}} 无需回复时调用 no_reply()",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                AgentRuntime.from_config(
+                    json.loads((root / "config.json").read_text(encoding="utf-8")),
+                    root / "config.json",
+                    root,
+                )
+            self.assertIn("service tools", str(ctx.exception))
 
 
 class AgentConfigStoreTests(unittest.TestCase):

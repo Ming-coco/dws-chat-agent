@@ -151,16 +151,14 @@ PYTHONPATH=src python3 -m dws_dm_agent.front_eval --concurrency 1
 ```json
 {
   "workflows": {
-    "active": "codex-default",
+    "active": "pi-default",
     "presets": {
-      "codex-default": {
+      "pi-default": {
         "supplement_strategy": "steer",
         "supplement_prompt": "prompts/supplement.md",
         "auto_messages": {
           "ack_enabled": true,
-          "ack": "已收到消息，正在处理中。",
-          "progress_enabled": true,
-          "max_progress_updates": 60
+          "ack": "已收到消息，正在处理中。"
         },
         "front": {
           "label": "快速前台",
@@ -169,7 +167,7 @@ PYTHONPATH=src python3 -m dws_dm_agent.front_eval --concurrency 1
         },
         "worker": {
           "label": "执行 Agent",
-          "agent": "codex-worker",
+          "agent": "pi-worker",
           "prompt": "prompts/worker.md"
         }
       }
@@ -178,7 +176,7 @@ PYTHONPATH=src python3 -m dws_dm_agent.front_eval --concurrency 1
 }
 ```
 
-每个预设必须有 `worker`，`front` 可选。省略 `front` 后，原始会话会直接交给执行 Agent。Agent 配置会把可执行启动器和会话协议分开：
+每个预设必须有 `worker`，`front` 可选。省略 `front` 后，原始会话会直接交给执行 Agent。默认提示词引用的服务工具（`no_reply`、`task_record`、`task_lookup`）只在 `pi` 协议（`pi-rpc`）的 agent 上挂载。该校验按阶段进行：某个阶段的 agent 或其备用链不是 pi 协议，而该阶段自己的提示词或共享的补充提示词（补充提示词会 steer 进任一在跑阶段的会话）引用这些工具时，配置加载直接报错；提示词不引用服务工具的阶段可以继续使用任意协议。这类阶段请使用 pi agent，或从提示词中删除服务工具指令。Agent 配置会把可执行启动器和会话协议分开：
 
 ```json
 {

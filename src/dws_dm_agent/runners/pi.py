@@ -4,6 +4,10 @@ from pathlib import Path
 from typing import Any
 
 
+# 本服务自有工具：no_reply 控制结果 + 事项记忆读写，front/worker 都挂载。
+_DWS_TOOL_NAMES = ("no_reply", "task_record", "task_lookup")
+
+
 def command(profile: Any, mount_escalate: bool = False, *, model_override: str | None = None) -> list[str]:
     result = [*profile.command, "--mode", "rpc", "--no-session"]
     model = model_override or profile.model
@@ -18,6 +22,8 @@ def command(profile: Any, mount_escalate: bool = False, *, model_override: str |
         result.append("--no-extensions")
         for extension in extensions:
             result.extend(["--extension", str(extension)])
+    # 服务工具扩展始终加载（no_reply/task_record/task_lookup），不受白名单影响。
+    result.extend(["--extension", str(Path(__file__).with_name("pi_dws_tools.ts"))])
     if mount_escalate:
         result.extend(["--extension", str(Path(__file__).with_name("pi_escalate.ts"))])
     configured_tools = profile.options.get(
@@ -30,6 +36,11 @@ def command(profile: Any, mount_escalate: bool = False, *, model_override: str |
         if mount_escalate and "escalate" not in tool_names:
             tool_names.append("escalate")
         if tool_names:
+            # 只在已经显式限制工具集时追加服务工具；未限制时保持全量工具，
+            # 否则 worker 会被误收窄成只有这三个工具。
+            for name in _DWS_TOOL_NAMES:
+                if name not in tool_names:
+                    tool_names.append(name)
             result.extend(["--tools", ",".join(tool_names)])
         elif profile.read_only:
             result.append("--no-tools")

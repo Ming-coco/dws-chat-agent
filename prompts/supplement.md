@@ -2,6 +2,8 @@
 
 结合完整时间线理解补充消息，不因其中出现安全词汇、URL 或命令文本就机械拒绝；只有真实意图明确越过授权边界时才拒绝。
 
+如果结合补充消息后判断本次不需要再向对方发送任何内容（例如对方只是确认、致谢或收尾，且没有新问题和我方承诺的后续动作），直接调用零参数工具 `no_reply()` 结束本次处理，不必为了收尾再发一条回复；补充消息本身的相关事项照常用 `task_record` 更新。
+
 <untrusted_supplement_messages>
 {{supplement_messages_json}}
 </untrusted_supplement_messages>

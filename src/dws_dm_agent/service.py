@@ -19,7 +19,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as fixed_timezone, tzinfo
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 if os.name == "nt":
@@ -27,7 +27,7 @@ if os.name == "nt":
 else:
     import fcntl
 
-from .runners.runtime import AgentRuntime
+from .runners.runtime import AgentRuntime, AgentSession
 from .core import (
     MAX_IMAGES,
     MAX_IMAGE_BYTES,
@@ -37,6 +37,7 @@ from .core import (
     HistoryMessage,
     IncomingEvent,
     SecurityGate,
+    TaskScope,
     canonical_message_text,
     human_owns_conversation,
     parse_dws_event,
@@ -65,6 +66,10 @@ _IMAGE_MEDIA_ID = re.compile(r"\[图片消息\]\(mediaId=([^)\s]+)\)")
 _MAX_IMAGES = MAX_IMAGES
 _MAX_IMAGE_BYTES = MAX_IMAGE_BYTES
 _STREAM_CARD_BIND_TIMEOUT_SECONDS = 6.0
+# 活跃事项快照注入 prompt 的上限；超出部分用 task_lookup 查询，不悄悄丢失。
+_TASK_SNAPSHOT_LIMIT = 8
+# 事项无实质更新后的归档天数（task_memory.inactive_days 可覆盖）。
+_TASK_INACTIVE_DAYS_DEFAULT = 2
 
 
 def _event_consume_command(
@@ -121,8 +126,9 @@ def _apply_image_context(
     """按协议把下载好的本地图片接入 prompt，返回 (prompt, local_images)。
 
     - pi-rpc：图片由 runtime 编码为 ImageContent 随首条 prompt 原生发送，
-      prompt 只说明附件已附带、可直接看图，并保留本地路径供 vision_query
-      兜底；local_images 原样传给 open_session。
+      prompt 只说明附件已附带、可直接看图；看不到图片时如实说明，请对方
+      用文字描述，不再提供单独的看图工具兜底；local_images 原样传给
+      open_session。
     - codex-app-server：runtime 以 localImage 路径输入，prompt 不加说明。
     - 其余协议（claude/custom）：无法原生输入图片，把路径嵌入 prompt，
       由 agent 用 read 工具读取，返回空 local_images。
@@ -135,9 +141,7 @@ def _apply_image_context(
             prompt
             + "\n\n## 图片附件\n\n对方发送的图片已作为图片附件随本条消息直接发给你，"
             "请直接查看图片内容并结合上下文理解对方意图，不要为看图调用工具。"
-            "若你确实看不到图片内容，再用 vision_query 工具按以下本地路径读取：\n"
-            + image_paths
-            + "\n",
+            "若你确实看不到图片内容，如实说明并请对方用文字描述现象。\n",
             tuple(local_images),
         )
     return (
@@ -145,7 +149,7 @@ def _apply_image_context(
         + "\n\n## 图片附件\n\n以下图片文件已下载到本地：\n"
         + image_paths
         + "\n请先用 read 工具逐个读取，确认你是否能直接看到图片内容；"
-        "如果 read 得到的不是有效图片内容，再改用 vision_query 工具读取。\n",
+        "如果 read 得到的不是有效图片内容，如实说明并请对方用文字描述现象。\n",
         (),
     )
 
@@ -162,6 +166,21 @@ class AgentResult:
     supplements: list[IncomingEvent] | None = None
     consumed_supplements: list[IncomingEvent] | None = None
     error: str = ""
+    # 模型显式调用 no_reply 后的成功终态：不发消息、不进 fallback。
+    silent: bool = False
+
+    @property
+    def outcome(self) -> str:
+        """运行的明确结果：interrupted/escalate/silent/reply/error。"""
+        if self.manual_takeover:
+            return "interrupted"
+        if self.escalated:
+            return "escalate"
+        if self.silent:
+            return "silent"
+        if self.reply is not None:
+            return "reply"
+        return "error"
 
 
 def configure_logging(state_dir: Path, verbose: bool = False) -> None:
@@ -251,6 +270,13 @@ class AgentService:
         self.settings.state_dir.mkdir(parents=True, exist_ok=True)
         self.settings.worktree_root.mkdir(parents=True, exist_ok=True)
         LOG.info("starting mode=%s contacts=%d", self.mode, len(self.settings.contacts))
+        days = self._task_memory_inactive_days()
+        if days > 0:
+            archived = self.store.archive_inactive_tasks(
+                datetime.now(self.settings.timezone), days
+            )
+            if archived:
+                LOG.info("startup archived inactive tasks count=%d", archived)
         self._write_runtime()
         try:
             self.dashboard.start()
@@ -903,8 +929,6 @@ class AgentService:
     async def _handle_batch(self, initial_batch: list[IncomingEvent]) -> None:
         batch = initial_batch
         prior_attempt = ""
-        acknowledgement_sent = False
-        stream_card_id = ""
         max_replans = int(self.settings.raw.get("max_replans", 5))
         for attempt in range(max_replans):
             batch, history, latest_manual = await self._stabilize(batch)
@@ -912,6 +936,9 @@ class AgentService:
             self._set_runtime(batch, "screening", attempt=attempt + 1)
             earliest = min(item.created_at for item in batch)
             if self._human_owns_conversation(latest_manual, earliest):
+                await self._close_active_streaming_card(
+                    batch[0].conversation_id, "已停止自动处理，已转人工。"
+                )
                 self._record_without_agent(
                     batch,
                     status="human_cooldown",
@@ -926,6 +953,9 @@ class AgentService:
 
             gate = self.gate.inspect([item.content for item in batch])
             if gate.action == "drop":
+                await self._close_active_streaming_card(
+                    batch[0].conversation_id, "处理已结束。"
+                )
                 self._record_without_agent(
                     batch,
                     status="no_reply",
@@ -942,7 +972,6 @@ class AgentService:
                 outcome = await self._send_after_freshness_check(
                     batch,
                     gate.reply,
-                    stream_card_id=stream_card_id,
                     session_id=refusal_session,
                 )
                 if outcome == "supplement":
@@ -963,6 +992,9 @@ class AgentService:
                 return
 
             if self._agent_rate_limited(batch[0].contact):
+                await self._close_active_streaming_card(
+                    batch[0].conversation_id, "处理已结束。"
+                )
                 self._record_without_agent(
                     batch,
                     status="no_reply",
@@ -975,47 +1007,6 @@ class AgentService:
                 )
                 return
 
-            if (
-                not acknowledgement_sent
-                and getattr(getattr(self, "dws", None), "streaming_cards", False)
-            ):
-                freshness, _ = await self._optional_ack_freshness(batch)
-                if freshness == "manual":
-                    self.store.update_event_status(
-                        (item.message_id for item in batch),
-                        "skipped",
-                        "human_cooldown",
-                    )
-                    return
-                if freshness == "supplement":
-                    batch = await self._merge_latest(batch)
-                    continue
-                if freshness != "unavailable":
-                    acknowledgement = self.agent_runtime.render_auto_message(
-                        "ack",
-                        {
-                            "request_count": len(batch),
-                            "contact_name": batch[0].contact.display_name,
-                            "contact_alias": batch[0].contact.alias,
-                            "self_name": self.settings.self_name,
-                        },
-                    )
-                    if acknowledgement:
-                        try:
-                            stream_card_id = await self._start_streaming_card(
-                                batch[0].contact,
-                                batch[0].conversation_id,
-                                acknowledgement,
-                                f"ack-{uuid.uuid4().hex[:12]}",
-                            )
-                        except Exception as exc:
-                            LOG.warning(
-                                "streaming card start failed contact=%s error=%s",
-                                batch[0].contact.alias,
-                                sanitize_text(str(exc), 300),
-                            )
-                acknowledgement_sent = True
-
             result: AgentResult | None = None
             if (
                 self.agent_runtime.has_stage("front")
@@ -1027,15 +1018,16 @@ class AgentService:
                     prior_attempt,
                     front=True,
                     recent_context=recent_context,
-                    stream_card_id=stream_card_id,
                 )
                 if front_result.consumed_supplements:
                     batch = self._deduplicate(
                         [*batch, *front_result.consumed_supplements]
                     )
                 if front_result.manual_takeover:
-                    await self._safe_update_streaming_card(
-                        stream_card_id, "已停止自动处理，已转人工。", 5
+                    # 人工接管后不再新建对外卡片通知；接管事实由人工消息本身
+                    # 传达，但已存在的处理中卡片必须安全收口，不能悬在会话里。
+                    await self._close_active_streaming_card(
+                        batch[0].conversation_id, "已停止自动处理，已转人工。"
                     )
                     self._record_agent_result(
                         batch, front_result, status="human_cooldown"
@@ -1051,6 +1043,10 @@ class AgentService:
                     prior_attempt = "前台收到补充消息，已按完整上下文重新处理。"
                     await asyncio.sleep(self.settings.quiet_window)
                     continue
+                if front_result.silent:
+                    # 前台判定无需回复：成功终态，不进 worker、不发送、不通知。
+                    await self._finish_silent(batch, front_result)
+                    return
                 if front_result.reply is not None and not front_result.escalated:
                     result = front_result
                 else:
@@ -1066,7 +1062,6 @@ class AgentService:
                     batch,
                     prior_attempt,
                     recent_context=recent_context,
-                    stream_card_id=stream_card_id,
                 )
                 if result.consumed_supplements:
                     batch = self._deduplicate(
@@ -1074,8 +1069,8 @@ class AgentService:
                     )
 
             if result.manual_takeover:
-                await self._safe_update_streaming_card(
-                    stream_card_id, "已停止自动处理，已转人工。", 5
+                await self._close_active_streaming_card(
+                    batch[0].conversation_id, "已停止自动处理，已转人工。"
                 )
                 self._record_agent_result(batch, result, status="human_cooldown")
                 self.store.update_event_status(
@@ -1088,7 +1083,15 @@ class AgentService:
                 prior_attempt = "对方补充了消息，按新的完整上下文继续。"
                 await asyncio.sleep(self.settings.quiet_window)
                 continue
+            if result.silent:
+                # 模型显式选择沉默：成功终态，不触发兜底回复、不写发送队列。
+                await self._finish_silent(batch, result)
+                return
             if result.reply is None:
+                # 失败要通知联系人：卡片在此时点才创建（见 _ensure_streaming_card）。
+                stream_card_id = await self._ensure_streaming_card(
+                    batch, result.session_id
+                )
                 await self._safe_update_streaming_card(
                     stream_card_id, "处理失败，请稍后重试或转人工处理。", 5
                 )
@@ -1099,16 +1102,18 @@ class AgentService:
                 return
 
             self._set_runtime(batch, "freshness", attempt=attempt + 1)
+            # 回复路径不在决策点建卡：最终新鲜度检查在投递派发时进行，
+            # 卡片只能在检查通过后创建（见 _dispatch_due_delivery），否则
+            # 补充消息或人工接管取消投递时会把处理中卡片留在会话里。
             try:
                 outcome = await self._send_after_freshness_check(
                     batch,
                     result.reply,
-                    stream_card_id=stream_card_id,
                     session_id=result.session_id,
                 )
             except Exception as exc:
-                await self._safe_update_streaming_card(
-                    stream_card_id, "结果发送失败，请稍后重试。", 5
+                await self._close_active_streaming_card(
+                    batch[0].conversation_id, "结果发送失败，请稍后重试。"
                 )
                 result.error = f"send_failed: {sanitize_text(str(exc), 500)}"
                 self._record_agent_result(batch, result, status="error")
@@ -1123,6 +1128,9 @@ class AgentService:
                 )
             return
 
+        stream_card_id = await self._ensure_streaming_card(
+            batch, f"code-{uuid.uuid4().hex[:12]}"
+        )
         await self._safe_update_streaming_card(
             stream_card_id, "补充消息过多，本轮已停止自动处理。", 5
         )
@@ -1178,18 +1186,65 @@ class AgentService:
         ]
         return ("supplement", supplements) if supplements else ("fresh", [])
 
-    async def _optional_ack_freshness(
-        self, batch: Sequence[IncomingEvent]
-    ) -> tuple[str, list[IncomingEvent]]:
+    async def _ensure_streaming_card(
+        self, batch: Sequence[IncomingEvent], session_id: str
+    ) -> str:
+        """失败/过多补充等"需要通知联系人"的终态点创建流式卡片。
+
+        回复路径不再走这里：回复的卡片由 _dispatch_due_delivery 在最终
+        新鲜度检查通过后创建，否则补充消息或人工接管取消投递时会留下
+        处理中卡片（silent 更是要求决策前零对外输出）。ack 文案只作为
+        卡片初始内容，随即被最终内容覆盖。运行内的进度/思考不对外展示
+        （begin_response 展示控制是后续独立工作）。创建失败返回空串，
+        交付回退纯文本。
+        """
+        if not getattr(getattr(self, "dws", None), "streaming_cards", False):
+            return ""
+        content = self.agent_runtime.render_auto_message(
+            "ack",
+            {
+                "request_count": len(batch),
+                "contact_name": batch[0].contact.display_name,
+                "contact_alias": batch[0].contact.alias,
+                "self_name": self.settings.self_name,
+            },
+        ) or "正在处理。"
         try:
-            return await self._freshness_state(batch)
+            return await self._start_streaming_card(
+                batch[0].contact,
+                batch[0].conversation_id,
+                content,
+                session_id,
+            )
         except Exception as exc:
             LOG.warning(
-                "ack freshness unavailable; skipping acknowledgement contact=%s error=%s",
+                "streaming card start failed contact=%s error=%s",
                 batch[0].contact.alias,
                 sanitize_text(str(exc), 300),
             )
-            return "unavailable", []
+            return ""
+
+    async def _close_active_streaming_card(
+        self, conversation_id: str, content: str
+    ) -> None:
+        """把会话中仍处于处理态的卡片安全收口成终止态；无卡时是空操作。
+
+        卡片正常只在投递派发（最终新鲜度检查之后）或失败通知点创建并随即
+        收口；仍会残留处理中卡片的路径是投递重试被补充/人工接管取消。这些
+        终态（silent、人工接管、无 agent 处理的跳过路径）必须把残留卡片
+        关闭，不能让联系人看到永远"处理中"的卡片。
+        """
+        active = self.store.active_streaming_card(conversation_id)
+        if not active:
+            return
+        biz_id, send_uuid = active
+        # 进程重启或直写数据库时内存映射里没有这张卡；先补上映射，保证
+        # DingTalk 卡片关闭后 store 里的卡片状态也收敛到终止态。
+        card_send_uuids = getattr(self, "streaming_card_send_uuids", None)
+        if card_send_uuids is None:
+            card_send_uuids = self.streaming_card_send_uuids = {}
+        card_send_uuids.setdefault(biz_id, send_uuid)
+        await self._safe_update_streaming_card(biz_id, content, 5)
 
     def _record_without_agent(
         self,
@@ -1216,6 +1271,25 @@ class AgentService:
             request_preview=self._request_preview(batch),
         )
 
+    async def _finish_silent(
+        self,
+        batch: Sequence[IncomingEvent],
+        result: AgentResult,
+    ) -> None:
+        """落地 silent 终态：消费输入、审计留痕，不发消息、不进 outbox。
+
+        回复路径的卡片在投递派发时才创建，silent 决策前正常不存在卡片；
+        若会话仍残留处理中卡片（上次投递重试被补充取消），这里把它安全
+        收口，除此之外对联系人零输出。
+        """
+        await self._close_active_streaming_card(
+            batch[0].conversation_id, "处理已结束。"
+        )
+        self._record_agent_result(batch, result, status="silent")
+        self.store.update_event_status(
+            (item.message_id for item in batch), "processed", "silent"
+        )
+
     def _record_agent_result(
         self,
         batch: Sequence[IncomingEvent],
@@ -1229,13 +1303,94 @@ class AgentService:
             contact=batch[0].contact,
             started_at=result.started_at,
             finished_at=result.finished_at,
-            action="reply" if result.reply else "handoff",
+            action=(
+                "reply"
+                if result.reply
+                else ("no_reply" if result.silent else "handoff")
+            ),
             status=status,
             handled=sanitize_text(result.reply, 1000),
             reason=result.error,
             codex_exit_code=result.exit_code,
             request_preview=self._request_preview(batch),
         )
+
+    def _task_memory_inactive_days(self) -> int:
+        value = int(
+            self.settings.raw.get("task_memory", {}).get(
+                "inactive_days", _TASK_INACTIVE_DAYS_DEFAULT
+            )
+        )
+        # <=0 视为关闭自动归档（事项继续留在活跃快照里）。
+        return value
+
+    def _active_tasks_snapshot(
+        self, contact: Contact, conversation_id: str
+    ) -> str:
+        """构建活跃事项快照；加载前先做本地幂等归档。"""
+        days = self._task_memory_inactive_days()
+        if days > 0:
+            archived = self.store.archive_inactive_tasks(
+                datetime.now(self.settings.timezone), days
+            )
+            if archived:
+                LOG.info("archived inactive tasks count=%d days=%d", archived, days)
+        scope = TaskScope(
+            self_id=self.settings.self_open_id,
+            contact_id=contact.identity,
+            conversation_id=conversation_id,
+        )
+        tasks = self.store.active_tasks(scope, limit=_TASK_SNAPSHOT_LIMIT)
+        return json.dumps(tasks, ensure_ascii=False, indent=2)
+
+    def _task_context_for(
+        self,
+        batch: Sequence[IncomingEvent],
+        consumed: Iterable[IncomingEvent],
+        run_id: str,
+    ) -> dict[str, Any]:
+        """构建事项工具上下文：message_times 是本运行已覆盖消息的
+        id -> 时间戳映射。
+
+        consumed 是已 steer 进当前会话的补充消息，并入映射后模型可以
+        引用它们作证据。映射是证据 ID 的唯一校验集与时间戳来源：
+        未覆盖的 ID 会被拒绝，引用旧消息的时间就取旧消息的时间。
+        """
+        covered = [*batch, *consumed]
+        return {
+            "db_path": str(self.store.path),
+            "self_id": self.settings.self_open_id,
+            "contact_id": batch[0].contact.identity,
+            "conversation_id": batch[0].conversation_id,
+            "run_id": run_id,
+            "message_times": {
+                item.message_id: item.created_at.isoformat()
+                for item in covered
+            },
+        }
+
+    def _refresh_task_context(
+        self,
+        session: "AgentSession",
+        batch: Sequence[IncomingEvent],
+        consumed: Iterable[IncomingEvent],
+    ) -> None:
+        """steer 成功后原子重写上下文文件，事项更新改用最新实际证据。
+
+        pi 进程的环境变量无法在启动后修改，所以 prepare() 把上下文落到
+        session 目录的 task-context.json，task_tools.py 每次调用优先读它。
+        """
+        path = getattr(
+            getattr(session, "prepared", None), "task_context_path", None
+        )
+        if path is None:
+            return
+        context = self._task_context_for(batch, consumed, session.session_id)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(context, ensure_ascii=False), encoding="utf-8"
+        )
+        os.replace(temporary, path)
 
     def _prompt_variables(
         self,
@@ -1275,6 +1430,9 @@ class AgentService:
             "current_messages_json": json.dumps(
                 messages, ensure_ascii=False, indent=2
             ),
+            "active_tasks_json": self._active_tasks_snapshot(
+                contact, batch[0].conversation_id
+            ),
             "now": datetime.now(self.settings.timezone).strftime("%Y-%m-%d %H:%M:%S"),
         }
 
@@ -1284,22 +1442,22 @@ class AgentService:
         prior_attempt: str,
         *,
         recent_context: Sequence[Mapping[str, str]] = (),
-        stream_card_id: str = "",
     ) -> AgentResult:
         """按主 worker + fallbacks 链执行；无回复视为该 agent 失败，切换链上下一个。"""
         result = await self._run_agent(
             batch,
             prior_attempt,
             recent_context=recent_context,
-            stream_card_id=stream_card_id,
         )
         fallbacks = self.agent_runtime._stage("worker").profile.fallbacks
         for index, agent_name in enumerate(fallbacks, start=1):
             if (
                 result.reply is not None
+                or result.silent
                 or result.manual_takeover
                 or result.supplements
             ):
+                # silent 与正常回复同为成功终态，不能触发 fallback 兜底发送。
                 return result
             LOG.warning(
                 "worker fallback engaged agent=%s attempt=%d/%d error=%s",
@@ -1308,17 +1466,10 @@ class AgentService:
                 len(fallbacks),
                 result.error[:200],
             )
-            if stream_card_id:
-                await self._safe_update_streaming_card(
-                    stream_card_id,
-                    f"执行模型失败，已切换备用模型（{index}/{len(fallbacks)}）继续处理。",
-                    5,
-                )
             result = await self._run_agent(
                 batch,
                 prior_attempt,
                 recent_context=recent_context,
-                stream_card_id=stream_card_id,
                 agent_override=agent_name,
             )
         return result
@@ -1330,7 +1481,6 @@ class AgentService:
         *,
         front: bool = False,
         recent_context: Sequence[Mapping[str, str]] = (),
-        stream_card_id: str = "",
         agent_override: str | None = None,
     ) -> AgentResult:
         stage = "front" if front else "worker"
@@ -1380,11 +1530,26 @@ class AgentService:
                 multimodal_model = stage_profile.profile.options.get("multimodal_model")
                 if multimodal_model:
                     model_override = str(multimodal_model)
+            # 事项工具上下文只注入 pi-rpc：作用域隔离由后端强制，重放按
+            # (run_id, tool_call_id) 幂等；其他协议不提供事项工具。
+            task_context = (
+                self._task_context_for(batch, (), session_id)
+                if stage_profile.profile.protocol == "pi-rpc"
+                else None
+            )
             session = self.agent_runtime.open_session(
                 stage, session_id, prompt, session_dir, local_images,
                 model_override=model_override,
                 agent_override=agent_override,
+                task_context=task_context,
             )
+            if task_context is not None:
+                # 写入租约先于会话启动登记：task_tools.py 直连审计库的
+                # 事务在拿到 SQLite 写锁后仍会校验租约，接管/取消后排队
+                # 等锁的过期子进程写入会被拒绝，而不是继续落地变更。
+                self.store.register_task_run(
+                    session_id, datetime.now(self.settings.timezone)
+                )
         except (OSError, RuntimeError, ValueError) as exc:
             shutil.rmtree(session_dir, ignore_errors=True)
             return AgentResult(
@@ -1397,26 +1562,26 @@ class AgentService:
             )
         supplements: dict[str, IncomingEvent] = {}
         consumed: dict[str, IncomingEvent] = {}
+
+        def revoke_run_lease(reason: str) -> None:
+            # 幂等：首次吊销的原因与时间保留，后续调用是 no-op。
+            if task_context is not None:
+                self.store.revoke_task_run(
+                    session_id, reason, datetime.now(self.settings.timezone)
+                )
+
         # 失败保留 session 现场（prompt.md/result.txt/stderr.log 供排障），仅成功路径清理
         session_dir_keep = True
         try:
             await session.start()
             interval = float(self.settings.raw.get("monitor_interval_seconds", 5))
             timeout = session.prepared.timeout_seconds
-            progress_interval = (
-                0.4
-                if stream_card_id and self.agent_runtime.progress_enabled
-                else 0.0
-            )
-            max_progress_updates = self.agent_runtime.max_progress_updates
             now_monotonic = asyncio.get_running_loop().time()
             deadline = now_monotonic + timeout if timeout > 0 else None
             next_history_at = now_monotonic + interval
-            next_progress_at = now_monotonic
-            progress_updates = 0
-            last_progress = ""
             known_ids = {item.message_id for item in batch}
             earliest = min(item.created_at for item in batch)
+            # 运行内不对外展示进度/思考：卡片要等非 silent 结果决定后才创建。
             while not session.done:
                 self._touch_runtime(batch[0].conversation_id)
                 remaining = (
@@ -1425,6 +1590,7 @@ class AgentService:
                     else None
                 )
                 if remaining is not None and remaining <= 0:
+                    revoke_run_lease("agent_timeout")
                     await session.abort()
                     return AgentResult(
                         session_id,
@@ -1437,15 +1603,9 @@ class AgentService:
                         ),
                         error="agent_timeout",
                     )
-                wake_at = next_history_at
-                if (
-                    progress_interval > 0
-                    and session.latest_progress != last_progress
-                ):
-                    wake_at = min(wake_at, next_progress_at)
                 try:
                     wait_timeout = max(
-                        0.0, wake_at - asyncio.get_running_loop().time()
+                        0.0, next_history_at - asyncio.get_running_loop().time()
                     )
                     if remaining is not None:
                         wait_timeout = min(wait_timeout, remaining)
@@ -1455,26 +1615,6 @@ class AgentService:
                 if session.done:
                     break
                 now_monotonic = asyncio.get_running_loop().time()
-                if (
-                    progress_interval > 0
-                    and progress_updates < max_progress_updates
-                    and now_monotonic >= next_progress_at
-                ):
-                    progress = session.latest_progress
-                    if progress and progress != last_progress:
-                        try:
-                            await self._update_streaming_card(
-                                stream_card_id, progress, 2
-                            )
-                            progress_updates += 1
-                            last_progress = progress
-                        except Exception as exc:
-                            LOG.warning(
-                                "progress update failed session=%s error=%s",
-                                session_id,
-                                exc,
-                            )
-                    next_progress_at = now_monotonic + progress_interval
                 if now_monotonic < next_history_at:
                     continue
                 next_history_at = now_monotonic + interval
@@ -1487,6 +1627,10 @@ class AgentService:
                     continue
                 latest_manual = self._register_manual_messages(history)
                 if self._human_owns_conversation(latest_manual, started_at):
+                    # 人工接管：先吊销写入租约再终止会话，被接管运行的
+                    # 子进程（含排队等锁的）不能再落地事项变更，也不批量
+                    # 改写事项状态。
+                    revoke_run_lease("manual_takeover")
                     await session.abort()
                     return AgentResult(
                         session_id,
@@ -1540,6 +1684,11 @@ class AgentService:
                         for item in new_supplements:
                             consumed[item.message_id] = item
                             supplements.pop(item.message_id, None)
+                        # 补充消息已进入会话：事项工具上下文改用最新实际
+                        # 证据（含补充消息的 ID 与时间），而不是启动快照。
+                        self._refresh_task_context(
+                            session, batch, consumed.values()
+                        )
                         self._set_runtime(
                             [*batch, *consumed.values()],
                             "steering",
@@ -1561,6 +1710,21 @@ class AgentService:
                             ),
                             error="supplement_restart",
                         )
+            if session.silent:
+                # no_reply 是模型的显式控制动作且已成功执行：即使其后出现
+                # 提供方噪声错误，也不能让错误路径触发兜底发送。
+                session_dir_keep = False
+                return AgentResult(
+                    session_id,
+                    None,
+                    session.exit_code if session.exit_code is not None else 0,
+                    started_at,
+                    datetime.now(self.settings.timezone),
+                    silent=True,
+                    consumed_supplements=sorted(
+                        consumed.values(), key=lambda item: item.created_at
+                    ),
+                )
             if session.error:
                 return AgentResult(
                     session_id,
@@ -1586,6 +1750,9 @@ class AgentService:
                 ),
             )
         except asyncio.CancelledError:
+            # 取消（含服务关停）：先吊销租约再终止会话，防止孤儿子进程
+            # 在会话取消后仍落地事项写入。
+            revoke_run_lease("run_cancelled")
             await session.abort()
             raise
         except (OSError, RuntimeError, ValueError) as exc:
@@ -1602,6 +1769,9 @@ class AgentService:
                 error=f"{type(exc).__name__}: {exc}",
             )
         finally:
+            # 会话收尾兜底吊销租约（幂等）：成功/失败/静默路径同样不允许
+            # 迟到的子进程写入；此前已按具体原因吊销时这里是 no-op。
+            revoke_run_lease("run_finished")
             await session.close()
             if session_dir_keep:
                 LOG.warning(
@@ -1801,6 +1971,31 @@ class AgentService:
         )
         return ""
 
+    async def _start_delivery_card(
+        self,
+        contact: Contact,
+        conversation_id: str,
+        content: str,
+        session_id: str,
+    ) -> str:
+        """投递时点创建（或复用）承载最终回复的流式卡片。
+
+        只在 _dispatch_due_delivery 的最终新鲜度检查通过后调用；初始内容
+        直接用最终回复（含消息编号标记以便回绑 message_id）。创建失败返回
+        空串，投递回退纯文本。
+        """
+        try:
+            return await self._start_streaming_card(
+                contact, conversation_id, content, session_id
+            )
+        except Exception as exc:
+            LOG.warning(
+                "streaming card start failed contact=%s error=%s",
+                contact.alias,
+                sanitize_text(str(exc), 300),
+            )
+            return ""
+
     async def _update_streaming_card(
         self, biz_id: str, content: str, flow_status: int
     ) -> None:
@@ -1833,9 +2028,13 @@ class AgentService:
         batch: Sequence[IncomingEvent],
         reply: str,
         *,
-        stream_card_id: str = "",
         session_id: str = "",
     ) -> str:
+        """把回复写入发送队列；真正的最终新鲜度检查在投递派发时进行。
+
+        这里不创建流式卡片：卡片由 _dispatch_due_delivery 在人工接管与
+        补充消息检查都通过之后创建，保证任何取消路径都不留处理中卡片。
+        """
         content = sanitize_text(
             reply,
             int(self.settings.raw.get("max_reply_chars", 16000)),
@@ -1857,7 +2056,6 @@ class AgentService:
             content,
             outgoing_session,
             event_ids=[item.message_id for item in batch],
-            card_biz_id=stream_card_id,
         )
         self.outbox_wakeup.set()
         LOG.info("reply queued contact=%s", batch[0].contact.alias)
@@ -1889,6 +2087,9 @@ class AgentService:
             None,
         )
         if contact is None:
+            await self._safe_update_streaming_card(
+                str(row["card_biz_id"] or ""), "处理已结束。", 5
+            )
             self.store.mark_delivery_cancelled(
                 send_uuid, "error", "delivery_contact_not_configured"
             )
@@ -1922,6 +2123,8 @@ class AgentService:
                 self.store.mark_delivery_cancelled(
                     send_uuid, "stale_supplement", "new_message_before_delivery"
                 )
+                # 已创建的卡片（如上次网络重试后留下的）保持处理态，交给
+                # 下一轮处理复用或在其终态收口；这里不新建也不重复关闭。
                 for item in supplements:
                     if self.store.claim_event(item) or self.store.event_is_pending(
                         item.message_id
@@ -1932,11 +2135,21 @@ class AgentService:
             content = str(row["payload_text"])
             message_id = ""
             card_flow_status: int | None = None
-            if row["card_biz_id"]:
+            card_biz_id = str(row["card_biz_id"] or "")
+            if not card_biz_id and getattr(self.dws, "streaming_cards", False):
+                # 卡片是投递的一部分：人工接管与补充消息的最终检查都已
+                # 通过，此刻才创建；创建后绑定投递行，网络重试复用同卡。
+                card_biz_id = await self._start_delivery_card(
+                    contact,
+                    str(row["conversation_id"]),
+                    content,
+                    str(row["session_id"]),
+                )
+                if card_biz_id:
+                    self.store.bind_delivery_card(send_uuid, card_biz_id)
+            if card_biz_id:
                 try:
-                    await self._update_streaming_card(
-                        str(row["card_biz_id"]), content, 3
-                    )
+                    await self._update_streaming_card(card_biz_id, content, 3)
                     card_flow_status = 3
                 except Exception as exc:
                     LOG.warning(
