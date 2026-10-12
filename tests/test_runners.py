@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import copy
 import json
+import sys
 import tempfile
 import unittest
 from datetime import timezone
 from pathlib import Path
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -428,10 +432,239 @@ class AgentSessionProtocolTests(unittest.IsolatedAsyncioTestCase):
                     },
                 }
             )
-            await session._handle_event({"type": "agent_end"})
+            await session._handle_event(
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "stopReason": "stop",
+                        "content": [{"type": "text", "text": "最终正文"}],
+                    },
+                }
+            )
+            await session._handle_event(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {"role": "user", "content": [{"type": "text", "text": "你好"}]},
+                        {
+                            "role": "assistant",
+                            "stopReason": "stop",
+                            "content": [{"type": "text", "text": "最终正文"}],
+                        },
+                    ],
+                }
+            )
 
             self.assertEqual(session.latest_progress, "先确认上下文")
             self.assertEqual(session.result(), "最终正文")
+
+    async def test_pi_empty_agent_end_fails_safe_without_reprompting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory), "pi")
+            # 未 start 的 session 没有可写的 stdin：若仍尝试重发 prompt，
+            # _handle_event 会抛 BrokenPipeError 使本测试失败。
+            await session._handle_event({"type": "agent_end", "messages": []})
+
+            self.assertTrue(session.done)
+            self.assertEqual(session.error, "agent_result_missing")
+            with self.assertRaises(ValueError):
+                session.result()
+
+    async def test_pi_agent_end_with_will_retry_keeps_session_open_until_final(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory), "pi")
+            await session._handle_event(
+                {"type": "agent_end", "messages": [], "willRetry": True}
+            )
+            # pi 自行重试期间会话必须保持打开， runner 不重发 prompt 也不结束。
+            self.assertFalse(session.done)
+
+            await session._handle_event(
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "stopReason": "stop",
+                        "content": [{"type": "text", "text": "重试后的终稿"}],
+                    },
+                }
+            )
+            await session._handle_event(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "stopReason": "stop",
+                            "content": [{"type": "text", "text": "重试后的终稿"}],
+                        }
+                    ],
+                }
+            )
+
+            self.assertTrue(session.done)
+            self.assertEqual(session.error, "")
+            self.assertEqual(session.result(), "重试后的终稿")
+
+    async def test_pi_already_processing_response_does_not_fail_the_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory), "pi")
+            await session._handle_event(
+                {
+                    "type": "response",
+                    "id": 99,
+                    "success": False,
+                    "error": (
+                        "Agent is already processing. Specify streamingBehavior "
+                        "('steer' or 'followUp') to queue the message."
+                    ),
+                }
+            )
+            # 会话仍在健康处理后续 turn，不能因此作废整场。
+            self.assertFalse(session.done)
+            self.assertEqual(session.error, "")
+
+            await session._handle_event(
+                {
+                    "type": "response",
+                    "id": 100,
+                    "success": False,
+                    "error": "provider unavailable",
+                }
+            )
+            self.assertTrue(session.done)
+            self.assertIn("provider unavailable", session.error)
+
+    async def test_pi_thinking_only_run_never_returns_thinking_as_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory), "pi")
+            await session._handle_event(
+                {
+                    "type": "message_update",
+                    "assistantMessageEvent": {
+                        "type": "thinking_delta",
+                        "contentIndex": 0,
+                        "delta": "先并行读取图片、检查 dws_agent 后台",
+                    },
+                }
+            )
+            await session._handle_event({"type": "agent_end", "messages": []})
+
+            # 实时思考展示保留，但绝不作为最终回复返回。
+            self.assertEqual(
+                session.latest_progress, "先并行读取图片、检查 dws_agent 后台"
+            )
+            self.assertTrue(session.done)
+            self.assertEqual(session.error, "agent_result_missing")
+            with self.assertRaises(ValueError):
+                session.result()
+
+    async def test_pi_prefers_last_assistant_message_and_drops_interim_talk(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory), "pi")
+            interim = {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "stopReason": "toolUse",
+                    "content": [
+                        {"type": "text", "text": "先并行读取图片、检查 dws_agent 后台。"},
+                        {"type": "toolCall", "toolCallId": "t1", "name": "read"},
+                    ],
+                },
+            }
+            await session._handle_event(interim)
+            await session._handle_event(
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "stopReason": "stop",
+                        "content": [{"type": "text", "text": "第一版结论"}],
+                    },
+                }
+            )
+            await session._handle_event(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {"role": "user", "content": [{"type": "text", "text": "任务"}]},
+                        {
+                            "role": "assistant",
+                            "stopReason": "toolUse",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "先并行读取图片、检查 dws_agent 后台。",
+                                },
+                                {
+                                    "type": "toolCall",
+                                    "toolCallId": "t1",
+                                    "name": "read",
+                                },
+                            ],
+                        },
+                        {
+                            "role": "toolResult",
+                            "toolCallId": "t1",
+                            "content": [{"type": "text", "text": "ok"}],
+                        },
+                        {
+                            "role": "assistant",
+                            "stopReason": "stop",
+                            "content": [{"type": "text", "text": "最终交付正文。"}],
+                        },
+                    ],
+                }
+            )
+
+            # 中间陈述只出现在进度里；终稿取 agent_end 扫出的最后一条 assistant 文本。
+            self.assertEqual(
+                session.latest_progress, "先并行读取图片、检查 dws_agent 后台。"
+            )
+            self.assertEqual(session.result(), "最终交付正文。")
+
+    async def test_pi_run_ending_on_interim_statement_yields_no_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory), "pi")
+            await session._handle_event(
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "stopReason": "stop",
+                        "content": [{"type": "text", "text": "第一版结论"}],
+                    },
+                }
+            )
+            await session._handle_event(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "stopReason": "stop",
+                            "content": [{"type": "text", "text": "第一版结论"}],
+                        },
+                        {
+                            "role": "assistant",
+                            "stopReason": "toolUse",
+                            "content": [
+                                {"type": "text", "text": "让我再确认一下。"},
+                                {"type": "toolCall", "toolCallId": "t2", "name": "read"},
+                            ],
+                        },
+                    ],
+                }
+            )
+
+            # 结束时只有中间陈述、没有终稿：宁可空回复走 fallback，
+            # 不能把之前的候选文本当交付发出。
+            self.assertTrue(session.done)
+            self.assertEqual(session.error, "agent_result_missing")
+            with self.assertRaises(ValueError):
+                session.result()
 
     async def test_escalate_is_detected_for_all_provider_event_shapes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -723,6 +956,251 @@ class AgentFallbackConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self._from_raw(tmp, self._raw(["missing-agent"]))
 
+
+class PiNativeImageInputTests(unittest.TestCase):
+    """pi RPC 原生图片输入：首条 prompt 命令以 ImageContent 携带 base64 图片。"""
+
+    def test_prepare_encodes_local_images_as_image_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = AgentRuntimeTests()._runtime(root, "pi")
+            png = root / "shot.png"
+            png_bytes = b"\x89PNG\r\n\x1a\nfake-png"
+            png.write_bytes(png_bytes)
+            jpg = root / "shot.jpg"
+            jpg_bytes = b"\xff\xd8\xfffake-jpg"
+            jpg.write_bytes(jpg_bytes)
+            prepared = runtime.prepare(
+                "worker", "session", "prompt", root / "run", (png, jpg)
+            )
+
+            self.assertEqual(prepared.protocol, "pi-rpc")
+            self.assertEqual(
+                prepared.pi_images,
+                (
+                    {
+                        "type": "image",
+                        "data": base64.b64encode(png_bytes).decode("ascii"),
+                        "mimeType": "image/png",
+                    },
+                    {
+                        "type": "image",
+                        "data": base64.b64encode(jpg_bytes).decode("ascii"),
+                        "mimeType": "image/jpeg",
+                    },
+                ),
+            )
+            # pi 不再走 codex 的 localImage 路径输入
+            self.assertEqual(prepared.local_image_paths, ())
+
+    def test_prepare_rejects_unknown_image_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = AgentRuntimeTests()._runtime(root, "pi")
+            bmp = root / "shot.bmp"
+            bmp.write_bytes(b"BMfake")
+            with self.assertRaisesRegex(ValueError, "unsupported pi image format"):
+                runtime.prepare("worker", "session", "prompt", root / "run", (bmp,))
+
+    def test_first_prompt_command_carries_images(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = AgentRuntimeTests()._runtime(root, "pi")
+            png = root / "shot.png"
+            png_bytes = b"\x89PNG\r\n\x1a\nfake-png"
+            png.write_bytes(png_bytes)
+            prepared = runtime.prepare(
+                "worker", "session", "看下这张截图", root / "run", (png,)
+            )
+            command = AgentSession(prepared, "session")._pi_prompt_command()
+
+            self.assertEqual(command["type"], "prompt")
+            self.assertEqual(command["message"], "看下这张截图")
+            self.assertEqual(
+                command["images"],
+                [
+                    {
+                        "type": "image",
+                        "data": base64.b64encode(png_bytes).decode("ascii"),
+                        "mimeType": "image/png",
+                    }
+                ],
+            )
+
+    def test_prompt_command_without_images_omits_the_field(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = AgentRuntimeTests()._runtime(root, "pi")
+            prepared = runtime.prepare("worker", "session", "prompt", root / "run")
+            command = AgentSession(prepared, "session")._pi_prompt_command()
+
+            self.assertNotIn("images", command)
+            self.assertEqual(
+                command, {"type": "prompt", "message": "prompt"}
+            )
+
+    def test_codex_prepare_still_uses_local_image_paths(self) -> None:
+        # 兼容守卫：codex 继续以 localImage 路径输入，不产生 pi_images
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = AgentRuntimeTests()._runtime(root, "codex")
+            png = root / "shot.png"
+            png.write_bytes(b"\x89PNG\r\n\x1a\nfake-png")
+            prepared = runtime.prepare(
+                "worker", "session", "prompt", root / "run", (png,)
+            )
+
+            self.assertEqual(prepared.protocol, "codex-app-server")
+            self.assertEqual(prepared.local_image_paths, (png,))
+            self.assertEqual(prepared.pi_images, ())
+
+
+# 模拟 pi RPC 子进程：先回 prompt 命令的 response，再输出一条带整批
+# base64 图片的 agent_end 大事件行，用于验证事件流单行上限。
+_BIG_LINE_EMITTER = """
+import base64, json, sys
+
+request = json.loads(sys.stdin.readline())
+print(json.dumps({{
+    "id": request.get("id"),
+    "type": "response",
+    "command": "prompt",
+    "success": True,
+}}), flush=True)
+
+image = base64.b64encode(
+    b"\\x89PNG\\r\\n\\x1a\\n" + b"a" * ({image_bytes} - 8)
+).decode("ascii")
+agent_end = {{
+    "type": "agent_end",
+    "messages": [
+        {{
+            "role": "user",
+            "content": [
+                {{"type": "text", "text": "看下这四张截图"}},
+                *[
+                    {{"type": "image", "data": image, "mimeType": "image/png"}}
+                    for _ in range({image_count})
+                ],
+            ],
+        }},
+        {{
+            "role": "assistant",
+            "stopReason": "stop",
+            "content": [{{"type": "text", "text": "最终正文"}}],
+        }},
+    ],
+}}
+print(json.dumps(agent_end), flush=True)
+"""
+
+
+class PiEventStreamLimitTests(unittest.IsolatedAsyncioTestCase):
+    """事件流单行上限与图片预算联动：允许下载的整批图片必须能原样读回。"""
+
+    async def _close_session(self, session: AgentSession) -> None:
+        """关闭会话并在本测试事件循环存活时回收子进程 transport，避免跨测试
+        触发 BaseSubprocessTransport.__del__ 的 Event loop is closed 噪音。"""
+        import gc
+
+        await session.close()
+        # session.process 仍持有子进程 transport 引用：先解除引用并让
+        # connection_lost/process_exited 回调跑完，再在本循环存活时回收，
+        # 避免跨测试触发 __del__ 的 Event loop is closed 噪音。
+        session.process = None
+        for _ in range(4):
+            await asyncio.sleep(0)
+        gc.collect()
+
+    def test_stream_limit_covers_worst_case_image_echo(self) -> None:
+        # 上限必须 ≥ 整批图片 base64 膨胀（pi 会把带图用户消息原样回传），
+        # 且不小于旧默认 8MiB；service 下载侧常量必须来自同一 core 定义。
+        from dws_dm_agent.runners import runtime as runtime_module
+        from dws_dm_agent.core import MAX_IMAGES, MAX_IMAGE_BYTES
+
+        worst_case_base64 = (MAX_IMAGES * MAX_IMAGE_BYTES * 4 + 2) // 3
+        self.assertGreaterEqual(
+            runtime_module._EVENT_STREAM_LIMIT, worst_case_base64
+        )
+        self.assertGreater(runtime_module._EVENT_STREAM_LIMIT, 8 * 1024 * 1024)
+        from dws_dm_agent import service as service_module
+
+        self.assertIs(service_module._MAX_IMAGES, MAX_IMAGES)
+        self.assertIs(service_module._MAX_IMAGE_BYTES, MAX_IMAGE_BYTES)
+
+    async def test_worst_case_image_echo_line_is_read_back(self) -> None:
+        # 真实子进程读回：构造 4×20MiB 图片预算的 agent_end 单行（约 107MiB），
+        # 会话必须完整读回、解析并提取终稿，而不是 event_stream_error。
+        from dws_dm_agent.core import MAX_IMAGES, MAX_IMAGE_BYTES
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            emitter = root / "emitter.py"
+            emitter.write_text(
+                _BIG_LINE_EMITTER.format(
+                    image_bytes=MAX_IMAGE_BYTES, image_count=MAX_IMAGES
+                ),
+                encoding="utf-8",
+            )
+            runtime = AgentRuntimeTests()._runtime(
+                root,
+                "pi",
+                command=[sys.executable, str(emitter)],
+                protocol="pi-rpc",
+            )
+            session = AgentSession(
+                runtime.prepare("worker", "session", "prompt", root / "run"),
+                "session",
+            )
+            try:
+                await session.start()
+                await session.wait(timeout=180)
+                self.assertEqual(session.error, "")
+                self.assertEqual(session.result(), "最终正文")
+                # 大行完整落盘：至少超过单张图片的 base64 体积
+                self.assertGreater(
+                    session.prepared.events_path.stat().st_size,
+                    MAX_IMAGE_BYTES * 4 // 3,
+                )
+            finally:
+                await self._close_session(session)
+
+    async def test_line_beyond_limit_fails_gracefully(self) -> None:
+        # 行长超过上限时按 event_stream_error 失败会话（可走 fallback 链），
+        # 不能挂死或抛未捕获异常；用缩小后的上限验证该降级路径仍在。
+        from dws_dm_agent.runners import runtime as runtime_module
+        from dws_dm_agent.core import MAX_IMAGE_BYTES
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            emitter = root / "emitter.py"
+            emitter.write_text(
+                _BIG_LINE_EMITTER.format(image_bytes=MAX_IMAGE_BYTES, image_count=2),
+                encoding="utf-8",
+            )
+            runtime = AgentRuntimeTests()._runtime(
+                root,
+                "pi",
+                command=[sys.executable, str(emitter)],
+                protocol="pi-rpc",
+            )
+            session = AgentSession(
+                runtime.prepare("worker", "session", "prompt", root / "run"),
+                "session",
+            )
+            try:
+                with patch.object(
+                    runtime_module, "_EVENT_STREAM_LIMIT", 1024 * 1024
+                ):
+                    await session.start()
+                    await session.wait(timeout=60)
+                self.assertTrue(session.done)
+                self.assertTrue(
+                    session.error.startswith("event_stream_error"),
+                    session.error,
+                )
+            finally:
+                await self._close_session(session)
 
 
 if __name__ == "__main__":

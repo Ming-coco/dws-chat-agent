@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -12,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from ..core import sanitize_text
+from ..core import MAX_IMAGES, MAX_IMAGE_BYTES, sanitize_text
 from ..prompts import (
     STAGE_PROMPT_VARIABLES,
     SUPPLEMENT_PROMPT_VARIABLES,
@@ -23,8 +24,13 @@ from . import claude, codex, custom, pi
 
 
 _STAGE_ORDER = ("front", "worker")
-_EVENT_STREAM_LIMIT = 8 * 1024 * 1024
-_PI_EMPTY_RESPONSE_RETRIES = 4
+# 事件流单行上限必须容纳"允许下载的整批图片原样回传"：pi RPC 会把带图用户
+# 消息（含 base64 ImageContent）在 message/agent 事件里原样发回，单行最大为
+# 全部图片的 base64 膨胀（4/3）+ JSON 结构与文本余量。上限从 core 的图片
+# 预算推导，与 service 下载侧保持一致，不得各自硬编码或互相砍对方的上限。
+_EVENT_STREAM_LIMIT = (
+    (MAX_IMAGES * MAX_IMAGE_BYTES * 4 + 2) // 3 + 8 * 1024 * 1024
+)
 # pi-worker 冷启动（含扩展/MCP 加载）偶发超过默认 15s，首条 prompt 握手放宽到 3 分钟。
 _PI_START_HANDSHAKE_TIMEOUT_SECONDS = 180.0
 _DRIVER_PROTOCOLS = {
@@ -36,6 +42,38 @@ _SUPPORTED_PROTOCOLS = frozenset(
     (*_DRIVER_PROTOCOLS.values(), "custom-jsonl-v1")
 )
 SUPPORTED_PROTOCOLS = tuple(sorted(_SUPPORTED_PROTOCOLS))
+# pi RPC prompt/steer 命令的 images 字段使用 ImageContent：
+# {"type": "image", "data": "<base64>", "mimeType": "..."}（pi docs/rpc.md）。
+# service 层按魔数把图片落盘为正确后缀，这里按后缀映射 MIME。
+_PI_IMAGE_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
+
+def _pi_image_payloads(
+    paths: Sequence[Path],
+) -> tuple[dict[str, str], ...]:
+    """把本地图片文件编码成 pi RPC 的 ImageContent 列表。
+
+    不认识的后缀直接报错，而不是发一个 pi 端无法解析的 mimeType。
+    """
+    payloads: list[dict[str, str]] = []
+    for path in paths:
+        mime = _PI_IMAGE_MIME_TYPES.get(path.suffix.lower())
+        if mime is None:
+            raise ValueError(f"unsupported pi image format: {path.suffix}")
+        payloads.append(
+            {
+                "type": "image",
+                "data": base64.b64encode(path.read_bytes()).decode("ascii"),
+                "mimeType": mime,
+            }
+        )
+    return tuple(payloads)
 
 
 @dataclass(frozen=True)
@@ -82,6 +120,8 @@ class PreparedAgent:
     stderr_path: Path
     prompt_path: Path
     local_image_paths: tuple[Path, ...] = ()
+    # pi RPC 专用：随首条 prompt 原生发送的 ImageContent（base64 + mimeType）
+    pi_images: tuple[dict[str, str], ...] = ()
 
     @property
     def timeout_seconds(self) -> float:
@@ -110,7 +150,6 @@ class AgentSession:
         self._escalated = False
         self._progress: list[str] = []
         self._stream_text = ""
-        self._pi_empty_response_retries = 0
         self._codex_item_phases: dict[str, str] = {}
         self._codex_reasoning: dict[str, str] = {}
         self._pi_thinking: dict[int, str] = {}
@@ -208,7 +247,7 @@ class AgentSession:
                     raise RuntimeError("Codex app-server did not return a turn id")
             elif self.prepared.protocol == "pi-rpc":
                 response = await self._pi_call(
-                    {"type": "prompt", "message": self.prepared.prompt},
+                    self._pi_prompt_command(),
                     timeout=_PI_START_HANDSHAKE_TIMEOUT_SECONDS,
                 )
                 if not response.get("success", False):
@@ -305,7 +344,9 @@ class AgentSession:
     def result(self) -> str:
         if self._escalated:
             return ""
-        reply = (self._final_text or self._stream_text).strip()
+        # 只把真正的最终 assistant 消息当回复；thinking/progress 流文本不参与回退，
+        # 避免把内部独白当正式回复发给联系人。无终稿时抛错交由服务层走 fallback 链。
+        reply = self._final_text.strip()
         if not reply:
             raise ValueError("agent produced no reply or escalation")
         return reply
@@ -390,6 +431,16 @@ class AgentSession:
             return await asyncio.wait_for(future, timeout=timeout)
         finally:
             self._pending.pop(request_id, None)
+
+    def _pi_prompt_command(self) -> dict[str, Any]:
+        """构造 pi RPC 首条 prompt 命令；有图片时以 ImageContent 原生附带。"""
+        command: dict[str, Any] = {
+            "type": "prompt",
+            "message": self.prepared.prompt,
+        }
+        if self.prepared.pi_images:
+            command["images"] = list(self.prepared.pi_images)
+        return command
 
     async def _custom_call(
         self, command: Mapping[str, Any], *, timeout: float = 15
@@ -550,38 +601,42 @@ class AgentSession:
                 self._capture_escalation()
             elif event_type == "message_end":
                 text = _assistant_text(event)
-                if text:
+                if text and _is_pi_intermediate_message(event.get("message")):
+                    # 工具调用间隔中的中间陈述（带 toolCall 或 error/aborted 终止）
+                    # 只走进度展示，不能作为最终回复交付。
+                    self._capture_progress(text)
+                elif text:
                     self._capture_body(text, final=True)
             elif event_type == "agent_end":
                 messages = event.get("messages")
                 if isinstance(messages, list):
-                    for message in reversed(messages):
-                        text = _assistant_text({"message": message})
-                        if text:
-                            self._capture_body(text, final=True)
-                            break
+                    reply = _pi_final_reply_text(messages)
+                    if reply:
+                        self._capture_body(reply, final=True)
+                    else:
+                        # 本轮没有可交付的终稿：清掉 message_end 期间捕获的
+                        # 候选文本，宁可空回复走 fallback 链，也不能把
+                        # 中间陈述当正式回复发出。
+                        self._final_text = ""
                 if (
                     not self._escalated
                     and not self._final_text
-                    and not self._stream_text
-                    and self._pi_empty_response_retries
-                    < _PI_EMPTY_RESPONSE_RETRIES
+                    and event.get("willRetry")
                 ):
-                    self._pi_empty_response_retries += 1
-                    self._request_id += 1
-                    await self._write_json(
-                        {
-                            "id": self._request_id,
-                            "type": "prompt",
-                            "message": self.prepared.prompt,
-                        }
-                    )
+                    # pi 会在可重试错误后自行续跑（agent_end 之后还有后续 turn）。
+                    # 保持会话打开等待下一次 agent_end；不再自行重发 prompt，
+                    # 避免与 pi 的重试或 steer 后续 turn 冲突
+                    # （Agent is already processing 会作废整场 run）。
                     return
                 self._finish()
             elif event_type == "response" and not event.get("success", True):
-                self._fail(
-                    sanitize_text(str(event.get("error") or "Pi RPC error"), 500)
-                )
+                error = sanitize_text(str(event.get("error") or "Pi RPC error"), 500)
+                if "already processing" in error.lower():
+                    # pi 正在处理（或即将开始）后续 turn 时会拒绝新 prompt，
+                    # 此时会话本身健康；作废整场会连正在处理的补充消息一起丢，
+                    # 这里只忽略该次被拒请求，等 agent_end 或服务层超时兜底。
+                    return
+                self._fail(error)
             return
         if protocol == "custom-jsonl-v1":
             event_type = str(event.get("type") or "")
@@ -661,10 +716,11 @@ class AgentSession:
             self._updates.put_nowait(None)
 
     def _finish(self) -> None:
+        # result.txt 仅作排障留档：无终稿时保留流文本便于回溯，但不作为交付。
         payload = self._final_text or self._stream_text
         if payload:
             self.prepared.result_path.write_text(payload, encoding="utf-8")
-        elif not self.error and not self._escalated:
+        if not self._final_text and not self.error and not self._escalated:
             self.error = "agent_result_missing"
         self._complete.set()
         self._signal_update()
@@ -892,9 +948,15 @@ class AgentRuntime:
         stderr_path = session_dir / "stderr.log"
         prompt_path.write_text(prompt, encoding="utf-8")
         protocol = stage.profile.protocol
-        if local_images and protocol != "codex-app-server":
-            # 非 Codex 协议应在上游 _run_agent 中将图片路径嵌入 prompt；
-            # 这里只保留防御性日志，不再硬阻断。
+        pi_images: tuple[dict[str, str], ...] = ()
+        if local_images and protocol == "pi-rpc":
+            # pi RPC 原生支持 prompt.images（ImageContent：base64 + mimeType），
+            # 在此一次性编码，首条 prompt 由 AgentSession 直接携带图片。
+            pi_images = _pi_image_payloads(local_images)
+            local_images = ()
+        elif local_images and protocol != "codex-app-server":
+            # 其余协议不支持原生图片输入，应在上游 _run_agent 中将图片路径
+            # 嵌入 prompt；这里只保留防御性日志，不再硬阻断。
             logging.getLogger(__name__).warning(
                 "local_images passed to non-codex protocol %s; images=%d",
                 protocol,
@@ -929,6 +991,7 @@ class AgentRuntime:
             stderr_path=stderr_path,
             prompt_path=prompt_path,
             local_image_paths=tuple(local_images),
+            pi_images=pi_images,
         )
 
     def open_session(
@@ -1163,6 +1226,43 @@ def _assistant_text(event: Mapping[str, Any]) -> str:
         for item in content
         if isinstance(item, Mapping) and item.get("type") == "text"
     ).strip()
+
+
+def _is_pi_intermediate_message(message: Any) -> bool:
+    """判断 pi 的 assistant 消息是否为工具调用间隔中的中间陈述或错误/中断消息。
+
+    pi 助手消息的 content 块类型为 text/thinking/toolCall；带 toolCall 块
+    （stopReason=toolUse）说明模型还要继续执行工具，以 error/aborted 终止的
+    消息则不是正常收尾。这两类消息的文本都不能作为最终回复交付。
+    """
+    if not isinstance(message, Mapping):
+        return False
+    if str(message.get("stopReason") or "") in {"error", "aborted"}:
+        return True
+    content = message.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(item, Mapping) and item.get("type") == "toolCall"
+        for item in content
+    )
+
+
+def _pi_final_reply_text(messages: list[Any]) -> str:
+    """从 pi agent_end.messages 提取可交付的终稿文本。
+
+    只认可最后一条 assistant 消息：必须是无 toolCall 的纯文本且非
+    error/aborted 终止，才算终稿。工具调用间隔中的中间陈述、错误消息
+    一律返回空串，由上层记 agent_result_missing 走 fallback 链，
+    避免把计划独白当正式回复发给联系人。
+    """
+    for message in reversed(messages):
+        if not isinstance(message, Mapping) or message.get("role") != "assistant":
+            continue
+        if _is_pi_intermediate_message(message):
+            return ""
+        return _assistant_text({"message": message})
+    return ""
 
 
 def _assistant_thinking(event: Mapping[str, Any]) -> str:

@@ -10,6 +10,13 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
+# 单次 agent 运行的图片预算（用户可见上限）：最多 MAX_IMAGES 张、每张不超过
+# MAX_IMAGE_BYTES。下载侧（service）与事件流读取上限（runners.runtime）都必须
+# 从这两个常量推导，保证"允许下载的图片一定能被事件流完整读回"。
+MAX_IMAGES = 4
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+
 @dataclass(frozen=True)
 class Contact:
     alias: str

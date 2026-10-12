@@ -27,6 +27,7 @@ from dws_dm_agent.service import (
     AgentResult,
     AgentService,
     DwsClient,
+    _apply_image_context,
     _find_dws_error_code,
     _load_timezone,
     load_settings,
@@ -1541,6 +1542,51 @@ class MultimodalImageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(RuntimeError, "unsupported image format"):
                 asyncio.run(service._download_images([event], Path(directory)))
+
+    def test_pi_prompt_keeps_images_native_with_vision_fallback_paths(self) -> None:
+        # pi-rpc：图片原生随 prompt 发送，路径只作为 vision_query 兜底提示保留
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "image-1.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\npng")
+            prompt, images = _apply_image_context(
+                "worker prompt", "pi-rpc", [image]
+            )
+            self.assertEqual(images, (image,))
+            self.assertIn("图片附件", prompt)
+            self.assertIn("直接查看图片内容", prompt)
+            self.assertIn("vision_query", prompt)
+            self.assertIn(str(image.resolve()), prompt)
+            self.assertNotIn("read 工具", prompt)
+
+    def test_non_pi_prompt_embeds_paths_and_clears_local_images(self) -> None:
+        # claude/custom 等协议：图片路径嵌入 prompt，交给 read 工具读取
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "image-1.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\npng")
+            prompt, images = _apply_image_context(
+                "worker prompt", "claude-stream-json", [image]
+            )
+            self.assertEqual(images, ())
+            self.assertIn("已下载到本地", prompt)
+            self.assertIn("read 工具", prompt)
+            self.assertIn(str(image.resolve()), prompt)
+
+    def test_codex_prompt_is_left_untouched_for_local_image_input(self) -> None:
+        # codex：runtime 以 localImage 路径输入，prompt 不加图片说明
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "image-1.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\npng")
+            prompt, images = _apply_image_context(
+                "worker prompt", "codex-app-server", [image]
+            )
+            self.assertEqual((prompt, images), ("worker prompt", (image,)))
+
+    def test_empty_images_leave_prompt_unchanged_for_any_protocol(self) -> None:
+        for protocol in ("pi-rpc", "claude-stream-json", "codex-app-server"):
+            self.assertEqual(
+                _apply_image_context("worker prompt", protocol, ()),
+                ("worker prompt", ()),
+            )
 
 
 class HumanTakeoverTests(unittest.TestCase):
