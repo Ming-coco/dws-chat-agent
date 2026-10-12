@@ -154,16 +154,14 @@ Start in `shadow` mode until configuration is verified. Shadow mode performs ana
 ```json
 {
   "workflows": {
-    "active": "codex-default",
+    "active": "pi-default",
     "presets": {
-      "codex-default": {
+      "pi-default": {
         "supplement_strategy": "steer",
         "supplement_prompt": "prompts/supplement.md",
         "auto_messages": {
           "ack_enabled": true,
-          "ack": "已收到消息，正在处理中。",
-          "progress_enabled": true,
-          "max_progress_updates": 60
+          "ack": "已收到消息，正在处理中。"
         },
         "front": {
           "label": "快速前台",
@@ -172,7 +170,7 @@ Start in `shadow` mode until configuration is verified. Shadow mode performs ana
         },
         "worker": {
           "label": "执行 Agent",
-          "agent": "codex-worker",
+          "agent": "pi-worker",
           "prompt": "prompts/worker.md"
         }
       }
@@ -181,7 +179,7 @@ Start in `shadow` mode until configuration is verified. Shadow mode performs ana
 }
 ```
 
-A preset always requires a `worker`; `front` is optional. Omitting `front` sends the original conversation directly to the worker. A profile separates the executable launcher from the session protocol:
+A preset always requires a `worker`; `front` is optional. Omitting `front` sends the original conversation directly to the worker. The service tools referenced by the shipped prompts (`no_reply`, `task_record`, `task_lookup`) are mounted only for `pi` agents (`pi-rpc` protocol). The check is per stage: configuring a stage, or any of its fallback agents, with another driver while that stage's own prompt or the shared supplement prompt (it is steered into any live stage session) references these tools fails at load time. Stages whose prompts do not reference them can keep any driver. Use a pi agent for such stages or remove the service-tool instructions from the prompts. A profile separates the executable launcher from the session protocol:
 
 ```json
 {

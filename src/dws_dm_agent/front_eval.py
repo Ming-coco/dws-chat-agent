@@ -95,6 +95,8 @@ async def _evaluate_case(
                 "current_messages_json": json.dumps(
                     current, ensure_ascii=False, indent=2
                 ),
+                # 评测联系人不带事项记忆：注入空快照，保持提示词变量契约完整。
+                "active_tasks_json": "[]",
                 "now": now.strftime("%Y-%m-%d %H:%M:%S"),
             },
         )

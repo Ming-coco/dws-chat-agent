@@ -38,6 +38,11 @@ _DRIVER_PROTOCOLS = {
     "claude": "claude-stream-json",
     "pi": "pi-rpc",
 }
+# 本服务自有控制/事项工具（no_reply/task_record/task_lookup）目前只在
+# pi-rpc 挂载（见 runners/pi.py 与 pi_dws_tools.ts）；from_config 用这份
+# 名单约束"提示词引用了服务工具"与"阶段/备用 agent 协议"的组合。
+_SERVICE_TOOL_NAMES = ("no_reply", "task_record", "task_lookup")
+_SERVICE_TOOL_PROTOCOL = "pi-rpc"
 _SUPPORTED_PROTOCOLS = frozenset(
     (*_DRIVER_PROTOCOLS.values(), "custom-jsonl-v1")
 )
@@ -122,6 +127,11 @@ class PreparedAgent:
     local_image_paths: tuple[Path, ...] = ()
     # pi RPC 专用：随首条 prompt 原生发送的 ImageContent（base64 + mimeType）
     pi_images: tuple[dict[str, str], ...] = ()
+    # pi RPC 专用：事项工具上下文文件。服务在 steer 进补充消息后会原子
+    # 重写该文件，task_tools.py 每次调用优先读它。文件内的 message_times
+    # （本运行已覆盖消息的 id -> 时间戳映射）是证据 ID 的校验集与
+    # 时间戳来源，保证事项证据落在被引用消息自身的实际时间上。
+    task_context_path: Path | None = None
 
     @property
     def timeout_seconds(self) -> float:
@@ -148,6 +158,7 @@ class AgentSession:
         self._write_lock = asyncio.Lock()
         self._final_text = ""
         self._escalated = False
+        self._silent = False
         self._progress: list[str] = []
         self._stream_text = ""
         self._codex_item_phases: dict[str, str] = {}
@@ -173,6 +184,10 @@ class AgentSession:
     @property
     def escalated(self) -> bool:
         return self._escalated
+
+    @property
+    def silent(self) -> bool:
+        return self._silent
 
     async def start(self) -> None:
         if self.process is not None:
@@ -344,6 +359,9 @@ class AgentSession:
     def result(self) -> str:
         if self._escalated:
             return ""
+        # no_reply 是显式控制动作：捕获后不再有任何路径能把正文当回复交付。
+        if self._silent:
+            raise ValueError("agent chose silence")
         # 只把真正的最终 assistant 消息当回复；thinking/progress 流文本不参与回退，
         # 避免把内部独白当正式回复发给联系人。无终稿时抛错交由服务层走 fallback 链。
         reply = self._final_text.strip()
@@ -599,6 +617,14 @@ class AgentSession:
                 event.get("toolName")
             ):
                 self._capture_escalation()
+            elif (
+                event_type == "tool_execution_end"
+                and not event.get("isError")
+                and _is_no_reply_tool(event.get("toolName"))
+            ):
+                # 只在工具真正执行成功后才承认 silent；工具失败时模型继续正常
+                # 收尾，不能把一次失败的 no_reply 当成沉默吞掉后续正文。
+                self._capture_silent()
             elif event_type == "message_end":
                 text = _assistant_text(event)
                 if text and _is_pi_intermediate_message(event.get("message")):
@@ -705,6 +731,11 @@ class AgentSession:
         self._complete.set()
         self._signal_update()
 
+    def _capture_silent(self) -> None:
+        self._silent = True
+        self._complete.set()
+        self._signal_update()
+
     def _capture_stream_delta(self, delta: str) -> None:
         if not delta:
             return
@@ -720,7 +751,12 @@ class AgentSession:
         payload = self._final_text or self._stream_text
         if payload:
             self.prepared.result_path.write_text(payload, encoding="utf-8")
-        if not self._final_text and not self.error and not self._escalated:
+        if (
+            not self._final_text
+            and not self.error
+            and not self._escalated
+            and not self._silent
+        ):
             self.error = "agent_result_missing"
         self._complete.set()
         self._signal_update()
@@ -899,6 +935,38 @@ class AgentRuntime:
                     f"agent {profile.name} references unknown fallback agents: "
                     f"{', '.join(unknown)}"
                 )
+        # 服务工具只在 pi-rpc 挂载。校验按阶段进行：只有该阶段实际看到的
+        # 提示词（阶段提示词，加上会 steer 进任一在跑阶段会话的补充提示词）
+        # 引用了服务工具，该阶段实际执行的 agent（阶段 agent 及其备用链）
+        # 才要求全部是 pi 协议；提示词不引用服务工具的阶段不受影响，可以
+        # 继续使用其他协议。全局合并所有提示词校验会把没有工具指令的阶段
+        # 一并锁死在 pi 上。
+        supplement_referenced = {
+            name
+            for name in _SERVICE_TOOL_NAMES
+            if name in supplement_prompt_path.read_text(encoding="utf-8")
+        }
+        for stage in stages.values():
+            referenced = supplement_referenced | {
+                name
+                for name in _SERVICE_TOOL_NAMES
+                if name in stage.prompt_path.read_text(encoding="utf-8")
+            }
+            if not referenced:
+                continue
+            for agent in [
+                stage.profile,
+                *(profiles[name] for name in stage.profile.fallbacks),
+            ]:
+                if agent.protocol != _SERVICE_TOOL_PROTOCOL:
+                    raise ValueError(
+                        f"workflow {active} stage {stage.name} prompts reference "
+                        f"service tools ({', '.join(sorted(referenced))}) but "
+                        f"agent {agent.name} (protocol {agent.protocol}) cannot "
+                        "mount them; use a pi agent for stages whose prompts "
+                        "use these tools, or remove the service-tool "
+                        "instructions from the prompts"
+                    )
         return cls(
             active,
             stages,
@@ -939,6 +1007,7 @@ class AgentRuntime:
         local_images: Sequence[Path] = (),
         model_override: str | None = None,
         agent_override: str | None = None,
+        task_context: Mapping[str, Any] | None = None,
     ) -> PreparedAgent:
         stage = self.resolve_stage(stage_name, agent_override)
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -978,6 +1047,25 @@ class AgentRuntime:
             environment["DWS_ESCALATE_MCP_SCRIPT"] = str(
                 Path(__file__).with_name("escalate_mcp.py").resolve()
             )
+        task_context_path: Path | None = None
+        if protocol == "pi-rpc" and task_context is not None:
+            # 事项工具的作用域与运行信息只经环境变量注入 pi_dws_tools.ts，
+            # 不进入 prompt，模型无法伪造其他作用域。DWS_TASK_CONTEXT 是
+            # 会话启动时的初始快照；DWS_TASK_CONTEXT_FILE 指向的文件由
+            # 服务在 steer 后原子重写，task_tools.py 每次调用优先读它，
+            # 证据消息集合随本运行覆盖的消息扩展。
+            environment["DWS_TASK_PYTHON"] = sys.executable
+            environment["DWS_TASK_SCRIPT"] = str(
+                Path(__file__).with_name("task_tools.py").resolve()
+            )
+            environment["DWS_TASK_CONTEXT"] = json.dumps(
+                dict(task_context), ensure_ascii=False
+            )
+            task_context_path = session_dir / "task-context.json"
+            task_context_path.write_text(
+                environment["DWS_TASK_CONTEXT"], encoding="utf-8"
+            )
+            environment["DWS_TASK_CONTEXT_FILE"] = str(task_context_path)
         return PreparedAgent(
             stage=stage,
             protocol=protocol,
@@ -992,6 +1080,7 @@ class AgentRuntime:
             prompt_path=prompt_path,
             local_image_paths=tuple(local_images),
             pi_images=pi_images,
+            task_context_path=task_context_path,
         )
 
     def open_session(
@@ -1003,6 +1092,7 @@ class AgentRuntime:
         local_images: Sequence[Path] = (),
         model_override: str | None = None,
         agent_override: str | None = None,
+        task_context: Mapping[str, Any] | None = None,
     ) -> AgentSession:
         return AgentSession(
             self.prepare(
@@ -1013,6 +1103,7 @@ class AgentRuntime:
                 local_images,
                 model_override=model_override,
                 agent_override=agent_override,
+                task_context=task_context,
             ),
             session_id,
         )
@@ -1308,4 +1399,11 @@ def _is_escalate_tool(value: Any) -> bool:
     name = str(value or "").lower()
     return name == "escalate" or name.endswith(
         ("__escalate", "/escalate", ":escalate")
+    )
+
+
+def _is_no_reply_tool(value: Any) -> bool:
+    name = str(value or "").lower()
+    return name == "no_reply" or name.endswith(
+        ("__no_reply", "/no_reply", ":no_reply")
     )
