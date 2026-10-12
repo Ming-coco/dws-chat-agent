@@ -29,6 +29,8 @@ else:
 
 from .runners.runtime import AgentRuntime
 from .core import (
+    MAX_IMAGES,
+    MAX_IMAGE_BYTES,
     AuditStore,
     Contact,
     GateResult,
@@ -58,8 +60,10 @@ from .dws import DwsClient, _find_dws_error_code
 
 LOG = logging.getLogger("dws-chat-agent")
 _IMAGE_MEDIA_ID = re.compile(r"\[图片消息\]\(mediaId=([^)\s]+)\)")
-_MAX_IMAGES = 4
-_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+# 图片预算统一定义在 core（MAX_IMAGES/MAX_IMAGE_BYTES）；此处仅保留历史别名，
+# 事件流读取上限等下游限制必须与 core 常量联动，不允许各自硬编码。
+_MAX_IMAGES = MAX_IMAGES
+_MAX_IMAGE_BYTES = MAX_IMAGE_BYTES
 _STREAM_CARD_BIND_TIMEOUT_SECONDS = 6.0
 
 
@@ -109,6 +113,41 @@ def _image_suffix(path: Path) -> str:
     if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
         return ".webp"
     raise RuntimeError("media_download_failed: unsupported image format")
+
+
+def _apply_image_context(
+    prompt: str, protocol: str, local_images: Sequence[Path]
+) -> tuple[str, tuple[Path, ...]]:
+    """按协议把下载好的本地图片接入 prompt，返回 (prompt, local_images)。
+
+    - pi-rpc：图片由 runtime 编码为 ImageContent 随首条 prompt 原生发送，
+      prompt 只说明附件已附带、可直接看图，并保留本地路径供 vision_query
+      兜底；local_images 原样传给 open_session。
+    - codex-app-server：runtime 以 localImage 路径输入，prompt 不加说明。
+    - 其余协议（claude/custom）：无法原生输入图片，把路径嵌入 prompt，
+      由 agent 用 read 工具读取，返回空 local_images。
+    """
+    if not local_images or protocol == "codex-app-server":
+        return prompt, tuple(local_images)
+    image_paths = "\n".join(f"- {img.resolve()}" for img in local_images)
+    if protocol == "pi-rpc":
+        return (
+            prompt
+            + "\n\n## 图片附件\n\n对方发送的图片已作为图片附件随本条消息直接发给你，"
+            "请直接查看图片内容并结合上下文理解对方意图，不要为看图调用工具。"
+            "若你确实看不到图片内容，再用 vision_query 工具按以下本地路径读取：\n"
+            + image_paths
+            + "\n",
+            tuple(local_images),
+        )
+    return (
+        prompt
+        + "\n\n## 图片附件\n\n以下图片文件已下载到本地：\n"
+        + image_paths
+        + "\n请先用 read 工具逐个读取，确认你是否能直接看到图片内容；"
+        "如果 read 得到的不是有效图片内容，再改用 vision_query 工具读取。\n",
+        (),
+    )
 
 
 @dataclass
@@ -1330,20 +1369,11 @@ class AgentService:
                 () if front else await self._download_images(batch, session_dir)
             )
             has_images = bool(local_images)
-            # 非 Codex 协议不支持 local_images，改为把图片路径嵌入 prompt，
-            # pi/claude worker 通过 read 工具自行读取图片文件。
-            if local_images and stage_profile.profile.protocol != "codex-app-server":
-                image_paths = "\n".join(
-                    f"- {img.resolve()}" for img in local_images
-                )
-                prompt = (
-                    prompt
-                    + "\n\n## 图片附件\n\n以下图片文件已下载到本地：\n"
-                    + image_paths
-                    + "\n请先用 read 工具逐个读取，确认你是否能直接看到图片内容；"
-                    "如果 read 得到的不是有效图片内容，再改用 vision_query 工具读取。\n"
-                )
-                local_images = ()
+            # pi-rpc 原生附带图片（返回的 local_images 保持非空，由 runtime
+            # 编码为 ImageContent）；其余非 codex 协议只嵌路径进 prompt。
+            prompt, local_images = _apply_image_context(
+                prompt, stage_profile.profile.protocol, local_images
+            )
             # 有图片时使用多模态模型
             model_override: str | None = None
             if has_images and stage_profile.profile.protocol == "pi-rpc":
@@ -1367,6 +1397,8 @@ class AgentService:
             )
         supplements: dict[str, IncomingEvent] = {}
         consumed: dict[str, IncomingEvent] = {}
+        # 失败保留 session 现场（prompt.md/result.txt/stderr.log 供排障），仅成功路径清理
+        session_dir_keep = True
         try:
             await session.start()
             interval = float(self.settings.raw.get("monitor_interval_seconds", 5))
@@ -1541,6 +1573,7 @@ class AgentService:
                     ),
                     error=session.error,
                 )
+            session_dir_keep = False
             return AgentResult(
                 session_id,
                 session.result(),
@@ -1570,7 +1603,14 @@ class AgentService:
             )
         finally:
             await session.close()
-            shutil.rmtree(session_dir, ignore_errors=True)
+            if session_dir_keep:
+                LOG.warning(
+                    "agent run failed, kept session dir for debugging session=%s dir=%s",
+                    session_id,
+                    session_dir,
+                )
+            else:
+                shutil.rmtree(session_dir, ignore_errors=True)
 
     async def _download_images(
         self, batch: Sequence[IncomingEvent], session_dir: Path
