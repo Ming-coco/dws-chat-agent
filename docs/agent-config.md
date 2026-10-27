@@ -48,6 +48,7 @@ Inspect the existing `.env`, `config.json`, CLI logins, and repository state fir
 - the operator's DingTalk identity
 - the explicit allowlist of people to monitor
 - aggregate workspace and dedicated worktree roots
+- which projects each monitored person is responsible for (directory names under the workspace root)
 - active front and worker launchers/models
 - whether this installation should remain in `shadow` or switch to `live`
 
@@ -57,7 +58,7 @@ Never echo discovered private values back. Confirm monitored people by display n
 
 If `.env` is absent, copy `.env.example` to `.env`; never overwrite it. On macOS/Linux set mode `0600`. Fill private values in `.env` without displaying the file afterward.
 
-If the service is already running and idle, open the gear on the localhost dashboard, or go directly to `http://127.0.0.1:8765/settings`. This separate page can safely edit public profile, workflow, automatic-message, and prompt fields and applies them to subsequent sessions immediately. It deliberately does not expose `.env`, contact IDs, provider options, or profile environment variables.
+If the service is already running and idle, open the gear on the localhost dashboard, or go directly to `http://127.0.0.1:8765/settings`. This separate page can safely edit public profile, workflow, automatic-message, prompt, and per-contact project assignment fields and applies them to subsequent sessions immediately. Project assignments take effect for agent working directories after the service restarts; the 刷新沙盒 button rebuilds the per-contact sandbox directories right away so a mistake shows up before the next message arrives. The page deliberately does not expose `.env`, contact IDs, provider options, or profile environment variables.
 
 For an initial installation, or when the service cannot start, configure reusable profiles under `agents` and choose them from a preset under `workflows.presets`. Each profile must define:
 

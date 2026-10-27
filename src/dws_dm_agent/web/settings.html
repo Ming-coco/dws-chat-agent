@@ -234,6 +234,33 @@
     .contact-row, .search-result { display: grid; grid-template-columns: minmax(150px, .7fr) minmax(190px, 1fr) auto; align-items: end; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); }
     .contact-row { padding: 8px 10px; }
     .contact-row .field { grid-template-columns: 72px minmax(0, 1fr); align-items: center; }
+    .project-field { grid-column: 1 / -1; display: grid; grid-template-columns: 72px minmax(0, 1fr); align-items: start; }
+    .project-field > span { color: var(--muted); font-size: 11px; letter-spacing: .03em; padding-top: 7px; }
+    .project-picker { position: relative; display: grid; gap: 6px; }
+    .project-chips { display: flex; flex-wrap: wrap; gap: 6px; min-height: 30px; align-items: center; }
+    .project-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 4px 3px 10px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--control); font-size: 12px; }
+    .project-chip.primary { border-color: var(--accent-border); background: var(--accent-soft); color: var(--accent-ink); }
+    .project-chip button { border: 0; background: transparent; padding: 0 4px; color: var(--muted); font-size: 14px; line-height: 1; cursor: pointer; }
+    .project-chip button:hover { color: var(--danger-ink); }
+    .project-empty { color: var(--muted); font-size: 12px; }
+    .project-toggle { justify-self: start; padding: 4px 10px; border-radius: 999px; font-size: 12px; }
+    .project-menu { position: absolute; z-index: 30; top: calc(100% + 6px); left: 0; right: 0; display: grid; gap: 4px; padding: 8px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--panel); box-shadow: 0 18px 40px rgb(0 0 0 / .32); }
+    .project-menu[hidden] { display: none; }
+    .project-menu input { padding: 6px 10px; }
+    .project-options { display: grid; gap: 2px; max-height: 200px; overflow: auto; }
+    .project-option { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 8px; background: transparent; border: 1px solid transparent; text-align: left; font-size: 12px; cursor: pointer; }
+    .project-option:hover { border-color: var(--line-strong); background: var(--control); }
+    .project-option.on { color: var(--accent-ink); }
+    .project-option .tick { width: 12px; color: var(--accent); }
+    .sandbox-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+    .sandbox-info { display: grid; gap: 3px; min-width: 0; }
+    .sandbox-info strong { font-size: 12px; }
+    .sandbox-info span { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .sandbox-actions { display: flex; align-items: center; gap: 8px; }
+    .sandbox-detail { grid-column: 1 / -1; display: grid; gap: 6px; margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); font-size: 11px; color: var(--text-secondary); }
+    .sandbox-detail:empty { display: none; }
+    .sandbox-detail b { color: var(--text-secondary); font-weight: 650; }
+    .sandbox-detail code { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); overflow-wrap: anywhere; }
     .search-row { display: grid; grid-template-columns: minmax(180px, 1fr) auto; gap: 8px; }
     .search-result { align-items: center; }
     .contact-summary { min-width: 0; }
@@ -264,6 +291,8 @@
       .config-card.wide, .field.wide { grid-column: auto; }
       header, .notice { align-items: flex-start; flex-direction: column; }
       .custom-theme, .contact-row, .search-result, .search-row { grid-template-columns: 1fr; }
+      .project-field { grid-template-columns: 1fr; }
+      .sandbox-bar { align-items: stretch; }
       .config-status { text-align: left; }
       .toolbar { width: 100%; }
       .toolbar button { flex: 1; }
@@ -640,6 +669,233 @@
       return alias;
     }
 
+    let projectOptions = null;
+
+    async function loadProjects(force) {
+      if (projectOptions && !force) return projectOptions;
+      try {
+        const response = await fetch("/api/projects", {cache:"no-store"});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        projectOptions = data.projects || [];
+      } catch (error) {
+        projectOptions = [];
+        configMessage(`读取项目目录失败：${error.message}`, "error");
+      }
+      return projectOptions;
+    }
+
+    function projectPicker(contact, onChanged) {
+      const wrapper = node("div", "project-field");
+      wrapper.append(node("span", "", "项目"));
+      const picker = node("div", "project-picker");
+      const chips = node("div", "project-chips");
+      const menu = node("div", "project-menu");
+      menu.hidden = true;
+      const toggle = node("button", "project-toggle", "选择项目");
+      toggle.type = "button";
+
+      const renderChips = () => {
+        clear(chips);
+        const values = contact.projects || (contact.projects = []);
+        if (!values.length) {
+          chips.append(node("span", "project-empty", "未指定项目，agent 将直接使用工作区根目录"));
+          return;
+        }
+        values.forEach((name, index) => {
+          const chip = node("span", `project-chip${index === 0 ? " primary" : ""}`, name);
+          chip.title = index === 0 ? "主项目：agent 的默认工作目录" : "同一联系人的其他项目";
+          const drop = node("button", "", "×");
+          drop.type = "button";
+          drop.title = `移除 ${name}`;
+          drop.addEventListener("click", () => {
+            values.splice(index, 1);
+            renderChips();
+            onChanged();
+          });
+          chip.append(drop);
+          chips.append(chip);
+        });
+      };
+
+      // 菜单骨架只建一次：输入法（IME）在同一个 input 元素上组字，
+      // 每次输入都重建 input 会中断中文组字，导致只能打英文。
+      const search = node("input");
+      search.type = "search";
+      search.placeholder = "筛选项目目录…";
+      search.autocomplete = "off";
+      const options = node("div", "project-options");
+      menu.append(search, options);
+
+      const renderOptions = (keyword) => {
+        clear(options);
+        const values = contact.projects || (contact.projects = []);
+        const known = new Set(projectOptions || []);
+        const needle = String(keyword || "").trim().toLowerCase();
+        const candidates = [...new Set([...(projectOptions || []), ...values])]
+          .filter(name => !needle || name.toLowerCase().includes(needle))
+          .sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+        if (!candidates.length) {
+          options.append(node("span", "project-empty", (projectOptions || []).length
+            ? "没有匹配的项目目录"
+            : "工作区根目录下没有子目录；请先在工作区里创建项目目录"));
+        }
+        candidates.forEach(name => {
+          const on = values.includes(name);
+          const option = node("button", `project-option${on ? " on" : ""}`);
+          option.type = "button";
+          option.append(node("span", "tick", on ? "✓" : ""), node("span", "", name));
+          if (!known.has(name)) option.title = "工作区根目录下当前不存在该目录，保存会被拒绝";
+          option.addEventListener("click", () => {
+            if (on) values.splice(values.indexOf(name), 1);
+            else values.push(name);
+            renderChips();
+            renderOptions(search.value);
+            onChanged();
+          });
+          options.append(option);
+        });
+      };
+
+      let composing = false;
+      search.addEventListener("compositionstart", () => { composing = true; });
+      search.addEventListener("compositionend", () => {
+        composing = false;
+        renderOptions(search.value);
+      });
+      search.addEventListener("input", () => {
+        // 组字中途按拼音过滤会把选项全滤掉，等 compositionend 再刷新。
+        if (!composing) renderOptions(search.value);
+      });
+      search.addEventListener("keydown", event => {
+        if (event.key === "Escape") { close(); return; }
+        if (event.key === "Enter") {
+          event.preventDefault();
+          const first = options.querySelector(".project-option");
+          if (first) first.click();
+        }
+      });
+
+      const close = () => {
+        menu.hidden = true;
+        toggle.textContent = "选择项目";
+      };
+      const open = () => {
+        search.value = "";
+        renderOptions("");
+        menu.hidden = false;
+        toggle.textContent = "收起";
+        search.focus();
+      };
+
+      toggle.addEventListener("click", () => {
+        if (!menu.hidden) { close(); return; }
+        const previous = toggle.textContent;
+        toggle.textContent = "载入中…";
+        loadProjects(true).then(open, () => { toggle.textContent = previous; });
+      });
+      // 点空白处收起，避免菜单一直挂在页面上。
+      // renderConfig() 会反复重建联系人行，所以这里先判断节点是否还在文档里，
+      // 免得旧闭包一直挂着菜单和 DOM。
+      if (!globalThis.__projectMenuCloser) {
+        globalThis.__projectMenuCloser = true;
+        document.addEventListener("click", event => {
+          document.querySelectorAll(".project-picker").forEach(picker => {
+            const menu = picker.querySelector(".project-menu");
+            if (!menu || menu.hidden) return;
+            if (picker.contains(event.target)) return;
+            menu.hidden = true;
+            const toggle = picker.querySelector(".project-toggle");
+            if (toggle) toggle.textContent = "选择项目";
+          });
+        });
+      }
+      picker.append(chips, toggle, menu);
+      wrapper.append(picker);
+      renderChips();
+      return wrapper;
+    }
+
+    function sandboxBar(editor) {
+      const bar = node("div", "sandbox-bar");
+      const info = node("div", "sandbox-info");
+      const title = node("strong", "", "沙盒目录");
+      const detail = node("span", "", "每个联系人一个只含自己项目的目录视图，刷新后立即生效。");
+      info.append(title, detail);
+      const actions = node("div", "sandbox-actions");
+      const state = node("span", "config-status");
+      state.setAttribute("role", "status");
+      state.setAttribute("aria-live", "polite");
+      const refresh = node("button", "primary", "刷新沙盒");
+      refresh.type = "button";
+      const failure = node("div", "sandbox-detail");
+
+      const describe = report => {
+        if (!report) return;
+        clear(failure);
+        title.textContent = `沙盒目录 · ${report.contacts ? report.contacts.length : 0} 个联系人`;
+        detail.textContent = report.root || "";
+        (report.contacts || []).forEach(contact => {
+          (contact.links || []).forEach(link => {
+            // 还没创建的链接不算故障，只有指向错误或创建失败才提示。
+            if (!link.broken) return;
+            const line = node("div");
+            line.append(
+              node("b", "", `${contact.alias} / ${link.name}`),
+              node("span", "", ` — ${link.detail || link.state}`),
+              node("br"),
+              node("code", "", link.target || "")
+            );
+            failure.append(line);
+          });
+        });
+        (report.errors || []).forEach(message => {
+          if (failure.textContent.includes(message)) return;
+          failure.append(node("code", "", message));
+        });
+        (report.notes || []).forEach(message => {
+          if (failure.textContent.includes(message)) return;
+          failure.append(node("code", "", `提示：${message}`));
+        });
+      };
+
+      refresh.addEventListener("click", async () => {
+        refresh.disabled = true;
+        state.className = "config-status";
+        state.textContent = "正在重建…";
+        try {
+          const response = await fetch("/api/sandbox/rebuild", {
+            method:"POST",
+            headers:{"Content-Type":"application/json"},
+            body:"{}"
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+          describe(data);
+          if (data.healthy) {
+            state.className = "config-status ok";
+            state.textContent = `重建完成 · ${(data.contacts || []).length} 个联系人`;
+          } else {
+            state.className = "config-status error";
+            state.textContent = `${(data.errors || []).length} 个问题待处理`;
+          }
+        } catch (error) {
+          state.className = "config-status error";
+          state.textContent = `重建失败：${error.message}`;
+        } finally {
+          refresh.disabled = false;
+        }
+      });
+
+      actions.append(state, refresh);
+      bar.append(info, actions, failure);
+      editor.append(bar);
+      fetch("/api/sandbox", {cache:"no-store"})
+        .then(response => response.json())
+        .then(data => { if (data && !data.error) describe(data); })
+        .catch(() => {});
+    }
+
     function renderContacts(editor) {
       const contacts = agentConfig.contacts || (agentConfig.contacts = []);
       const card = node("section", "config-card wide");
@@ -660,7 +916,10 @@
         row.append(
           field("显示名称", textControl(contact.display_name, value => { contact.display_name = value; })),
           field("别名", textControl(contact.alias, value => { contact.alias = value; })),
-          remove
+          remove,
+          // 只标脏、不重绘：项目芯片由 projectPicker 自己维护，
+          // 重绘整块会把正在操作的菜单连同输入框一起销毁。
+          projectPicker(contact, () => { dirtyConfig(); })
         );
         list.append(row);
       });
@@ -708,7 +967,8 @@
                 alias: contactAlias(candidate, contacts),
                 display_name: candidate.name || candidate.nick || candidate.flowerName,
                 user_id: candidate.userId,
-                open_dingtalk_id: candidate.openDingTalkId
+                open_dingtalk_id: candidate.openDingTalkId,
+                projects: []
               });
               renderConfig();
               dirtyConfig();
@@ -733,9 +993,10 @@
         status,
         results,
         list,
-        node("p", "config-note", "新增或移除监听联系人会写入本机 config.json；保存后重启服务，监听器才会按新白名单启动。")
+        node("p", "config-note", "新增或移除监听联系人会写入本机 config.json；保存后重启服务，监听器才会按新白名单启动。项目目录来自工作区根目录下的子目录，可在保存后点「刷新沙盒」立即生效。")
       );
       card.append(manager);
+      sandboxBar(card);
       editor.append(card);
     }
 

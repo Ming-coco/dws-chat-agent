@@ -1008,6 +1008,7 @@ class AgentRuntime:
         model_override: str | None = None,
         agent_override: str | None = None,
         task_context: Mapping[str, Any] | None = None,
+        workspace: Path | None = None,
     ) -> PreparedAgent:
         stage = self.resolve_stage(stage_name, agent_override)
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -1066,14 +1067,18 @@ class AgentRuntime:
                 environment["DWS_TASK_CONTEXT"], encoding="utf-8"
             )
             environment["DWS_TASK_CONTEXT_FILE"] = str(task_context_path)
+        # workspace 是服务按联系人算出的沙盒主项目目录；未提供时沿用全局根。
+        cwd = self._workspace_root if workspace is None else Path(workspace)
+        if workspace is not None and not cwd.is_dir():
+            raise ValueError(f"agent workspace is not a directory: {cwd}")
         return PreparedAgent(
             stage=stage,
             protocol=protocol,
             argv=tuple(argv),
-            cwd=self._workspace_root,
+            cwd=cwd,
             environment=environment,
             prompt=prompt,
-            thread_options=_thread_options(stage.profile, self._workspace_root),
+            thread_options=_thread_options(stage.profile, cwd),
             result_path=result_path,
             events_path=events_path,
             stderr_path=stderr_path,
@@ -1093,6 +1098,7 @@ class AgentRuntime:
         model_override: str | None = None,
         agent_override: str | None = None,
         task_context: Mapping[str, Any] | None = None,
+        workspace: Path | None = None,
     ) -> AgentSession:
         return AgentSession(
             self.prepare(
@@ -1104,6 +1110,7 @@ class AgentRuntime:
                 model_override=model_override,
                 agent_override=agent_override,
                 task_context=task_context,
+                workspace=workspace,
             ),
             session_id,
         )

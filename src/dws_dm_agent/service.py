@@ -57,6 +57,7 @@ from .config import (
 )
 from .dashboard import AgentConfigStore, DashboardServer
 from .dws import DwsClient, _find_dws_error_code
+from . import sandbox
 
 
 LOG = logging.getLogger("dws-chat-agent")
@@ -255,12 +256,68 @@ class AgentService:
                         "display_name": item.display_name,
                         "user_id": item.user_id,
                         "open_dingtalk_id": item.open_dingtalk_id,
+                        "projects": list(item.projects),
                     }
                     for item in settings.contacts
                 ],
             ),
             contact_search=self._search_dingtalk_contacts,
+            project_lister=self._list_projects,
+            sandbox_status=self._sandbox_status,
+            sandbox_refresh=self._refresh_sandboxes,
         )
+
+    def _list_projects(self) -> list[str]:
+        """workspace_root 下的一层目录，作为联系人项目下拉的候选。"""
+        root = self.settings.workspace_root
+        if not root.is_dir():
+            return []
+        return sorted(
+            entry.name
+            for entry in root.iterdir()
+            if entry.is_dir()
+            and not entry.name.startswith(".")
+            and sandbox.normalize_project_name(entry.name) is not None
+            and not sandbox.is_link(entry)
+        )
+
+    def _sandbox_status(self) -> dict[str, Any]:
+        return self._rebuild_sandboxes(apply=False).as_dict()
+
+    def _refresh_sandboxes(self) -> dict[str, Any]:
+        """按 config.json 的当前内容重建沙盒。
+
+        联系人与项目列表要重启才进入运行态，所以这里刻意读盘而不是用内存快照：
+        按钮的作用是「先校验并铺好目录」，重启后 agent 才能真正用上。
+        """
+        try:
+            disk_settings = load_settings(
+                self.settings.config_path, self.settings.env_path
+            )
+        except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            payload = self._rebuild_sandboxes(apply=False).as_dict()
+            payload["healthy"] = False
+            payload.setdefault("errors", []).append(f"读取 config.json 失败：{exc}")
+            return payload
+        report = sandbox.rebuild(
+            disk_settings.workspace_root,
+            disk_settings.sandbox_root,
+            ((item.alias, item.projects) for item in disk_settings.contacts),
+            apply=True,
+        )
+        payload = report.as_dict()
+        running = tuple(
+            (item.alias, tuple(item.projects)) for item in self.settings.contacts
+        )
+        saved = tuple(
+            (item.alias, tuple(item.projects)) for item in disk_settings.contacts
+        )
+        if running != saved:
+            payload.setdefault("notes", []).append(
+                "项目分配已变更，重启服务后 agent 才会改用新的工作目录"
+            )
+        return payload
+
     def close(self) -> None:
         self.dashboard.stop()
         self.runtime_path.unlink(missing_ok=True)
@@ -270,6 +327,7 @@ class AgentService:
         self.settings.state_dir.mkdir(parents=True, exist_ok=True)
         self.settings.worktree_root.mkdir(parents=True, exist_ok=True)
         LOG.info("starting mode=%s contacts=%d", self.mode, len(self.settings.contacts))
+        self._rebuild_sandboxes(apply=True)
         days = self._task_memory_inactive_days()
         if days > 0:
             archived = self.store.archive_inactive_tasks(
@@ -453,6 +511,10 @@ class AgentService:
                 command,
                 capture_output=True,
                 text=True,
+                # dws 始终输出 UTF-8；不显式指定会被 locale（中文 Windows 为 GBK）
+                # 解码，遇到中文姓名直接 UnicodeDecodeError 并让 stdout 变成 None。
+                encoding="utf-8",
+                errors="replace",
                 timeout=20,
                 check=False,
             )
@@ -1324,6 +1386,45 @@ class AgentService:
         # <=0 视为关闭自动归档（事项继续留在活跃快照里）。
         return value
 
+    def _rebuild_sandboxes(self, *, apply: bool) -> sandbox.SandboxReport:
+        """按联系人项目列表对齐沙盒目录；启动和手动刷新共用。"""
+        report = sandbox.rebuild(
+            self.settings.workspace_root,
+            self.settings.sandbox_root,
+            ((contact.alias, contact.projects) for contact in self.settings.contacts),
+            apply=apply,
+        )
+        if report.errors:
+            for error in report.errors:
+                LOG.warning("sandbox issue: %s", error)
+        if apply:
+            for note in report.notes:
+                LOG.warning("sandbox note: %s", note)
+            LOG.info(
+                "sandbox ready root=%s contacts=%d errors=%d",
+                report.root,
+                len(report.contacts),
+                len(report.errors),
+            )
+        return report
+
+    def _authoritative_contact(self, contact: Contact) -> Contact:
+        """批量事件里的联系人可能来自历史恢复，这里以配置为准补全项目列表。"""
+        finder = getattr(self.settings, "contact_for", None)
+        if finder is None:
+            return contact
+        return finder(contact.identity) or contact
+
+    def _contact_projects(self, contact: Contact) -> tuple[str, ...]:
+        return tuple(getattr(self._authoritative_contact(contact), "projects", ()) or ())
+
+    def _contact_workspace(self, contact: Contact) -> Path:
+        """该联系人 agent 的工作目录：沙盒里挂载的主项目。"""
+        resolver = getattr(self.settings, "workspace_for", None)
+        if resolver is None:
+            return Path(str(getattr(self.settings, "workspace_root", ".")))
+        return resolver(self._authoritative_contact(contact))
+
     def _active_tasks_snapshot(
         self, contact: Contact, conversation_id: str
     ) -> str:
@@ -1422,8 +1523,10 @@ class AgentService:
             "contact_open_dingtalk_id": contact.open_dingtalk_id,
             "session_id": session_id,
             "prior_attempt": prior_attempt or "无",
-            "workspace_root": self.settings.workspace_root,
-            "worktree_root": self.settings.worktree_root,
+            "project_root": self._contact_workspace(contact),
+            "projects_json": json.dumps(
+                list(self._contact_projects(contact)), ensure_ascii=False
+            ),
             "recent_context_json": json.dumps(
                 list(recent_context), ensure_ascii=False, indent=2
             ),
@@ -1537,11 +1640,13 @@ class AgentService:
                 if stage_profile.profile.protocol == "pi-rpc"
                 else None
             )
+            workspace = self._contact_workspace(batch[0].contact)
             session = self.agent_runtime.open_session(
                 stage, session_id, prompt, session_dir, local_images,
                 model_override=model_override,
                 agent_override=agent_override,
                 task_context=task_context,
+                workspace=workspace,
             )
             if task_context is not None:
                 # 写入租约先于会话启动登记：task_tools.py 直连审计库的
@@ -2210,6 +2315,45 @@ def _validate_configuration(settings: Settings) -> list[str]:
         errors.append(f"agent workflow is invalid: {exc}")
     if not settings.workspace_root.exists():
         errors.append(f"workspace_root does not exist: {settings.workspace_root}")
+    errors.extend(_validate_sandbox(settings))
+    return errors
+
+
+def _validate_sandbox(settings: Settings) -> list[str]:
+    """校验联系人的项目配置；只检查不落盘，避免 doctor 改动文件系统。"""
+    errors: list[str] = []
+    if settings.sandbox_root == settings.workspace_root:
+        errors.append("sandbox_root must not be the same directory as workspace_root")
+    if settings.workspace_root.exists() and settings.sandbox_root.is_relative_to(
+        settings.workspace_root
+    ):
+        errors.append(
+            f"sandbox_root must live outside workspace_root: {settings.sandbox_root}"
+        )
+    # 沙盒是 agent 的 cwd，放在 state 里会把它送到 audit.sqlite3（含历史对话）旁边。
+    if settings.sandbox_root.is_relative_to(settings.state_dir):
+        errors.append(
+            f"sandbox_root must live outside state_dir: {settings.sandbox_root}"
+        )
+    for contact in settings.contacts:
+        for name in contact.projects:
+            target = settings.workspace_root / name
+            if not target.is_dir():
+                errors.append(
+                    f"{contact.alias}: project directory does not exist: {target}"
+                )
+    if not settings.workspace_root.exists():
+        return errors
+    report = sandbox.rebuild(
+        settings.workspace_root,
+        settings.sandbox_root,
+        ((contact.alias, contact.projects) for contact in settings.contacts),
+        apply=False,
+    )
+    for error in report.errors:
+        message = f"sandbox: {error}"
+        if message not in errors:
+            errors.append(message)
     return errors
 
 
@@ -2228,6 +2372,28 @@ async def _doctor(settings: Settings) -> int:
     for binary_name, binary in binaries.items():
         resolved = shutil.which(binary)
         checks.append((binary_name, bool(resolved), resolved or "not found"))
+    if settings.workspace_root.exists():
+        report = sandbox.rebuild(
+            settings.workspace_root,
+            settings.sandbox_root,
+            ((contact.alias, contact.projects) for contact in settings.contacts),
+            apply=False,
+        )
+        links = sum(len(item.links) for item in report.contacts)
+        pending = sum(
+            1
+            for item in report.contacts
+            for link in item.links
+            if link.state == sandbox.LINK_ABSENT
+        )
+        detail = (
+            f"root={report.root} contacts={len(report.contacts)} links={links}"
+        )
+        if pending:
+            detail += f" pending={pending}(将在启动时创建)"
+        if report.errors:
+            detail += f" issues={len(report.errors)}"
+        checks.append(("sandbox", report.healthy, detail))
     if not errors and shutil.which(str(settings.raw.get("dws", {}).get("binary", "dws"))):
         contact = settings.contacts[0]
         command = _event_consume_command(settings, contact, dry_run=True)

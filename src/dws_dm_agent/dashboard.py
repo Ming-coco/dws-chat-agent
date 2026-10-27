@@ -21,6 +21,7 @@ from .prompts import (
     validate_template_variables,
 )
 from .runners.runtime import AgentRuntime, SUPPORTED_PROTOCOLS
+from . import sandbox
 
 
 class ConfigBusyError(RuntimeError):
@@ -242,14 +243,14 @@ class AgentConfigStore:
     @staticmethod
     def _merge_contacts(
         submitted: Any, *, allow_empty: bool = False
-    ) -> list[dict[str, str]]:
+    ) -> list[dict[str, Any]]:
         if not isinstance(submitted, Sequence) or isinstance(submitted, (str, bytes)):
             raise ValueError("contacts must be a list")
-        contacts: list[dict[str, str]] = []
+        contacts: list[dict[str, Any]] = []
         for item in submitted:
             if not isinstance(item, Mapping):
                 raise ValueError("contact must be an object")
-            contact = {
+            contact: dict[str, Any] = {
                 "alias": str(item.get("alias") or "").strip(),
                 "display_name": str(item.get("display_name") or "").strip(),
                 "user_id": str(item.get("user_id") or "").strip(),
@@ -269,6 +270,9 @@ class AgentConfigStore:
                 contact[key] for key in ("alias", "display_name", "open_dingtalk_id")
             ):
                 raise ValueError("contact fields are missing or invalid")
+            contact["projects"] = AgentConfigStore._merge_projects(
+                item.get("projects")
+            )
             contacts.append(contact)
         if not contacts and not allow_empty:
             raise ValueError("at least one whitelist contact is required")
@@ -279,6 +283,30 @@ class AgentConfigStore:
             if len(values) != len(set(values)):
                 raise ValueError(f"duplicate contact {key}")
         return contacts
+
+    @staticmethod
+    def _merge_projects(submitted: Any) -> list[str]:
+        """项目名只能是 workspace_root 下的单层目录名，禁止路径与保留名。"""
+        if submitted is None:
+            return []
+        if isinstance(submitted, str):
+            submitted = [submitted]
+        if not isinstance(submitted, Sequence):
+            raise ValueError("contact projects must be a list")
+        if len(submitted) > 20:
+            raise ValueError("a contact cannot own more than 20 projects")
+        names: list[str] = []
+        for entry in submitted:
+            if not isinstance(entry, str):
+                raise ValueError("project name must be a string")
+            name = sandbox.normalize_project_name(entry)
+            if name is None:
+                raise ValueError(
+                    f"invalid project name (single directory, no path separators): {entry!r}"
+                )
+            if name not in names:
+                names.append(name)
+        return names
 
     @staticmethod
     def _merge_agents(current: Any, submitted: Any) -> dict[str, Any]:
@@ -436,6 +464,22 @@ class AgentConfigStore:
             AgentRuntime.from_config(
                 check, self.config_path, self.workspace_root
             )
+        self._validate_contact_projects(candidate.get("contacts"))
+
+    def _validate_contact_projects(self, contacts: Any) -> None:
+        """保存前确认每个项目目录真实存在，避免错误拖到消息处理阶段才暴露。"""
+        if not isinstance(contacts, Sequence) or isinstance(contacts, (str, bytes)):
+            return
+        for item in contacts:
+            if not isinstance(item, Mapping):
+                continue
+            alias = str(item.get("alias") or "?")
+            for name in item.get("projects") or ():
+                target = self.workspace_root / str(name)
+                if not target.is_dir():
+                    raise ValueError(
+                        f"{alias} 的项目目录不存在：{target}"
+                    )
 
     @staticmethod
     def _prompt_kinds(workflows: Mapping[str, Any]) -> dict[str, set[str]]:
@@ -502,6 +546,9 @@ class DashboardServer:
         port: int = 8765,
         config_store: AgentConfigStore | None = None,
         contact_search: Callable[[str], list[dict[str, Any]]] | None = None,
+        project_lister: Callable[[], list[str]] | None = None,
+        sandbox_status: Callable[[], dict[str, Any]] | None = None,
+        sandbox_refresh: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.database = database.resolve()
         self.runtime_state = runtime_state.resolve()
@@ -519,6 +566,9 @@ class DashboardServer:
         self.port = port
         self.config_store = config_store
         self.contact_search = contact_search
+        self.project_lister = project_lister
+        self.sandbox_status = sandbox_status
+        self.sandbox_refresh = sandbox_refresh
         self.server: LocalThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
 
@@ -642,11 +692,30 @@ class DashboardServer:
                         return
                     self._send_json({"results": results})
                     return
+                if path == "/api/projects" and dashboard.project_lister is not None:
+                    try:
+                        projects = dashboard.project_lister()
+                    except Exception as exc:
+                        self._send_json({"error": f"读取项目目录失败：{exc}"}, status=500)
+                        return
+                    self._send_json({"projects": projects})
+                    return
+                if path == "/api/sandbox" and dashboard.sandbox_status is not None:
+                    try:
+                        report = dashboard.sandbox_status()
+                    except Exception as exc:
+                        self._send_json({"error": f"读取沙盒状态失败：{exc}"}, status=500)
+                        return
+                    self._send_json(report)
+                    return
                 self.send_error(404)
 
             def do_POST(self) -> None:
                 path = self.path.split("?", 1)[0]
-                if path != "/api/config" or dashboard.config_store is None:
+                if dashboard.config_store is None or path not in {
+                    "/api/config",
+                    "/api/sandbox/rebuild",
+                }:
                     self.send_error(404)
                     return
                 origin = self.headers.get("Origin")
@@ -656,6 +725,17 @@ class DashboardServer:
                 }
                 if origin and origin not in allowed_origins:
                     self._send_json({"error": "不允许的请求来源"}, status=403)
+                    return
+                if path == "/api/sandbox/rebuild":
+                    if dashboard.sandbox_refresh is None:
+                        self.send_error(404)
+                        return
+                    try:
+                        report = dashboard.sandbox_refresh()
+                    except Exception as exc:
+                        self._send_json({"error": f"重建沙盒失败：{exc}"}, status=500)
+                        return
+                    self._send_json(report)
                     return
                 try:
                     length = int(self.headers.get("Content-Length") or 0)

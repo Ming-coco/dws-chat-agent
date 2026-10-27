@@ -11,7 +11,10 @@ STAGE_PROMPT_VARIABLES = frozenset(
         "self_name", "agent_name", "worker_name", "contact_name",
         "contact_alias", "contact_user_id", "contact_open_dingtalk_id",
         "session_id", "prior_attempt",
-        "workspace_root", "worktree_root", "recent_context_json",
+        # project_root 是 agent 的 cwd（沙盒内主项目）；projects_json 只含
+        # 该联系人自己负责的项目。刻意不暴露 workspace_root / worktree_root：
+        # 它们是容器路径，写进提示词等于提示模型去浏览别的项目。
+        "project_root", "projects_json", "recent_context_json",
         "current_messages_json", "active_tasks_json", "now",
     }
 )
