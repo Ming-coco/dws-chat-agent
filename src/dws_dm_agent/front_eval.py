@@ -87,8 +87,8 @@ async def _evaluate_case(
                 "contact_open_dingtalk_id": "front-eval-open-id",
                 "session_id": session_id,
                 "prior_attempt": "无",
-                "workspace_root": settings.workspace_root,
-                "worktree_root": settings.worktree_root,
+                "project_root": settings.workspace_root,
+                "projects_json": "[]",
                 "recent_context_json": json.dumps(
                     recent, ensure_ascii=False, indent=2
                 ),

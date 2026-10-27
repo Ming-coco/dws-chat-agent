@@ -36,6 +36,9 @@ class Contact:
     display_name: str
     user_id: str
     open_dingtalk_id: str
+    # 该联系人负责的项目目录名（workspace_root 下的子目录）。
+    # 第一个是 agent 的默认工作目录；空表示沿用 workspace_root。
+    projects: tuple[str, ...] = ()
 
     @property
     def identity(self) -> str:
