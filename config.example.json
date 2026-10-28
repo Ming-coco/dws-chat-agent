@@ -7,6 +7,7 @@
     "open_dingtalk_id": "${DWS_CHAT_AGENT_SELF_OPEN_ID}"
   },
   "contacts": "${DWS_CHAT_AGENT_CONTACTS_JSON}",
+  "groups": [],
   "quiet_window_seconds": 5,
   "human_cooldown_seconds": 600,
   "history_limit": 80,

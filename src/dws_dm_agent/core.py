@@ -39,11 +39,35 @@ class Contact:
     # 该联系人负责的项目目录名（workspace_root 下的子目录）。
     # 第一个是 agent 的默认工作目录；空表示沿用 workspace_root。
     projects: tuple[str, ...] = ()
+    # 非空表示这是一个群聊目标：发送与拉历史都走 openConversationId，
+    # 不再按人投递。群聊没有 user_id / open_dingtalk_id。
+    conversation_id: str = ""
+    # 群里只响应这些人的 @（openDingTalkId 或显示名）；空表示群内任何人。
+    allowed_senders: tuple[str, ...] = ()
+
+    @property
+    def is_group(self) -> bool:
+        return bool(self.conversation_id)
 
     @property
     def identity(self) -> str:
         """Stable local key when DingTalk does not expose a userId."""
+        if self.conversation_id:
+            # 群和目标用户的命名空间必须分开，避免 alias 撞上真实 userId。
+            return f"group:{self.conversation_id}"
         return self.user_id or self.open_dingtalk_id
+
+    def accepts_sender(self, sender_open_id: str, sender_name: str) -> bool:
+        """群里的发言人是否允许触发；单聊联络人恒为 True（另有身份校验）。"""
+        if not self.is_group:
+            return True
+        if not self.allowed_senders:
+            return True
+        allowed = {value.strip().casefold() for value in self.allowed_senders}
+        return (
+            sender_open_id.strip().casefold() in allowed
+            or sender_name.strip().casefold() in allowed
+        )
 
 
 @dataclass(frozen=True)
@@ -54,6 +78,13 @@ class IncomingEvent:
     contact: Contact
     content: str
     created_at: datetime
+    # 群聊里 contact 是整个群，真正的发言人在这里；单聊留空表示就是 contact 本人。
+    sender_open_dingtalk_id: str = ""
+    sender_name: str = ""
+
+    @property
+    def sender_label(self) -> str:
+        return self.sender_name or self.contact.display_name
 
 
 @dataclass(frozen=True)
@@ -189,7 +220,12 @@ def _extract_content(value: Any) -> str:
     return str(value).strip()
 
 
-def parse_dws_event(line: str, contact: Contact, timezone: tzinfo) -> IncomingEvent | None:
+def parse_dws_event(
+    line: str,
+    contact: Contact,
+    timezone: tzinfo,
+    self_open_id: str = "",
+) -> IncomingEvent | None:
     try:
         outer = json.loads(line)
     except json.JSONDecodeError:
@@ -200,17 +236,26 @@ def parse_dws_event(line: str, contact: Contact, timezone: tzinfo) -> IncomingEv
     sender_id = str(
         _deep_value(payload, {"sender_open_dingtalk_id", "senderOpenDingTalkId", "senderId"}) or ""
     )
-    if sender_id and sender_id != contact.open_dingtalk_id:
+    sender_name = str(_deep_value(payload, {"sender", "sender_name", "senderName"}) or "")
+    conversation_id = str(
+        _deep_value(payload, {"conversation_id", "conversationId", "openConversationId"})
+        or (contact.conversation_id if contact.is_group else f"dm:{contact.identity}")
+    )
+    if contact.is_group:
+        # 一个订阅覆盖所有群，先按会话 id 归到登记的群，再按发言人筛选。
+        if conversation_id != contact.conversation_id:
+            return None
+        if sender_id and sender_id == self_open_id:
+            return None
+        if not contact.accepts_sender(sender_id, sender_name):
+            return None
+    elif sender_id and sender_id != contact.open_dingtalk_id:
         return None
     content = _extract_content(_deep_value(payload, {"content", "text", "messageContent"}))
     if not content:
         return None
     message_id = str(
         _deep_value(payload, {"message_id", "messageId", "openMessageId", "msgId"}) or ""
-    )
-    conversation_id = str(
-        _deep_value(payload, {"conversation_id", "conversationId", "openConversationId"})
-        or f"dm:{contact.identity}"
     )
     event_id = str(_deep_value(outer, {"event_id", "eventId", "id"}) or "")
     if not message_id:
@@ -225,6 +270,8 @@ def parse_dws_event(line: str, contact: Contact, timezone: tzinfo) -> IncomingEv
         contact=contact,
         content=content,
         created_at=parse_local_datetime(created_raw, timezone),
+        sender_open_dingtalk_id=sender_id,
+        sender_name=sender_name,
     )
 
 

@@ -71,6 +71,13 @@ _STREAM_CARD_BIND_TIMEOUT_SECONDS = 6.0
 _TASK_SNAPSHOT_LIMIT = 8
 # 事项无实质更新后的归档天数（task_memory.inactive_days 可覆盖）。
 _TASK_INACTIVE_DAYS_DEFAULT = 2
+# 只在群聊时注入的额外约束：群里是公开场合，与单聊的措辞尺度不同。
+_GROUP_REMINDER = (
+    "这是群聊，不是私聊。你的回复会显示给群里所有人，是公开可见的发言："
+    "不要提及其他联系人、其他项目、内部编号或只有私下才该说的话；"
+    "不要写成只对一个人说话的口吻；需要指向具体某人时用发言人的名字。"
+    "群里的追问可能来自不同的人，以最新一条被 @ 的消息为准判断当前对象。"
+)
 
 
 def _event_consume_command(
@@ -91,6 +98,84 @@ def _event_consume_command(
     if dry_run:
         command.append("--dry-run")
     return command
+
+
+def _mention_consume_command(settings: Settings, *, dry_run: bool = False) -> list[str]:
+    """订阅「被 @ 的消息」。
+
+    这个 EventKey 不接受目标参数，一条订阅就覆盖所有群；因此必须在解析时
+    按 conversation_id 过滤，只保留登记过的群。@所有人 也会落进这个事件，
+    所以「只登记需要的群」是唯一的防线。
+    """
+    command = [
+        str(settings.raw.get("dws", {}).get("binary", "dws")),
+        "event",
+        "consume",
+        "user_im_message_receive_at",
+        "--flatten",
+        "--format",
+        "ndjson",
+        "--ephemeral",
+    ]
+    profile = settings.raw.get("dws", {}).get("profile")
+    if profile:
+        command.extend(["--profile", str(profile)])
+    if dry_run:
+        command.append("--dry-run")
+    return command
+
+
+def _groups(settings: Settings) -> tuple[Contact, ...]:
+    """群聊目标；同样对 SimpleNamespace 容错。"""
+    return tuple(getattr(settings, "groups", ()) or ())
+
+
+def _group_for_conversation(settings: Settings, conversation_id: str) -> Contact | None:
+    finder = getattr(settings, "group_for_conversation", None)
+    if callable(finder):
+        return finder(conversation_id)
+    for group in _groups(settings):
+        if group.conversation_id == conversation_id:
+            return group
+    return None
+
+
+def _targets(settings: Settings) -> tuple[Contact, ...]:
+    """单聊联系人与群聊目标的并集。
+
+    单元测试会用 SimpleNamespace 伪造 settings，所以这里必须容错，
+    不能直接访问 settings.targets。
+    """
+    values = getattr(settings, "targets", None)
+    if values is not None:
+        return tuple(values)
+    contacts = tuple(getattr(settings, "contacts", ()) or ())
+    groups = tuple(getattr(settings, "groups", ()) or ())
+    return (*contacts, *groups)
+
+
+def _event_conversation_id(line: str) -> str:
+    """从 @ 事件里取出会话 id，用来判断是否属于登记的群。"""
+    try:
+        outer = json.loads(line)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(outer, Mapping):
+        return ""
+    payload = outer.get("data")
+    if isinstance(payload, str):
+        # dws 某些路径把 data 再序列化成字符串，这里跟着解开一层。
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            payload = None
+    sources = [payload, outer] if isinstance(payload, Mapping) else [outer]
+    for source in sources:
+        for key in ("conversation_id", "conversationId", "openConversationId"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
 
 
 def _image_resources(
@@ -229,6 +314,8 @@ class AgentService:
         self.outbox_dispatcher: asyncio.Task[None] | None = None
         self.outbox_wakeup = asyncio.Event()
         self.listener_processes: set[asyncio.subprocess.Process] = set()
+        # 未登记会话（含 @所有人）只记一次，避免日志被刷屏。
+        self._ignored_conversations: set[str] = set()
         self.stop_event = asyncio.Event()
         self.capacity = int(settings.raw.get("max_parallel_conversations", 2))
         self.global_slots = asyncio.Semaphore(self.capacity)
@@ -242,7 +329,7 @@ class AgentService:
             settings.state_dir / "audit.sqlite3",
             self.runtime_path,
             WEB_DIR / "dashboard.html",
-            {item.identity: item.display_name for item in settings.contacts},
+            {item.identity: item.display_name for item in settings.targets},
             settings.timezone,
             config_store=AgentConfigStore(
                 settings.config_path,
@@ -260,8 +347,19 @@ class AgentService:
                     }
                     for item in settings.contacts
                 ],
+                groups=[
+                    {
+                        "alias": item.alias,
+                        "display_name": item.display_name,
+                        "open_conversation_id": item.conversation_id,
+                        "projects": list(item.projects),
+                        "allowed_senders": list(item.allowed_senders),
+                    }
+                    for item in settings.groups
+                ],
             ),
             contact_search=self._search_dingtalk_contacts,
+            group_lister=self._list_dingtalk_groups,
             project_lister=self._list_projects,
             sandbox_status=self._sandbox_status,
             sandbox_refresh=self._refresh_sandboxes,
@@ -302,15 +400,15 @@ class AgentService:
         report = sandbox.rebuild(
             disk_settings.workspace_root,
             disk_settings.sandbox_root,
-            ((item.alias, item.projects) for item in disk_settings.contacts),
+            ((target.alias, target.projects) for target in _targets(disk_settings)),
             apply=True,
         )
         payload = report.as_dict()
         running = tuple(
-            (item.alias, tuple(item.projects)) for item in self.settings.contacts
+            (item.alias, tuple(item.projects)) for item in _targets(self.settings)
         )
         saved = tuple(
-            (item.alias, tuple(item.projects)) for item in disk_settings.contacts
+            (item.alias, tuple(item.projects)) for item in _targets(disk_settings)
         )
         if running != saved:
             payload.setdefault("notes", []).append(
@@ -349,6 +447,10 @@ class AgentService:
             asyncio.create_task(self._listen_contact(contact), name=f"listen:{contact.alias}")
             for contact in self.settings.contacts
         ]
+        if _groups(self.settings):
+            self.listeners.append(
+                asyncio.create_task(self._listen_mentions(), name="listen:mentions")
+            )
         self.history_reconciler = asyncio.create_task(
             self._reconcile_history_loop(), name="history-reconciler"
         )
@@ -390,9 +492,10 @@ class AgentService:
                 LOG.warning("queued event recovery failed contact=%s error=%s", contact.alias, exc)
                 return
             for message in history:
-                if (
-                    message.message_id not in pending
-                    or message.sender_open_dingtalk_id != contact.open_dingtalk_id
+                if message.message_id not in pending:
+                    continue
+                if not self._history_sender_allowed(
+                    contact, message.sender_open_dingtalk_id, message.sender
                 ):
                     continue
                 self._enqueue(
@@ -403,6 +506,8 @@ class AgentService:
                         contact=contact,
                         content=message.content,
                         created_at=message.created_at,
+                        sender_open_dingtalk_id=message.sender_open_dingtalk_id,
+                        sender_name=message.sender,
                     )
                 )
                 pending.remove(message.message_id)
@@ -414,7 +519,7 @@ class AgentService:
                     len(pending),
                 )
 
-        await asyncio.gather(*(recover(contact) for contact in self.settings.contacts))
+        await asyncio.gather(*(recover(contact) for contact in _targets(self.settings)))
 
     async def _reconcile_missing_events(
         self, contacts: Sequence[Contact] | None = None
@@ -468,6 +573,8 @@ class AgentService:
                     recovered,
                 )
 
+        # 群聊刻意不参与历史补齐：群历史里所有消息都在，无法区分「@ 我的」
+        # 与「别人聊天」，按历史补会把闲聊当成提问。群聊只依赖 @ 事件通道。
         targets = contacts if contacts is not None else self.settings.contacts
         await asyncio.gather(*(reconcile(contact) for contact in targets))
 
@@ -546,6 +653,68 @@ class AgentService:
             )
         return results
 
+    def _list_dingtalk_groups(self) -> list[dict[str, Any]]:
+        """列出当前账号所在的群，供设置页挑选登记（避免手抄 cid）。"""
+        command = [
+            str(self.settings.raw.get("dws", {}).get("binary", "dws")),
+            "chat",
+            "group",
+            "list-all",
+            "--format",
+            "json",
+            "--timeout",
+            "20",
+        ]
+        profile = self.settings.raw.get("dws", {}).get("profile")
+        if profile:
+            command.extend(["--profile", str(profile)])
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("获取群列表超时") from exc
+        if completed.returncode:
+            code = _find_dws_error_code(completed.stderr) or f"exit {completed.returncode}"
+            raise RuntimeError(code)
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("DWS 返回了无效 JSON") from exc
+        result = payload.get("result", {}) if isinstance(payload, Mapping) else {}
+        groups = result.get("groups", []) if isinstance(result, Mapping) else []
+        if not isinstance(groups, list):
+            raise RuntimeError("DWS 返回了无效群列表")
+        registered = {group.conversation_id for group in _groups(self.settings)}
+        items = []
+        for item in groups:
+            if not isinstance(item, Mapping):
+                continue
+            conversation_id = str(item.get("openConversationId") or "").strip()
+            title = sanitize_text(item.get("title"), 120)
+            if not conversation_id or not title:
+                continue
+            try:
+                member_count = int(item.get("memberCount") or 0)
+            except (TypeError, ValueError):
+                member_count = 0
+            items.append(
+                {
+                    "title": title,
+                    "openConversationId": conversation_id,
+                    "memberCount": member_count,
+                    "registered": conversation_id in registered,
+                }
+            )
+        items.sort(key=lambda entry: (-entry["memberCount"], entry["title"]))
+        return items[:200]
+
     def _apply_agent_configuration(self, raw: Mapping[str, Any]) -> None:
         env = _read_env_file(self.settings.env_path)
         env.update(os.environ)
@@ -594,7 +763,8 @@ class AgentService:
         payload = {
             "pid": os.getpid(),
             "mode": self.mode,
-            "contacts": len(self.settings.contacts),
+            "contacts": len(_targets(self.settings)),
+            "groups": len(_groups(self.settings)),
             "capacity": self.capacity,
             "workflow": self.agent_runtime.describe(),
             "heartbeatAt": datetime.now(self.settings.timezone).isoformat(),
@@ -686,6 +856,8 @@ class AgentService:
             try:
                 process = await asyncio.create_subprocess_exec(
                     *command,
+                    # 同 _listen_mentions：consume 把 stdin EOF 当退出信号。
+                    stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
@@ -726,6 +898,89 @@ class AgentService:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30)
 
+    async def _listen_mentions(self) -> None:
+        """消费「被 @ 的消息」，按会话 id 路由到登记过的群。
+
+        一个订阅覆盖所有群，所以这里必须是唯一的群入口：未登记的群、未授权
+        的发言人、自己发的消息都在这里被丢掉，不进入队列也不落库。
+        """
+        if not _groups(self.settings):
+            return
+        delay = 1.0
+        while not self.stop_event.is_set():
+            command = _mention_consume_command(self.settings)
+            process: asyncio.subprocess.Process | None = None
+            stderr_task: asyncio.Task[None] | None = None
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    # dws consume 把 stdin EOF 当作退出信号。这里显式持有一个
+                    # 不关闭的管道，避免服务被以 stdin 已关闭的方式拉起时
+                    # 订阅一就绪就退出。
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                self.listener_processes.add(process)
+                stderr_task = asyncio.create_task(
+                    self._drain_listener_stderr(process, None)
+                )
+                assert process.stdout is not None
+                async for raw_line in process.stdout:
+                    event = self._parse_mention(raw_line)
+                    if event is None:
+                        continue
+                    if not self.store.claim_event(event) and not self.store.event_is_pending(
+                        event.message_id
+                    ):
+                        continue
+                    self._enqueue(event)
+                return_code = await process.wait()
+                if not self.stop_event.is_set():
+                    LOG.warning("mention listener exited code=%s", return_code)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOG.error("mention listener error=%s", exc)
+            finally:
+                if stderr_task:
+                    stderr_task.cancel()
+                    await asyncio.gather(stderr_task, return_exceptions=True)
+                if process is not None:
+                    self.listener_processes.discard(process)
+                    if process.returncode is None:
+                        process.terminate()
+                    try:
+                        await asyncio.wait_for(process.communicate(), timeout=10)
+                    except TimeoutError:
+                        LOG.error("mention listener did not stop after SIGTERM")
+            if not self.stop_event.is_set():
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30)
+
+    def _parse_mention(self, raw_line: bytes) -> IncomingEvent | None:
+        """把一条 @ 事件归到登记的群；不认识的会话直接丢弃。"""
+        line = raw_line.decode("utf-8", errors="replace")
+        conversation_id = _event_conversation_id(line)
+        if not conversation_id:
+            return None
+        group = _group_for_conversation(self.settings, conversation_id)
+        if group is None:
+            # @所有人 和未登记群都会到这里；只记一次，避免刷屏。
+            self._note_unregistered_conversation(conversation_id)
+            return None
+        return parse_dws_event(
+            line, group, self.settings.timezone, self.settings.self_open_id
+        )
+
+    def _note_unregistered_conversation(self, conversation_id: str) -> None:
+        if conversation_id in self._ignored_conversations:
+            return
+        self._ignored_conversations.add(conversation_id)
+        LOG.info(
+            "ignoring mentions from unregistered conversation=%s", conversation_id
+        )
+
     async def _poll_open_id_contact(self, contact: Contact) -> None:
         # ponytail: open-id-only contacts poll until DWS event consume accepts
         # openDingTalkId; replace this with a native subscription when available.
@@ -742,17 +997,18 @@ class AgentService:
             await self._reconcile_missing_events((contact,))
 
     async def _drain_listener_stderr(
-        self, process: asyncio.subprocess.Process, contact: Contact
+        self, process: asyncio.subprocess.Process, contact: Contact | None
     ) -> None:
         assert process.stderr is not None
+        label = contact.alias if contact is not None else "mentions"
         async for raw_line in process.stderr:
             line = raw_line.decode("utf-8", errors="replace").strip()
             if "ready" in line.lower():
-                LOG.info("listener ready contact=%s", contact.alias)
+                LOG.info("listener ready target=%s", label)
             elif line:
                 LOG.debug(
-                    "listener status contact=%s detail_hash=%s detail_length=%d",
-                    contact.alias,
+                    "listener status target=%s detail_hash=%s detail_length=%d",
+                    label,
                     sha256_text(line)[:12],
                     len(line),
                 )
@@ -874,6 +1130,22 @@ class AgentService:
     ) -> bool:
         return human_owns_conversation(latest_manual, earliest_incoming, self.settings.cooldown)
 
+    def _history_sender_allowed(
+        self, contact: Contact, sender_open_id: str, sender_name: str
+    ) -> bool:
+        """历史消息算不算该目标发来的。
+
+        单聊只有联络人本人；群聊是群成员，但必须排除自己（自己和 agent 的
+        消息走 manual/outgoing 逻辑，不能再当成新的提问）。
+        """
+        if sender_open_id and sender_open_id == getattr(
+            self.settings, "self_open_id", ""
+        ):
+            return False
+        if contact.is_group:
+            return contact.accepts_sender(sender_open_id, sender_name)
+        return sender_open_id == contact.open_dingtalk_id
+
     def _history_events(
         self,
         contact: Contact,
@@ -881,9 +1153,15 @@ class AgentService:
         history: Sequence[HistoryMessage],
         not_before: datetime,
     ) -> list[IncomingEvent]:
+        # 群聊刻意返回空：群里所有消息都在历史里，历史不带「是否 @ 我」，
+        # 按历史补就等于把群里的闲聊当成新提问。群聊只认 @ 事件通道。
+        if contact.is_group:
+            return []
         result: list[IncomingEvent] = []
         for message in history:
-            if message.sender_open_dingtalk_id != contact.open_dingtalk_id:
+            if not self._history_sender_allowed(
+                contact, message.sender_open_dingtalk_id, message.sender
+            ):
                 continue
             if message.created_at < not_before - timedelta(seconds=2):
                 continue
@@ -895,6 +1173,8 @@ class AgentService:
                     contact=contact,
                     content=message.content,
                     created_at=message.created_at,
+                    sender_open_dingtalk_id=message.sender_open_dingtalk_id,
+                    sender_name=message.sender,
                 )
             )
         return result
@@ -916,10 +1196,13 @@ class AgentService:
                 continue
             if message.conversation_id != conversation_id:
                 continue
-            if message.sender_open_dingtalk_id == contact.open_dingtalk_id:
-                role = "contact"
-            elif message.sender_open_dingtalk_id == self.settings.self_open_id:
+            if message.sender_open_dingtalk_id == self.settings.self_open_id:
                 role = "agent" if self.store.is_agent_outgoing(message) else "operator"
+            elif self._history_sender_allowed(
+                contact, message.sender_open_dingtalk_id, message.sender
+            ):
+                # 群聊里发言人是某个群成员，展示真实姓名而不是群名。
+                role = "contact"
             else:
                 continue
             execution = ""
@@ -928,7 +1211,11 @@ class AgentService:
             messages.append(
                 {
                     "role": role,
-                    "sender": contact.display_name if role == "contact" else getattr(self.settings, "self_name", ""),
+                    "sender": (
+                        (message.sender or contact.display_name)
+                        if role == "contact"
+                        else getattr(self.settings, "self_name", "")
+                    ),
                     "execution": execution,
                     "time": message.created_at.isoformat(),
                     "message_id": message.message_id,
@@ -1387,11 +1674,11 @@ class AgentService:
         return value
 
     def _rebuild_sandboxes(self, *, apply: bool) -> sandbox.SandboxReport:
-        """按联系人项目列表对齐沙盒目录；启动和手动刷新共用。"""
+        """按联系人/群的项目列表对齐沙盒目录；启动和手动刷新共用。"""
         report = sandbox.rebuild(
             self.settings.workspace_root,
             self.settings.sandbox_root,
-            ((contact.alias, contact.projects) for contact in self.settings.contacts),
+            ((target.alias, target.projects) for target in _targets(self.settings)),
             apply=apply,
         )
         if report.errors:
@@ -1505,7 +1792,7 @@ class AgentService:
         messages = [
             {
                 "time": item.created_at.isoformat(),
-                "sender": item.contact.display_name,
+                "sender": item.sender_label,
                 "role": "contact",
                 "conversation_id": item.conversation_id,
                 "message_id": item.message_id,
@@ -1519,6 +1806,8 @@ class AgentService:
             "worker_name": self.agent_runtime.profile_name("worker"),
             "contact_name": contact.display_name,
             "contact_alias": contact.alias,
+            "conversation_kind": "群聊" if contact.is_group else "单聊",
+            "group_reminder": _GROUP_REMINDER if contact.is_group else "",
             "contact_user_id": contact.user_id,
             "contact_open_dingtalk_id": contact.open_dingtalk_id,
             "session_id": session_id,
@@ -1778,6 +2067,9 @@ class AgentService:
                             "contact_name": batch[0].contact.display_name,
                             "contact_alias": batch[0].contact.alias,
                             "self_name": self.settings.self_name,
+                            "conversation_kind": (
+                                "群聊" if batch[0].contact.is_group else "单聊"
+                            ),
                         }
                     )
                     steered = (
@@ -2186,7 +2478,7 @@ class AgentService:
         contact = next(
             (
                 item
-                for item in self.settings.contacts
+                for item in _targets(self.settings)
                 if item.identity == row["contact_user_id"]
             ),
             None,
@@ -2294,15 +2586,26 @@ class AgentService:
 
 def _validate_configuration(settings: Settings) -> list[str]:
     errors: list[str] = []
-    aliases = [item.alias for item in settings.contacts]
+    aliases = [item.alias for item in _targets(settings)]
     user_ids = [item.user_id for item in settings.contacts if item.user_id]
     open_ids = [item.open_dingtalk_id for item in settings.contacts]
-    if not settings.contacts:
-        errors.append("contacts must not be empty")
+    conversation_ids = [item.conversation_id for item in _groups(settings)]
+    # 群聊也可以单独使用：只登记群、不登记单聊是合法配置。
+    if not _targets(settings):
+        errors.append("contacts and groups must not both be empty")
+    # 沙盒目录按 alias 命名，群和联系人必须共享同一个命名空间。
     if len(set(aliases)) != len(aliases):
-        errors.append("duplicate contact alias")
+        errors.append("duplicate contact/group alias")
     if len(set(user_ids)) != len(user_ids) or len(set(open_ids)) != len(open_ids):
         errors.append("duplicate DingTalk identity")
+    if len(set(conversation_ids)) != len(conversation_ids):
+        errors.append("duplicate group conversation id")
+    if any(not item.conversation_id for item in _groups(settings)):
+        errors.append("group entry is missing open_conversation_id")
+    # 群和联系人共用 alias 命名空间（沙盒目录按 alias 建），跨两张表也要查重。
+    contact_aliases = {item.alias for item in _targets(settings) if not item.is_group}
+    if contact_aliases & {item.alias for item in _groups(settings)}:
+        errors.append("group alias collides with a contact alias")
     if settings.self_open_id in open_ids:
         errors.append("self identity appears in listener whitelist")
     if settings.quiet_window <= 0 or settings.cooldown < 0:
@@ -2335,7 +2638,7 @@ def _validate_sandbox(settings: Settings) -> list[str]:
         errors.append(
             f"sandbox_root must live outside state_dir: {settings.sandbox_root}"
         )
-    for contact in settings.contacts:
+    for contact in _targets(settings):
         for name in contact.projects:
             target = settings.workspace_root / name
             if not target.is_dir():
@@ -2347,7 +2650,7 @@ def _validate_sandbox(settings: Settings) -> list[str]:
     report = sandbox.rebuild(
         settings.workspace_root,
         settings.sandbox_root,
-        ((contact.alias, contact.projects) for contact in settings.contacts),
+        ((contact.alias, contact.projects) for contact in _targets(settings)),
         apply=False,
     )
     for error in report.errors:

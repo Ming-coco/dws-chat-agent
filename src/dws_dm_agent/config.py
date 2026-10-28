@@ -36,6 +36,7 @@ class Settings:
     env_path: Path
     timezone: tzinfo
     contacts: tuple[Contact, ...]
+    groups: tuple[Contact, ...]
     state_dir: Path
     workspace_root: Path
     worktree_root: Path
@@ -45,10 +46,21 @@ class Settings:
     def mode(self) -> str:
         return str(self.raw.get("mode", "shadow"))
 
+    @property
+    def targets(self) -> tuple[Contact, ...]:
+        """单聊联系人与群聊目标的并集：沙盒、面板等按「目标」处理的场景用它。"""
+        return (*self.contacts, *self.groups)
+
     def contact_for(self, identity: str) -> Contact | None:
-        for contact in self.contacts:
+        for contact in (*self.contacts, *self.groups):
             if contact.identity == identity:
                 return contact
+        return None
+
+    def group_for_conversation(self, conversation_id: str) -> Contact | None:
+        for group in self.groups:
+            if group.conversation_id == conversation_id:
+                return group
         return None
 
     def workspace_for(self, contact: Contact | None) -> Path:
@@ -141,6 +153,51 @@ def _contact_projects(item: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _text_list(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return ()
+    items: list[str] = []
+    for entry in value:
+        if not isinstance(entry, str):
+            continue
+        text = entry.strip()
+        if text and text not in items:
+            items.append(text)
+    return tuple(items)
+
+
+def groups_from_raw(items: Any) -> tuple[Contact, ...]:
+    """把配置里的 groups 列表转成群聊目标。
+
+    群没有 userId，身份就是 openConversationId；项目列表语义与联系人一致，
+    所以复用同一个 Contact 结构，沙盒那套可以原样工作。
+    """
+    if not isinstance(items, list):
+        return ()
+    groups: list[Contact] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        conversation_id = str(item.get("open_conversation_id") or "").strip()
+        alias = str(item.get("alias") or "").strip()
+        if not conversation_id or not alias:
+            continue
+        groups.append(
+            Contact(
+                alias=alias,
+                display_name=str(item.get("display_name") or item.get("title") or alias),
+                user_id="",
+                open_dingtalk_id="",
+                projects=_contact_projects(item),
+                conversation_id=conversation_id,
+                allowed_senders=_text_list(item.get("allowed_senders")),
+            )
+        )
+    return tuple(groups)
+
+
 def contacts_from_raw(items: Any) -> tuple[Contact, ...]:
     """把配置里的 contacts 列表转成 Contact 元组（含项目列表）。
 
@@ -174,6 +231,7 @@ def load_settings(path: Path, env_path: Path = DEFAULT_ENV) -> Settings:
     raw = _resolve_env(json.loads(path.read_text(encoding="utf-8")), env)
     timezone = _load_timezone(str(raw.get("timezone", "Asia/Shanghai")))
     contacts = contacts_from_raw(raw["contacts"])
+    groups = groups_from_raw(raw.get("groups"))
     state_value = Path(str(raw.get("state_dir", "state")))
     state_dir = state_value if state_value.is_absolute() else path.parent / state_value
     workspace_root = Path(str(raw["workspace_root"])).expanduser().resolve()
@@ -190,6 +248,7 @@ def load_settings(path: Path, env_path: Path = DEFAULT_ENV) -> Settings:
         env_path=env_path.resolve(),
         timezone=timezone,
         contacts=contacts,
+        groups=groups,
         state_dir=state_dir.resolve(),
         workspace_root=workspace_root,
         worktree_root=worktree_root,

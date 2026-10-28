@@ -1000,6 +1000,149 @@
       editor.append(card);
     }
 
+    let groupOptions = null;
+
+    async function loadGroups(force) {
+      if (groupOptions && !force) return groupOptions;
+      const response = await fetch("/api/groups", {cache:"no-store"});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      groupOptions = data.groups || [];
+      return groupOptions;
+    }
+
+    function groupAlias(title, groups) {
+      const base = String(title || "群聊").trim().slice(0, 40) || "群聊";
+      let alias = base;
+      let suffix = 2;
+      while (groups.some(item => item.alias === alias)) alias = `${base}-${suffix++}`;
+      return alias;
+    }
+
+    function renderGroups(editor) {
+      const groups = agentConfig.groups || (agentConfig.groups = []);
+      const card = node("section", "config-card wide");
+      card.append(node("h2", "", `群聊 · ${groups.length}`));
+      const manager = node("div", "contact-manager");
+      const list = node("div", "contact-list");
+
+      groups.forEach((group, index) => {
+        const row = node("div", "contact-row");
+        const remove = node("button", "danger", "移除");
+        remove.type = "button";
+        remove.title = "从群聊白名单移除";
+        remove.addEventListener("click", () => {
+          groups.splice(index, 1);
+          renderConfig();
+          dirtyConfig();
+        });
+
+        const meta = node("div", "contact-summary");
+        meta.append(
+          node("strong", "", group.display_name || group.alias || "未命名群"),
+          node("span", "", `群 ID：${group.open_conversation_id || "-"} · 别名：${group.alias || "-"}`)
+        );
+
+        const senders = textControl(
+          (group.allowed_senders || []).join(", "),
+          value => {
+            group.allowed_senders = value.split(/[,，]/).map(part => part.trim()).filter(Boolean);
+          }
+        );
+        senders.placeholder = "留空＝群内任何人 @ 都回；填了就只认这些人";
+
+        row.append(
+          meta,
+          field("显示名称", textControl(group.display_name, value => { group.display_name = value; })),
+          field("别名", textControl(group.alias, value => { group.alias = value; })),
+          field("允许触发的人", senders, true),
+          projectPicker(group, () => { dirtyConfig(); }),
+          remove
+        );
+        list.append(row);
+      });
+
+      if (!groups.length) {
+        list.append(node("p", "config-note", "还没有登记群。未登记的群即使被 @ 也不会响应——这是唯一的防线，因为 @所有人 与 @我 在事件里无法区分。"));
+      }
+
+      const searchRow = node("div", "search-row");
+      const query = node("input");
+      query.type = "search";
+      query.placeholder = "搜索我所在的群（按名称筛选）";
+      const reload = node("button", "", "刷新群列表");
+      reload.type = "button";
+      const results = node("div", "search-results");
+      const status = node("span", "config-status");
+      status.setAttribute("role", "status");
+
+      const renderResults = () => {
+        clear(results);
+        const needle = query.value.trim().toLowerCase();
+        const known = new Set(groups.map(item => item.open_conversation_id));
+        const values = (groupOptions || [])
+          .filter(item => !needle || String(item.title).toLowerCase().includes(needle))
+          .slice(0, 40);
+        if (!values.length) {
+          results.append(node("span", "project-empty", (groupOptions || []).length
+            ? "没有匹配的群"
+            : "点「刷新群列表」从钉钉拉取我所在的群"));
+          return;
+        }
+        values.forEach(candidate => {
+          const taken = known.has(candidate.openConversationId);
+          const row = node("div", "search-result");
+          const summary = node("div", "contact-summary");
+          summary.append(
+            node("strong", "", candidate.title),
+            node("span", "", `${candidate.memberCount} 人`)
+          );
+          const add = node("button", "primary", taken ? "已添加" : "登记");
+          add.type = "button";
+          add.disabled = taken;
+          add.addEventListener("click", () => {
+            groups.push({
+              alias: groupAlias(candidate.title, groups),
+              display_name: candidate.title,
+              open_conversation_id: candidate.openConversationId,
+              projects: [],
+              allowed_senders: []
+            });
+            renderConfig();
+            dirtyConfig();
+            configMessage("群已加入待保存列表；保存后重启服务才会开始监听 @。");
+          });
+          row.append(summary, add);
+          results.append(row);
+        });
+      };
+
+      reload.addEventListener("click", async () => {
+        reload.disabled = true;
+        status.textContent = "正在拉取群列表…";
+        try {
+          await loadGroups(true);
+          status.textContent = `共 ${(groupOptions || []).length} 个群`;
+          renderResults();
+        } catch (error) {
+          status.textContent = `拉取失败：${error.message}`;
+        } finally {
+          reload.disabled = false;
+        }
+      });
+      query.addEventListener("input", renderResults);
+
+      searchRow.append(query, reload, status);
+      manager.append(
+        list,
+        searchRow,
+        results,
+        node("p", "config-note", "只登记真正需要它在场的群：事件里分不出「有人 @ 我」和「有人 @所有人」，未登记的群一律忽略。群聊默认只有被 @ 才响应，不读群里的普通发言。")
+      );
+      card.append(manager);
+      editor.append(card);
+    }
+
     function renderConfig() {
       const editor = document.getElementById("configEditor");
       clear(editor);
@@ -1016,6 +1159,7 @@
       const agentNames = Object.keys(agentConfig.agents || {});
 
       renderContacts(editor);
+      renderGroups(editor);
 
       const workflowCard = node("section", "config-card wide");
       workflowCard.append(node("h2", "", "工作流"));
