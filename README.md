@@ -21,7 +21,7 @@ Already installed? The same guide also supports safe inspection and updates:
 ## Runtime flow
 
 ```text
-DingTalk event
+DingTalk event (direct message, or @ mention in a registered group)
   -> zero-token coarse gate
   -> per-conversation queue and serial lock
   -> stabilize and merge recent messages
@@ -70,7 +70,7 @@ src/dws_dm_agent/
   runners/escalate_mcp.py    session-local zero-argument stdio MCP server
   runners/pi_escalate.ts     Pi-to-stdio-MCP adapter
   web/                       dashboard, settings, themes, motion, and favicon
-tests/                       service, dashboard, MCP, and runner regressions
+tests/                       service, dashboard, group, MCP, and runner regressions
 evals/front-routing.json     checked-in front-routing replay cases
 prompts/                     editable front, worker, and supplement business rules
 deploy/macos/                LaunchAgent template
@@ -211,11 +211,29 @@ The bundled protocols are `codex-app-server`, `claude-stream-json`, and `pi-rpc`
 
 Future custom flows can be introduced as additional presets without turning the current pipeline into a general DAG engine.
 
-Prompt text is stored in normal UTF-8 files and the active files are shown verbatim on the localhost settings page. A stage prompt may use `{{self_name}}`, `{{agent_name}}`, `{{worker_name}}`, `{{contact_name}}`, `{{contact_alias}}`, `{{contact_user_id}}`, `{{contact_open_dingtalk_id}}`, `{{session_id}}`, `{{prior_attempt}}`, `{{project_root}}`, `{{projects_json}}`, `{{recent_context_json}}`, `{{current_messages_json}}`, and `{{now}}`. The supplement prompt receives `{{supplement_messages_json}}`, `{{session_id}}`, contact identity fields, and `{{self_name}}`.
+Prompt text is stored in normal UTF-8 files and the active files are shown verbatim on the localhost settings page. A stage prompt may use `{{self_name}}`, `{{agent_name}}`, `{{worker_name}}`, `{{contact_name}}`, `{{contact_alias}}`, `{{contact_user_id}}`, `{{contact_open_dingtalk_id}}`, `{{sender}}`, `{{conversation_kind}}`, `{{group_reminder}}`, `{{session_id}}`, `{{prior_attempt}}`, `{{project_root}}`, `{{projects_json}}`, `{{recent_context_json}}`, `{{current_messages_json}}`, and `{{now}}`. The supplement prompt receives `{{supplement_messages_json}}`, `{{session_id}}`, contact identity fields, `{{conversation_kind}}`, and `{{self_name}}`.
 
 Per-contact project isolation: each contact in `config.json` may list `projects` (directory names under `workspace_root`). At startup the service builds `sandbox_root` — one directory per contact containing only that contact's projects as Windows junctions (symlinks on POSIX) — and runs the agent with the sandbox path of the first project as its working directory. Prompts receive that sandbox path as `{{project_root}}` and only that contact's own project names as `{{projects_json}}`; `workspace_root` is deliberately not exposed, so the agent has no reason to look outside its scope. Note that Pi has no path-level sandbox, so a determined `cd ../..` can still reach the real directories — the isolation is about not advertising them, not about enforcement. The settings page has a 刷新沙盒 button that rebuilds the sandbox from the on-disk `config.json` without a restart; agent working directories themselves only change after a restart.
 
 Cross-organization contacts: DingTalk treats users outside your organization differently. Listing their message history requires a temporary data grant (`dws chat data-auth cross-org --all --grant-type timed --ttl 24h`). The grant expires after about 24 hours; while it is missing, history reconciliation fails and deliveries are deferred until the grant is renewed. A cross-org user's `userId` is often not usable for message listing (`peerUid is required`), so the service falls back to `{{contact_open_dingtalk_id}}` when available.
+
+Group chats: `contacts` covers one-to-one messages, and a separate `groups` array covers `@` mentions in groups. Both use the same `projects` field and the same sandbox, so a group can be routed to a project exactly like a person.
+
+```json
+"groups": [
+  {
+    "alias": "深圳租赁群",
+    "title": "深圳租赁对接群",
+    "open_conversation_id": "cidXXXXXXXX==",
+    "projects": ["深圳租赁"],
+    "allowed_senders": []
+  }
+]
+```
+
+The registered group, not the individual person, is the permission boundary. `allowed_senders: []` responds to anyone in that group; listing `openDingTalkId`s or display names narrows it. `alias` and `open_conversation_id` are required, and the settings page fills the ID in from `dws chat group list-all` so it never has to be copied by hand.
+
+Two things behave differently from direct messages. First, the agent only reads the group when someone `@`s the account: ordinary chatter never wakes it, and group history is never replayed as pending requests because message history does not record whether a line was a mention. That also means the `supplement` path is skipped in groups; a newer `@` simply becomes its own request. Second, `@所有人` is indistinguishable from a direct mention in the `user_im_message_receive_at` event, so registering only the groups that genuinely need the agent is the sole defence — and every reply is public to all members of that group.
 
 When configured, the front profile must set `read_only: true`. It may use the tools available to its provider for bounded read-only investigation, then answer directly; any write or external side effect must escalate. The worker has normal coding-agent permissions and judges authorization from the original conversation plus repository rules; escalation itself never grants write permission.
 
@@ -227,5 +245,6 @@ With streaming cards enabled, acceptance is shown immediately. Both roles use th
 - Repository AGENTS.md files and the coding agent enforce project-specific change, review, test, and release policy.
 - The service rechecks the conversation before acknowledgements and final replies.
 - Automated DingTalk messages keep the platform AI tag enabled.
+- Group replies are public. Register a group only when it is acceptable for every member to see the answer, and remember that `@所有人` is indistinguishable from `@me` in the mention event.
 
 Operational state, logs, audit data, and temporary sessions live under `state/` and are not committed. `.env` and `.env.*` are ignored; `.env.example` is the only exception.

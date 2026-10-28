@@ -72,6 +72,7 @@ class AgentConfigStore:
         is_idle: Callable[[], bool] | None = None,
         mutation_lock: ContextManager[None] | None = None,
         contacts: Sequence[Mapping[str, Any]] = (),
+        groups: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         self.config_path = config_path.resolve()
         self.config_dir = self.config_path.parent
@@ -79,6 +80,7 @@ class AgentConfigStore:
         self.on_apply = on_apply
         self.is_idle = is_idle or (lambda: True)
         self._contacts = self._merge_contacts(contacts, allow_empty=True)
+        self._groups = self._merge_groups(list(groups), allow_empty=True)
         self._lock = threading.Lock()
         self._mutation_lock = mutation_lock or threading.RLock()
 
@@ -137,6 +139,7 @@ class AgentConfigStore:
                 else False,
             },
             "contacts": contacts,
+            "groups": self._merge_groups(raw.get("groups"), allow_empty=True),
             "prompts": prompts,
             "lockedPrompts": locked_prompts,
         }
@@ -164,7 +167,16 @@ class AgentConfigStore:
             candidate["dws"] = self._merge_dws(
                 current.get("dws", {}), payload.get("dws")
             )
-            candidate["contacts"] = self._merge_contacts(payload.get("contacts"))
+            candidate["contacts"] = self._merge_contacts(
+                payload.get("contacts"), allow_empty=True
+            )
+            candidate["groups"] = self._merge_groups(
+                payload.get("groups", current.get("groups", [])),
+                allow_empty=True,
+            )
+            # 单聊和群聊可以只留一类，但不能两类都空 —— 那样服务没有任何监听目标。
+            if not candidate["contacts"] and not candidate["groups"]:
+                raise ValueError("至少保留一个单聊联系人或一个群聊")
             prompt_updates = self._validated_prompt_updates(
                 candidate["workflows"], payload.get("prompts", {})
             )
@@ -283,6 +295,82 @@ class AgentConfigStore:
             if len(values) != len(set(values)):
                 raise ValueError(f"duplicate contact {key}")
         return contacts
+
+    @staticmethod
+    def _merge_groups(
+        submitted: Any, *, allow_empty: bool = False
+    ) -> list[dict[str, Any]]:
+        """群聊目标：只认 openConversationId，群没有 userId。
+
+        allowed_senders 留空表示群内任何人 @ 都响应；填了就只认这些人。
+        """
+        if submitted is None:
+            if allow_empty:
+                return []
+            raise ValueError("groups must be a list")
+        if not isinstance(submitted, Sequence) or isinstance(submitted, (str, bytes)):
+            raise ValueError("groups must be a list")
+        groups: list[dict[str, Any]] = []
+        for item in submitted:
+            if not isinstance(item, Mapping):
+                raise ValueError("group must be an object")
+            alias = str(item.get("alias") or "").strip()
+            conversation_id = str(
+                item.get("open_conversation_id") or item.get("conversation_id") or ""
+            ).strip()
+            display_name = str(
+                item.get("display_name") or item.get("title") or alias
+            ).strip()
+            if not alias or not conversation_id:
+                raise ValueError("group alias and open_conversation_id are required")
+            if len(alias) > 80 or len(display_name) > 120 or len(conversation_id) > 512:
+                raise ValueError(f"group fields are too long: {alias}")
+            if any(ord(char) < 32 for char in alias + conversation_id):
+                raise ValueError(f"group fields contain control characters: {alias}")
+            groups.append(
+                {
+                    "alias": alias,
+                    "display_name": display_name,
+                    "open_conversation_id": conversation_id,
+                    "projects": AgentConfigStore._merge_projects(
+                        item.get("projects")
+                    ),
+                    "allowed_senders": AgentConfigStore._merge_senders(
+                        item.get("allowed_senders")
+                    ),
+                }
+            )
+        if len(groups) > 100:
+            raise ValueError("group list cannot exceed 100 entries")
+        for key in ("alias", "open_conversation_id"):
+            values = [item[key] for item in groups if item[key]]
+            if len(values) != len(set(values)):
+                raise ValueError(f"duplicate group {key}")
+        return groups
+
+    @staticmethod
+    def _merge_senders(submitted: Any) -> list[str]:
+        """群里允许触发的人：openDingTalkId 或显示名，留空表示不限。"""
+        if submitted is None:
+            return []
+        if isinstance(submitted, str):
+            submitted = [submitted]
+        if not isinstance(submitted, Sequence):
+            raise ValueError("allowed_senders must be a list")
+        if len(submitted) > 200:
+            raise ValueError("a group cannot whitelist more than 200 senders")
+        senders: list[str] = []
+        for entry in submitted:
+            if not isinstance(entry, str):
+                raise ValueError("allowed sender must be a string")
+            value = entry.strip()
+            if not value:
+                continue
+            if len(value) > 512 or any(ord(char) < 32 for char in value):
+                raise ValueError(f"invalid allowed sender: {entry!r}")
+            if value not in senders:
+                senders.append(value)
+        return senders
 
     @staticmethod
     def _merge_projects(submitted: Any) -> list[str]:
@@ -465,6 +553,7 @@ class AgentConfigStore:
                 check, self.config_path, self.workspace_root
             )
         self._validate_contact_projects(candidate.get("contacts"))
+        self._validate_contact_projects(candidate.get("groups"))
 
     def _validate_contact_projects(self, contacts: Any) -> None:
         """保存前确认每个项目目录真实存在，避免错误拖到消息处理阶段才暴露。"""
@@ -546,6 +635,7 @@ class DashboardServer:
         port: int = 8765,
         config_store: AgentConfigStore | None = None,
         contact_search: Callable[[str], list[dict[str, Any]]] | None = None,
+        group_lister: Callable[[], list[dict[str, Any]]] | None = None,
         project_lister: Callable[[], list[str]] | None = None,
         sandbox_status: Callable[[], dict[str, Any]] | None = None,
         sandbox_refresh: Callable[[], dict[str, Any]] | None = None,
@@ -566,6 +656,7 @@ class DashboardServer:
         self.port = port
         self.config_store = config_store
         self.contact_search = contact_search
+        self.group_lister = group_lister
         self.project_lister = project_lister
         self.sandbox_status = sandbox_status
         self.sandbox_refresh = sandbox_refresh
@@ -691,6 +782,14 @@ class DashboardServer:
                         self._send_json({"error": f"钉钉用户搜索失败：{exc}"}, status=502)
                         return
                     self._send_json({"results": results})
+                    return
+                if path == "/api/groups" and dashboard.group_lister is not None:
+                    try:
+                        groups = dashboard.group_lister()
+                    except Exception as exc:
+                        self._send_json({"error": f"获取群列表失败：{exc}"}, status=502)
+                        return
+                    self._send_json({"groups": groups})
                     return
                 if path == "/api/projects" and dashboard.project_lister is not None:
                     try:

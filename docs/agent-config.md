@@ -60,6 +60,33 @@ If `.env` is absent, copy `.env.example` to `.env`; never overwrite it. On macOS
 
 If the service is already running and idle, open the gear on the localhost dashboard, or go directly to `http://127.0.0.1:8765/settings`. This separate page can safely edit public profile, workflow, automatic-message, prompt, and per-contact project assignment fields and applies them to subsequent sessions immediately. Project assignments take effect for agent working directories after the service restarts; the 刷新沙盒 button rebuilds the per-contact sandbox directories right away so a mistake shows up before the next message arrives. The page deliberately does not expose `.env`, contact IDs, provider options, or profile environment variables.
 
+### Group chats
+
+Direct messages and group `@` mentions are separate subscriptions. `contacts` covers one-to-one messages; `groups` covers mentions in registered groups. Both arrays accept the same `projects` field, so a group can be routed to a project just like a person:
+
+```json
+"groups": [
+  {
+    "alias": "深圳租赁群",
+    "title": "深圳租赁对接群",
+    "open_conversation_id": "cidXXXXXXXX==",
+    "projects": ["深圳租赁"],
+    "allowed_senders": []
+  }
+]
+```
+
+`alias` and `open_conversation_id` are required; `title` falls back to `alias`. The settings page lists your groups through `dws chat group list-all`, so the ID never has to be copied by hand.
+
+The registered group — not the person — is the permission boundary. `allowed_senders: []` lets anyone in that group trigger the agent; fill it with `openDingTalkId` or display names to narrow that down. Only registered groups are subscribed at all; a mention anywhere else is dropped and logged once per conversation.
+
+Two behaviours are deliberately different from direct messages:
+
+- The group is only read when someone `@`s the account. Ordinary group chatter never wakes the agent, and group history is never replayed as pending requests, because message history does not record whether a line was a mention.
+- `@所有人` cannot be distinguished from a direct mention in the `user_im_message_receive_at` event. Registering few groups is the only defence; treat every registration as "the agent may answer an `@all` here".
+
+Replies in a group are public to every member, and the reply `@`s the person who asked. Prompt templates receive `conversation_kind` and, for groups, `group_reminder`, which tells the worker not to disclose other contacts, other projects, or private conversation content.
+
 For an initial installation, or when the service cannot start, configure reusable profiles under `agents` and choose them from a preset under `workflows.presets`. Each profile must define:
 
 ```json
