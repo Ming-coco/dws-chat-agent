@@ -83,7 +83,11 @@ The registered group — not the person — is the permission boundary. `allowed
 Two behaviours are deliberately different from direct messages:
 
 - The group is only read when someone `@`s the account. Ordinary group chatter never wakes the agent, and group history is never replayed as pending requests, because message history does not record whether a line was a mention.
-- `@所有人` cannot be distinguished from a direct mention in the `user_im_message_receive_at` event. Registering few groups is the only defence; treat every registration as "the agent may answer an `@all` here".
+- Group history is never replayed, so the `supplement` path is skipped in groups; a newer `@` simply becomes its own request.
+
+`@所有人` needs one extra filter. `user_im_message_receive_at` has no `isAtAll` field, so the event itself cannot say whether a message was a broadcast or a direct mention. The mention text does survive in the message body — a real broadcast reads `@所有人 数据同步工具那个你们都知道的吧`, a real direct mention reads `@行弈-吴铭威 要找下王哥` — so the service drops an event when the body matches `@所有人`, `@全体成员` or the word `@all`, **and** does not also name you (`self.name`, plus the part after the last `-`). A broadcast that explicitly names you is kept, because that is a real mention. Set `"ignore_at_all": false` at the top level of `config.json` to accept broadcasts as well.
+
+This is a text heuristic, not a protocol guarantee: registering only the groups that genuinely need the agent remains the primary defence.
 
 Replies in a group are public to every member, and the reply `@`s the person who asked. Prompt templates receive `conversation_kind` and, for groups, `group_reminder`, which tells the worker not to disclose other contacts, other projects, or private conversation content.
 

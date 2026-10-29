@@ -220,11 +220,30 @@ def _extract_content(value: Any) -> str:
     return str(value).strip()
 
 
+# @所有人 在事件里的唯一痕迹就是正文文本：user_im_message_receive_at 的
+# 13 个字段没有任何一个告诉你「这条是不是群发」。真实样本里群发正文长这样：
+#   "@所有人 数据同步工具那个你们都知道的吧"
+# 单独 @ 某人则是 "@行弈-吴铭威 要找下王哥"，所以只能看正文。
+# 英文 all 加词边界，避免把 "@alliance" 这类正文当成群发。
+_AT_ALL_MARKER = re.compile(r"@\s*(?:所有人|全体成员|all\b)", re.IGNORECASE)
+
+
+def mentions_at_all(content: str) -> bool:
+    return bool(_AT_ALL_MARKER.search(content or ""))
+
+
+def mentions_named_user(content: str, names: Sequence[str]) -> bool:
+    text = content or ""
+    return any(name and f"@{name}" in text for name in names)
+
+
 def parse_dws_event(
     line: str,
     contact: Contact,
     timezone: tzinfo,
     self_open_id: str = "",
+    self_names: Sequence[str] = (),
+    ignore_at_all: bool = True,
 ) -> IncomingEvent | None:
     try:
         outer = json.loads(line)
@@ -241,6 +260,7 @@ def parse_dws_event(
         _deep_value(payload, {"conversation_id", "conversationId", "openConversationId"})
         or (contact.conversation_id if contact.is_group else f"dm:{contact.identity}")
     )
+    content = _extract_content(_deep_value(payload, {"content", "text", "messageContent"}))
     if contact.is_group:
         # 一个订阅覆盖所有群，先按会话 id 归到登记的群，再按发言人筛选。
         if conversation_id != contact.conversation_id:
@@ -249,9 +269,16 @@ def parse_dws_event(
             return None
         if not contact.accepts_sender(sender_id, sender_name):
             return None
+        # @所有人 也走这个订阅，但只认点名到我自己的：正文里既没有我的名字
+        # 又出现 @所有人，就按群发丢掉（两者同时出现时保留，那是真点名）。
+        if (
+            ignore_at_all
+            and mentions_at_all(content)
+            and not mentions_named_user(content, self_names)
+        ):
+            return None
     elif sender_id and sender_id != contact.open_dingtalk_id:
         return None
-    content = _extract_content(_deep_value(payload, {"content", "text", "messageContent"}))
     if not content:
         return None
     message_id = str(
