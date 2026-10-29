@@ -785,11 +785,15 @@ class DashboardServer:
                     return
                 if path == "/api/groups" and dashboard.group_lister is not None:
                     try:
-                        groups = dashboard.group_lister()
+                        listing = dashboard.group_lister()
                     except Exception as exc:
                         self._send_json({"error": f"获取群列表失败：{exc}"}, status=502)
                         return
-                    self._send_json({"groups": groups})
+                    # lister 现在会一并返回当前组织，用来告诉用户列表被谁裁剪过。
+                    if isinstance(listing, Mapping):
+                        self._send_json(dict(listing))
+                    else:
+                        self._send_json({"groups": list(listing or [])})
                     return
                 if path == "/api/projects" and dashboard.project_lister is not None:
                     try:

@@ -666,5 +666,108 @@ class MentionRoutingTests(unittest.TestCase):
         self.assertIsNone(service._parse_mention(b"not json"))
 
 
+class GroupOrgFilterTests(unittest.TestCase):
+    """群列表只能列当前组织架构里的群，跨组织的群不该出现。"""
+
+    CURRENT = "ding-current"
+
+    def _service(self, group_lines, orgs=None, corp_id=CURRENT):
+        from dws_dm_agent.service import AgentService
+
+        service = object.__new__(AgentService)
+        service.settings = type(
+            "S",
+            (),
+            {
+                "groups": (),
+                "contacts": (),
+                "raw": {"dws": {"binary": "dws"}},
+                "state_dir": Path(tempfile.mkdtemp()),
+            },
+        )()
+        service._current_org_cache = {"corpId": corp_id, "corpName": "当前组织"}
+        service._group_orgs = lambda ids: dict(orgs or {})
+        payload = {"result": {"groups": group_lines}}
+        service._run_dws = lambda command, timeout=30: payload
+        return service
+
+    @staticmethod
+    def _group(cid, title, members=5):
+        return {
+            "openConversationId": cid,
+            "title": title,
+            "memberCount": members,
+        }
+
+    def test_only_current_org_groups_are_listed(self) -> None:
+        service = self._service(
+            [
+                self._group("cid-in==", "本组织的群"),
+                self._group("cid-out==", "学校的群"),
+            ],
+            {"cid-in==": self.CURRENT, "cid-out==": "ding-school"},
+        )
+        listing = service._list_dingtalk_groups()
+        titles = [item["title"] for item in listing["groups"]]
+        self.assertEqual(titles, ["本组织的群"])
+        self.assertTrue(listing["filtered"])
+        self.assertEqual(listing["org"]["corpName"], "当前组织")
+
+    def test_group_without_known_org_is_kept(self) -> None:
+        # 查不到 corpId 时宁可多列一个，也不要让该登记的群凭空消失。
+        service = self._service([self._group("cid-unknown==", "未知组织群")], {})
+        listing = service._list_dingtalk_groups()
+        self.assertEqual([i["title"] for i in listing["groups"]], ["未知组织群"])
+
+    def test_without_current_org_nothing_is_filtered(self) -> None:
+        service = self._service(
+            [self._group("cid-a==", "群 A"), self._group("cid-b==", "群 B")],
+            {"cid-a==": "ding-x", "cid-b==": "ding-y"},
+            corp_id="",
+        )
+        listing = service._list_dingtalk_groups()
+        self.assertEqual(len(listing["groups"]), 2)
+        self.assertFalse(listing["filtered"])
+
+    def test_registered_flag_survives_filtering(self) -> None:
+        service = self._service(
+            [self._group("cid-in==", "已登记的群")],
+            {"cid-in==": self.CURRENT},
+        )
+        service.settings = type(
+            "S",
+            (),
+            {
+                "groups": (group_contact(conversation_id="cid-in=="),),
+                "contacts": (),
+                "raw": {"dws": {"binary": "dws"}},
+                "state_dir": Path(tempfile.mkdtemp()),
+            },
+        )()
+        listing = service._list_dingtalk_groups()
+        self.assertTrue(listing["groups"][0]["registered"])
+
+
+class OrgMatchTests(unittest.TestCase):
+    def test_matching(self) -> None:
+        from dws_dm_agent.service import org_matches
+
+        self.assertTrue(org_matches("ding-a", "ding-a"))
+        self.assertFalse(org_matches("ding-b", "ding-a"))
+        # 任一侧为空时不做判断，避免误杀。
+        self.assertTrue(org_matches("", "ding-a"))
+        self.assertTrue(org_matches("ding-a", ""))
+
+    def test_profile_corp_id(self) -> None:
+        from dws_dm_agent.service import _current_corp_id_from_profile
+
+        self.assertEqual(_current_corp_id_from_profile("ding-a"), "ding-a")
+        # dws 的 profile 允许 corpId:userId，只取组织部分。
+        self.assertEqual(_current_corp_id_from_profile("ding-a:user-1"), "ding-a")
+        self.assertEqual(_current_corp_id_from_profile(""), "")
+        self.assertEqual(_current_corp_id_from_profile(None), "")
+        self.assertEqual(_current_corp_id_from_profile("null"), "")
+
+
 if __name__ == "__main__":
     unittest.main()

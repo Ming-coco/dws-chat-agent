@@ -15,6 +15,7 @@ import tempfile
 import threading
 import uuid
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as fixed_timezone, tzinfo
@@ -67,6 +68,9 @@ LOG = logging.getLogger("dws-chat-agent")
 
 # 每个会话每种丢弃原因只记这么多条正文样本，够判断过滤是否在生效，又不会刷屏。
 _SKIP_LOG_SAMPLES = 3
+# 群列表里的 corpId 缓存：dws 只能按群逐个查组织，缓存后刷新群列表不必每次重查。
+_GROUP_ORG_CACHE = "group_orgs.json"
+_GROUP_ORG_FETCH_WORKERS = 6
 _IMAGE_MEDIA_ID = re.compile(r"\[图片消息\]\(mediaId=([^)\s]+)\)")
 # 图片预算统一定义在 core（MAX_IMAGES/MAX_IMAGE_BYTES）；此处仅保留历史别名，
 # 事件流读取上限等下游限制必须与 core 常量联动，不允许各自硬编码。
@@ -193,6 +197,26 @@ def _event_string(line: str, keys: Sequence[str]) -> str:
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return ""
+
+
+def org_matches(corp_id: str, current: str) -> bool:
+    """群是否属于当前组织。
+
+    dws 的群列表只按账号返回「我加入的所有群」，跨组织的群也在里面，唯一
+    可用的区分就是每个群的 corpId。查不到 corpId 时不武断丢弃——宁可多列
+    一个让用户自己忽略，也不要让该登记的群凭空消失。
+    """
+    if not current or not corp_id:
+        return True
+    return corp_id == current
+
+
+def _current_corp_id_from_profile(profile: Any) -> str:
+    """从 dws.profile 配置里取 corpId；格式可以是 corpId 或 corpId:userId。"""
+    text = str(profile or "").strip()
+    if not text or text.lower() in {"none", "null"}:
+        return ""
+    return text.split(":", 1)[0].strip()
 
 
 def _image_resources(
@@ -672,10 +696,9 @@ class AgentService:
             )
         return results
 
-    def _list_dingtalk_groups(self) -> list[dict[str, Any]]:
-        """列出当前账号所在的群，供设置页挑选登记（避免手抄 cid）。"""
+    def _list_dingtalk_groups(self) -> dict[str, Any]:
+        """列出当前组织里的群，供设置页挑选登记（避免手抄 cid）。"""
         command = [
-            str(self.settings.raw.get("dws", {}).get("binary", "dws")),
             "chat",
             "group",
             "list-all",
@@ -684,33 +707,21 @@ class AgentService:
             "--timeout",
             "20",
         ]
-        profile = self.settings.raw.get("dws", {}).get("profile")
-        if profile:
-            command.extend(["--profile", str(profile)])
-        try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=30,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError("获取群列表超时") from exc
-        if completed.returncode:
-            code = _find_dws_error_code(completed.stderr) or f"exit {completed.returncode}"
-            raise RuntimeError(code)
-        try:
-            payload = json.loads(completed.stdout)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("DWS 返回了无效 JSON") from exc
+        payload = self._run_dws(command, timeout=30)
         result = payload.get("result", {}) if isinstance(payload, Mapping) else {}
         groups = result.get("groups", []) if isinstance(result, Mapping) else []
         if not isinstance(groups, list):
             raise RuntimeError("DWS 返回了无效群列表")
         registered = {group.conversation_id for group in _groups(self.settings)}
+        org = self._current_org()
+        current_corp = org["corpId"]
+        orgs = self._group_orgs(
+            [
+                str(item.get("openConversationId") or "").strip()
+                for item in groups
+                if isinstance(item, Mapping)
+            ]
+        )
         items = []
         for item in groups:
             if not isinstance(item, Mapping):
@@ -718,6 +729,9 @@ class AgentService:
             conversation_id = str(item.get("openConversationId") or "").strip()
             title = sanitize_text(item.get("title"), 120)
             if not conversation_id or not title:
+                continue
+            # 只列当前组织架构里的群；跨组织的群不该出现在登记列表里。
+            if not org_matches(orgs.get(conversation_id, ""), current_corp):
                 continue
             try:
                 member_count = int(item.get("memberCount") or 0)
@@ -732,7 +746,155 @@ class AgentService:
                 }
             )
         items.sort(key=lambda entry: (-entry["memberCount"], entry["title"]))
-        return items[:200]
+        return {"groups": items[:200], "org": org, "filtered": bool(current_corp)}
+
+    def _run_dws(self, arguments: Sequence[str], timeout: int = 30) -> Any:
+        """跑一条 dws 命令并解析 JSON；测试里整体替换掉这个方法。"""
+        command = [
+            str(self.settings.raw.get("dws", {}).get("binary", "dws")),
+            *arguments,
+        ]
+        profile = self.settings.raw.get("dws", {}).get("profile")
+        if profile:
+            command.extend(["--profile", str(profile)])
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("dws 命令超时") from exc
+        if completed.returncode:
+            code = _find_dws_error_code(completed.stderr) or f"exit {completed.returncode}"
+            raise RuntimeError(code)
+        try:
+            return json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("DWS 返回了无效 JSON") from exc
+
+    def _current_org(self) -> dict[str, str]:
+        """当前登录组织：corpId 用来裁剪群列表，corpName 给设置页显示。"""
+        org = getattr(self, "_current_org_cache", None)
+        if org is not None:
+            return org
+        profile = self.settings.raw.get("dws", {}).get("profile")
+        configured = _current_corp_id_from_profile(profile)
+        if configured:
+            org = {"corpId": configured, "corpName": configured}
+        else:
+            org = self._read_profile_org()
+        self._current_org_cache = org
+        return org
+
+    def _read_profile_org(self) -> dict[str, str]:
+        try:
+            payload = self._run_dws(
+                ["profile", "list", "--format", "json", "--timeout", "15"], timeout=20
+            )
+        except RuntimeError as exc:
+            LOG.warning("could not resolve current org: %s", exc)
+            return {"corpId": "", "corpName": ""}
+        if not isinstance(payload, Mapping):
+            return {"corpId": "", "corpName": ""}
+        # currentProfile 就是当前组织的 corpId；corpName 再从 profiles 里找回来。
+        current = str(payload.get("currentProfile") or "").strip()
+        name = ""
+        profiles = payload.get("profiles")
+        if isinstance(profiles, list):
+            for entry in profiles:
+                if not isinstance(entry, Mapping):
+                    continue
+                if str(entry.get("corpId") or "").strip() == current:
+                    name = str(entry.get("corpName") or "").strip()
+                    break
+        return {"corpId": current, "corpName": name}
+
+    def _group_orgs(self, conversation_ids: Sequence[str]) -> dict[str, str]:
+        """查出每个群所属的组织（corpId）。
+
+        dws 没有批量接口，只能按群逐个查；结果按群 id 缓存在 state 里，
+        所以只有第一次刷新群列表会慢，之后基本是秒开。
+        """
+        cache = self._load_group_org_cache()
+        missing = [cid for cid in conversation_ids if cid and cid not in cache]
+        if not missing:
+            return cache
+        binary = str(self.settings.raw.get("dws", {}).get("binary", "dws"))
+        if not self._binary_available(binary):
+            LOG.warning("dws binary not available; skipping org detection")
+            return cache
+
+        def fetch(conversation_id: str) -> tuple[str, str]:
+            try:
+                payload = self._run_dws(
+                    [
+                        "chat",
+                        "+conversation-info",
+                        "--group",
+                        conversation_id,
+                        "--format",
+                        "json",
+                        "--timeout",
+                        "15",
+                    ],
+                    timeout=20,
+                )
+            except RuntimeError:
+                return conversation_id, ""
+            result = payload.get("result", {}) if isinstance(payload, Mapping) else {}
+            info = result.get("conversationInfo", {}) if isinstance(result, Mapping) else {}
+            if not isinstance(info, Mapping):
+                return conversation_id, ""
+            return conversation_id, str(info.get("corpId") or "").strip()
+
+        with ThreadPoolExecutor(max_workers=_GROUP_ORG_FETCH_WORKERS) as pool:
+            for conversation_id, corp_id in pool.map(fetch, missing):
+                if corp_id:
+                    cache[conversation_id] = corp_id
+        self._save_group_org_cache(cache)
+        return cache
+
+    def _group_org_cache_path(self) -> Path:
+        return self.settings.state_dir / _GROUP_ORG_CACHE
+
+    def _load_group_org_cache(self) -> dict[str, str]:
+        try:
+            payload = json.loads(
+                self._group_org_cache_path().read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(payload, Mapping):
+            return {}
+        return {
+            str(key): str(value)
+            for key, value in payload.items()
+            if isinstance(value, str) and value
+        }
+
+    def _save_group_org_cache(self, cache: Mapping[str, str]) -> None:
+        path = self._group_org_cache_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(dict(cache), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            LOG.warning("could not persist group org cache: %s", exc)
+
+    @staticmethod
+    def _binary_available(binary: str) -> bool:
+        if not binary:
+            return False
+        if Path(binary).is_absolute():
+            return Path(binary).exists()
+        return shutil.which(binary) is not None
 
     def _apply_agent_configuration(self, raw: Mapping[str, Any]) -> None:
         env = _read_env_file(self.settings.env_path)
