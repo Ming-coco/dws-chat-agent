@@ -23,6 +23,8 @@ from dws_dm_agent.service import (
 
 TZ = ZoneInfo("Asia/Shanghai")
 SELF_OPEN_ID = "open-self"
+# 群里 @ 用的是显示名；config 会把「部门-姓名」拆出各段，这里照同样的形状给。
+SELF_NAMES = ("行弈-吴铭威", "行弈", "吴铭威")
 
 
 def group_contact(
@@ -44,7 +46,7 @@ def at_event_line(
     conversation_id: str = "cid-group==",
     sender_open_id: str = "open-someone",
     sender_name: str = "某同事",
-    content: str = "@行弈 这个接口什么时候上线？",
+    content: str = "@吴铭威 这个接口什么时候上线？",
     message_id: str = "message-1",
 ) -> str:
     # --flatten 之后事件就是一层扁平对象，字段名与 event schema 一致。
@@ -92,7 +94,7 @@ class GroupIdentityTests(unittest.TestCase):
 class AtEventParsingTests(unittest.TestCase):
     def test_flattened_at_event_is_parsed_with_sender(self) -> None:
         event = parse_dws_event(
-            at_event_line(), group_contact(), TZ, SELF_OPEN_ID
+            at_event_line(), group_contact(), TZ, SELF_OPEN_ID, SELF_NAMES
         )
         self.assertIsNotNone(event)
         assert event is not None
@@ -109,6 +111,7 @@ class AtEventParsingTests(unittest.TestCase):
             group_contact(),
             TZ,
             SELF_OPEN_ID,
+            SELF_NAMES,
         )
         self.assertIsNone(event)
 
@@ -118,6 +121,7 @@ class AtEventParsingTests(unittest.TestCase):
             group_contact(),
             TZ,
             SELF_OPEN_ID,
+            SELF_NAMES,
         )
         self.assertIsNone(event)
 
@@ -128,6 +132,7 @@ class AtEventParsingTests(unittest.TestCase):
             contact,
             TZ,
             SELF_OPEN_ID,
+            SELF_NAMES,
         )
         self.assertIsNone(event)
 
@@ -144,11 +149,11 @@ class AtEventParsingTests(unittest.TestCase):
 
 
 class AtAllFilteringTests(unittest.TestCase):
-    """事件里没有 isAtAll 字段，只能靠正文里的 @所有人 文本区分群发与点名。"""
+    """事件里没有 isAtAll 字段，只能靠正文里的 @ 文本判断到底点名了谁。"""
 
-    NAMES = ("行弈-吴铭威", "吴铭威")
+    NAMES = SELF_NAMES
 
-    def _parse(self, content: str, *, ignore: bool = True):
+    def _parse(self, content: str, *, ignore: bool = True, require: bool = True):
         return parse_dws_event(
             at_event_line(content=content),
             group_contact(),
@@ -156,6 +161,7 @@ class AtAllFilteringTests(unittest.TestCase):
             SELF_OPEN_ID,
             self.NAMES,
             ignore,
+            require,
         )
 
     def test_broadcast_without_naming_me_is_dropped(self) -> None:
@@ -169,28 +175,52 @@ class AtAllFilteringTests(unittest.TestCase):
         assert event is not None
         self.assertEqual(event.content, "@行弈-吴铭威 要找下王哥")
 
-    def test_plain_question_without_at_marker_is_kept(self) -> None:
-        # 有些客户端不会把 @ 渲染进正文，不能因此误杀正常提问。
-        self.assertIsNotNone(self._parse("这个接口什么时候上线？"))
+    def test_message_without_any_mention_is_dropped(self) -> None:
+        # 订阅覆盖整个群，没 @ 任何人的普通聊天必须丢掉，否则会被当成提问。
+        self.assertIsNone(self._parse("这个接口什么时候上线？"))
+        self.assertIsNone(self._parse("我刚看了下，数据对不上"))
+        self.assertIsNone(self._parse(""))
+
+    def test_mentioning_someone_else_is_dropped(self) -> None:
+        # @ 的是别人，跟我无关。
+        self.assertIsNone(self._parse("@蓬莱 你看下这个"))
+        self.assertIsNone(self._parse("@建虎-廖建虎 产业板块结果页"))
 
     def test_broadcast_that_also_names_me_is_kept(self) -> None:
         event = self._parse("@所有人 @行弈-吴铭威 这条要你确认")
         self.assertIsNotNone(event)
 
     def test_short_name_mention_counts_as_me(self) -> None:
-        self.assertIsNotNone(self._parse("@所有人 @吴铭威 你看下"))
+        self.assertIsNotNone(self._parse("@吴铭威 你看下"))
+        self.assertIsNotNone(self._parse("@所有人 @行弈 你看下"))
 
-    def test_filter_can_be_turned_off(self) -> None:
-        event = self._parse("@所有人 通知一下", ignore=False)
-        self.assertIsNotNone(event)
+    def test_at_all_filter_can_be_turned_off(self) -> None:
+        # 关掉 @所有人 过滤后，群发仍要经过「必须点名我」这道关。
+        self.assertIsNone(self._parse("@所有人 通知一下", ignore=False))
+        self.assertIsNotNone(self._parse("@所有人 @吴铭威 通知一下", ignore=False))
+
+    def test_direct_mention_requirement_can_be_turned_off(self) -> None:
+        # 两个开关都关掉＝订阅到什么就回什么，仅用于临时排障。
+        self.assertIsNotNone(self._parse("随便说句话", ignore=False, require=False))
+        self.assertIsNotNone(self._parse("@所有人 通知一下", ignore=False, require=False))
 
     def test_lowercase_at_all_marker_is_recognised(self) -> None:
         self.assertIsNone(self._parse("@all 明天上午十点开会"))
 
+    def test_fullwidth_at_sign_is_recognised(self) -> None:
+        self.assertIsNotNone(self._parse("＠吴铭威 这个接口什么时候上线"))
+
     def test_broadcast_substring_inside_a_word_is_not_a_broadcast(self) -> None:
-        # "@alliance" 之类不该被当成群发；正文里没有我的名字时也要保留。
-        event = self._parse("@alliance 这个仓库怎么访问")
-        self.assertIsNotNone(event)
+        # "@alliance" 不当成群发；但没点名我，仍按「没 @ 我」丢掉。
+        self.assertIsNone(self._parse("@alliance 这个仓库怎么访问"))
+        # 同一条正文在关掉「必须点名我」之后应该能进来，说明没被误判成群发。
+        self.assertIsNotNone(
+            self._parse("@alliance 这个仓库怎么访问", ignore=False, require=False)
+        )
+
+    def test_name_inside_a_longer_name_is_not_me(self) -> None:
+        # "@吴铭威龙" 不是本人；只要 @ 后面不是完整名字就不算。
+        self.assertIsNone(self._parse("@吴铭威龙 你看下"))
 
 
 class AtAllMarkerTests(unittest.TestCase):
@@ -200,10 +230,23 @@ class AtAllMarkerTests(unittest.TestCase):
         self.assertTrue(mentions_at_all("@所有人 开会"))
         self.assertTrue(mentions_at_all("@全体成员 开会"))
         self.assertTrue(mentions_at_all("@All 开会"))
+        self.assertTrue(mentions_at_all("＠所有人 开会"))
         self.assertFalse(mentions_at_all("@行弈-吴铭威 开会"))
+        self.assertFalse(mentions_at_all("@alliance 开会"))
         self.assertFalse(mentions_at_all(""))
-        self.assertTrue(mentions_named_user("@行弈-吴铭威 看下", AtAllFilteringTests.NAMES))
-        self.assertFalse(mentions_named_user("@别人 看下", AtAllFilteringTests.NAMES))
+        self.assertTrue(mentions_named_user("@行弈-吴铭威 看下", SELF_NAMES))
+        self.assertTrue(mentions_named_user("＠吴铭威 看下", SELF_NAMES))
+        self.assertFalse(mentions_named_user("@别人 看下", SELF_NAMES))
+        # 没带 @ 的名字不算点名。
+        self.assertFalse(mentions_named_user("吴铭威 看下", SELF_NAMES))
+
+    def test_event_body_unwraps_nested_payload(self) -> None:
+        from dws_dm_agent.core import event_body
+
+        self.assertEqual(event_body(at_event_line(content="@吴铭威 hi")), "@吴铭威 hi")
+        nested = json.dumps({"data": json.dumps({"content": "@吴铭威 嵌套"})})
+        self.assertEqual(event_body(nested), "@吴铭威 嵌套")
+        self.assertEqual(event_body("not json"), "")
 
 
 class ConversationRoutingTests(unittest.TestCase):
@@ -588,12 +631,14 @@ class MentionRoutingTests(unittest.TestCase):
                 "targets": tuple(groups),
                 "timezone": TZ,
                 "self_open_id": SELF_OPEN_ID,
-                "self_names": ("行弈-吴铭威", "吴铭威"),
+                "self_names": SELF_NAMES,
                 "ignore_at_all": True,
+                "require_direct_mention": True,
             },
         )()
         service._ignored_conversations = set()
-        service._ignored_at_all = set()
+        service._ignored_at_all = {}
+        service._ignored_without_mention = {}
         return service
 
     def test_registered_group_event_is_accepted(self) -> None:

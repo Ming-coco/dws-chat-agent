@@ -40,7 +40,9 @@ from .core import (
     TaskScope,
     canonical_message_text,
     human_owns_conversation,
+    event_body,
     mentions_at_all,
+    mentions_named_user,
     parse_dws_event,
     parse_local_datetime,
     sanitize_text,
@@ -62,6 +64,9 @@ from . import sandbox
 
 
 LOG = logging.getLogger("dws-chat-agent")
+
+# 每个会话每种丢弃原因只记这么多条正文样本，够判断过滤是否在生效，又不会刷屏。
+_SKIP_LOG_SAMPLES = 3
 _IMAGE_MEDIA_ID = re.compile(r"\[图片消息\]\(mediaId=([^)\s]+)\)")
 # 图片预算统一定义在 core（MAX_IMAGES/MAX_IMAGE_BYTES）；此处仅保留历史别名，
 # 事件流读取上限等下游限制必须与 core 常量联动，不允许各自硬编码。
@@ -157,6 +162,17 @@ def _targets(settings: Settings) -> tuple[Contact, ...]:
 
 def _event_conversation_id(line: str) -> str:
     """从 @ 事件里取出会话 id，用来判断是否属于登记的群。"""
+    return _event_string(line, ("conversation_id", "conversationId", "openConversationId"))
+
+
+def _event_sender_id(line: str) -> str:
+    """事件发送人开放 ID，用来区分「自己发的」和「别人发的」。"""
+    return _event_string(
+        line, ("sender_open_dingtalk_id", "senderOpenDingTalkId", "senderId")
+    )
+
+
+def _event_string(line: str, keys: Sequence[str]) -> str:
     try:
         outer = json.loads(line)
     except json.JSONDecodeError:
@@ -172,34 +188,11 @@ def _event_conversation_id(line: str) -> str:
             payload = None
     sources = [payload, outer] if isinstance(payload, Mapping) else [outer]
     for source in sources:
-        for key in ("conversation_id", "conversationId", "openConversationId"):
+        for key in keys:
             value = source.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return ""
-
-
-def _line_mentions_at_all(line: str) -> bool:
-    """这条原始事件正文里是否出现 @所有人（用来记录过滤动作）。"""
-    try:
-        outer = json.loads(line)
-    except json.JSONDecodeError:
-        return False
-    if not isinstance(outer, Mapping):
-        return False
-    payload = outer.get("data")
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except json.JSONDecodeError:
-            payload = None
-    sources = [payload, outer] if isinstance(payload, Mapping) else [outer]
-    for source in sources:
-        for key in ("content", "text", "messageContent"):
-            value = source.get(key)
-            if isinstance(value, str) and mentions_at_all(value):
-                return True
-    return False
 
 
 def _image_resources(
@@ -340,7 +333,8 @@ class AgentService:
         self.listener_processes: set[asyncio.subprocess.Process] = set()
         # 未登记会话（含 @所有人）只记一次，避免日志被刷屏。
         self._ignored_conversations: set[str] = set()
-        self._ignored_at_all: set[str] = set()
+        self._ignored_at_all: dict[str, int] = {}
+        self._ignored_without_mention: dict[str, int] = {}
         self.stop_event = asyncio.Event()
         self.capacity = int(settings.raw.get("max_parallel_conversations", 2))
         self.global_slots = asyncio.Semaphore(self.capacity)
@@ -1001,20 +995,59 @@ class AgentService:
             self.settings.self_open_id,
             self.settings.self_names,
             self.settings.ignore_at_all,
+            self.settings.require_direct_mention,
         )
-        if event is None and self.settings.ignore_at_all and _line_mentions_at_all(line):
-            # @所有人 只记一次，用来确认过滤真的在生效。
-            self._note_at_all(conversation_id)
+        if event is None:
+            self._note_skipped_mention(line, conversation_id)
         return event
 
-    def _note_at_all(self, conversation_id: str) -> None:
-        if conversation_id in self._ignored_at_all:
+    def _note_skipped_mention(self, line: str, conversation_id: str) -> None:
+        """登记群里被丢掉的消息记几条样本，用来确认过滤真的在生效。"""
+        body = event_body(line)
+        if not body:
             return
-        self._ignored_at_all.add(conversation_id)
-        LOG.info(
-            "ignoring @all mentions without a direct mention of me conversation=%s",
-            conversation_id,
-        )
+        if _event_sender_id(line) == self.settings.self_open_id:
+            # 自己发的消息不回流，这是设计如此，不必当成过滤命中。
+            return
+        if mentions_named_user(body, self.settings.self_names):
+            # 点名到我了却还是被丢，说明是别的原因，不在这里记。
+            return
+        detail = body[:80]
+        if self.settings.ignore_at_all and mentions_at_all(body):
+            self._note_once(
+                self._ignored_at_all,
+                "ignoring @all that does not name me",
+                conversation_id,
+                detail,
+            )
+        elif self.settings.require_direct_mention:
+            self._note_once(
+                self._ignored_without_mention,
+                "ignoring message that does not @ me",
+                conversation_id,
+                detail,
+            )
+
+    def _note_once(
+        self, seen: dict[str, int], message: str, conversation_id: str, detail: str = ""
+    ) -> None:
+        # 每个会话每种原因只记前几次，既能看出过滤在生效，又不会刷屏。
+        key = f"{message}|{conversation_id}"
+        count = seen.get(key, 0)
+        seen[key] = count + 1
+        if count == _SKIP_LOG_SAMPLES:
+            LOG.info(
+                "%s conversation=%s (further drops for this reason muted)",
+                message,
+                conversation_id,
+            )
+            return
+        if count > _SKIP_LOG_SAMPLES:
+            return
+        if detail:
+            LOG.info("%s conversation=%s body=%r", message, conversation_id, detail)
+        else:
+            LOG.info("%s conversation=%s", message, conversation_id)
 
     def _note_unregistered_conversation(self, conversation_id: str) -> None:
         if conversation_id in self._ignored_conversations:
@@ -2651,6 +2684,11 @@ def _validate_configuration(settings: Settings) -> list[str]:
         errors.append("group alias collides with a contact alias")
     if settings.self_open_id in open_ids:
         errors.append("self identity appears in listener whitelist")
+    # 群聊靠正文里的 @ 文本认定「在叫我」，没有名字就一条都不可能命中。
+    if _groups(settings) and settings.require_direct_mention and not settings.self_names:
+        errors.append(
+            "self.name is required when groups are configured and require_direct_mention is on"
+        )
     if settings.quiet_window <= 0 or settings.cooldown < 0:
         errors.append("quiet window must be positive and cooldown must be non-negative")
     try:
