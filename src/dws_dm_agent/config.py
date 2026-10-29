@@ -80,6 +80,25 @@ class Settings:
         return str(self.raw["self"]["name"])
 
     @property
+    def self_names(self) -> tuple[str, ...]:
+        """@ 里可能用来指代本人的名字（钉钉群昵称常是「部门-姓名」）。"""
+        name = self.self_name.strip()
+        if not name:
+            return ()
+        names = [name]
+        for separator in ("-", "－", "·", "_"):
+            if separator in name:
+                tail = name.rsplit(separator, 1)[-1].strip()
+                if len(tail) >= 2 and tail not in names:
+                    names.append(tail)
+                break
+        return tuple(names)
+
+    @property
+    def ignore_at_all(self) -> bool:
+        return bool(self.raw.get("ignore_at_all", True))
+
+    @property
     def quiet_window(self) -> float:
         return float(self.raw.get("quiet_window_seconds", 20))
 

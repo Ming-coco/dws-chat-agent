@@ -40,6 +40,7 @@ from .core import (
     TaskScope,
     canonical_message_text,
     human_owns_conversation,
+    mentions_at_all,
     parse_dws_event,
     parse_local_datetime,
     sanitize_text,
@@ -176,6 +177,29 @@ def _event_conversation_id(line: str) -> str:
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return ""
+
+
+def _line_mentions_at_all(line: str) -> bool:
+    """这条原始事件正文里是否出现 @所有人（用来记录过滤动作）。"""
+    try:
+        outer = json.loads(line)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(outer, Mapping):
+        return False
+    payload = outer.get("data")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            payload = None
+    sources = [payload, outer] if isinstance(payload, Mapping) else [outer]
+    for source in sources:
+        for key in ("content", "text", "messageContent"):
+            value = source.get(key)
+            if isinstance(value, str) and mentions_at_all(value):
+                return True
+    return False
 
 
 def _image_resources(
@@ -316,6 +340,7 @@ class AgentService:
         self.listener_processes: set[asyncio.subprocess.Process] = set()
         # 未登记会话（含 @所有人）只记一次，避免日志被刷屏。
         self._ignored_conversations: set[str] = set()
+        self._ignored_at_all: set[str] = set()
         self.stop_event = asyncio.Event()
         self.capacity = int(settings.raw.get("max_parallel_conversations", 2))
         self.global_slots = asyncio.Semaphore(self.capacity)
@@ -966,11 +991,29 @@ class AgentService:
             return None
         group = _group_for_conversation(self.settings, conversation_id)
         if group is None:
-            # @所有人 和未登记群都会到这里；只记一次，避免刷屏。
+            # 未登记的群直接丢；只记一次，避免刷屏。
             self._note_unregistered_conversation(conversation_id)
             return None
-        return parse_dws_event(
-            line, group, self.settings.timezone, self.settings.self_open_id
+        event = parse_dws_event(
+            line,
+            group,
+            self.settings.timezone,
+            self.settings.self_open_id,
+            self.settings.self_names,
+            self.settings.ignore_at_all,
+        )
+        if event is None and self.settings.ignore_at_all and _line_mentions_at_all(line):
+            # @所有人 只记一次，用来确认过滤真的在生效。
+            self._note_at_all(conversation_id)
+        return event
+
+    def _note_at_all(self, conversation_id: str) -> None:
+        if conversation_id in self._ignored_at_all:
+            return
+        self._ignored_at_all.add(conversation_id)
+        LOG.info(
+            "ignoring @all mentions without a direct mention of me conversation=%s",
+            conversation_id,
         )
 
     def _note_unregistered_conversation(self, conversation_id: str) -> None:

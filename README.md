@@ -233,7 +233,10 @@ Group chats: `contacts` covers one-to-one messages, and a separate `groups` arra
 
 The registered group, not the individual person, is the permission boundary. `allowed_senders: []` responds to anyone in that group; listing `openDingTalkId`s or display names narrows it. `alias` and `open_conversation_id` are required, and the settings page fills the ID in from `dws chat group list-all` so it never has to be copied by hand.
 
-Two things behave differently from direct messages. First, the agent only reads the group when someone `@`s the account: ordinary chatter never wakes it, and group history is never replayed as pending requests because message history does not record whether a line was a mention. That also means the `supplement` path is skipped in groups; a newer `@` simply becomes its own request. Second, `@所有人` is indistinguishable from a direct mention in the `user_im_message_receive_at` event, so registering only the groups that genuinely need the agent is the sole defence — and every reply is public to all members of that group.
+Two things behave differently from direct messages. First, the agent only reads the group when someone `@`s the account: ordinary chatter never wakes it, and group history is never replayed as pending requests because message history does not record whether a line was a mention. That also means the `supplement` path is skipped in groups; a newer `@` simply becomes its own request. Second, every reply is public to all members of that group.
+
+`@所有人` is the one case the event stream cannot flag for you: `user_im_message_receive_at` has no `isAtAll` field. The mention text does survive in the message body, though — a real broadcast reads `@所有人 数据同步工具那个你们都知道的吧` while a real direct mention reads `@本人-张三 要找下某同事` — so the service drops any event whose body contains `@所有人` / `@全体成员` / `@all` and does not also name you. Set `"ignore_at_all": false` in `config.json` to accept broadcasts too. This is a text heuristic, so registering only the groups that genuinely need the agent remains the primary defence.
+
 
 When configured, the front profile must set `read_only: true`. It may use the tools available to its provider for bounded read-only investigation, then answer directly; any write or external side effect must escalate. The worker has normal coding-agent permissions and judges authorization from the original conversation plus repository rules; escalation itself never grants write permission.
 
@@ -245,6 +248,6 @@ With streaming cards enabled, acceptance is shown immediately. Both roles use th
 - Repository AGENTS.md files and the coding agent enforce project-specific change, review, test, and release policy.
 - The service rechecks the conversation before acknowledgements and final replies.
 - Automated DingTalk messages keep the platform AI tag enabled.
-- Group replies are public. Register a group only when it is acceptable for every member to see the answer, and remember that `@所有人` is indistinguishable from `@me` in the mention event.
+- Group replies are public. Register a group only when it is acceptable for every member to see the answer.
 
 Operational state, logs, audit data, and temporary sessions live under `state/` and are not committed. `.env` and `.env.*` are ignored; `.env.example` is the only exception.
