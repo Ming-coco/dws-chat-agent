@@ -78,6 +78,8 @@ Direct messages and group `@` mentions are separate subscriptions. `contacts` co
 
 `alias` and `open_conversation_id` are required; `title` falls back to `alias`. The settings page lists your groups through `dws chat group list-all`, so the ID never has to be copied by hand.
 
+That picker only shows the organization you are currently signed in to. `list-all` returns every group the account joined — including groups from other organizations — and `corpId` is the only field that tells them apart. It is not in the group list itself, so the service reads it per group through `dws chat +conversation-info`, caches the answers in `state/group_orgs.json`, and compares them against `dws profile list`'s `currentProfile`. Groups from other orgs are dropped from the picker (they can still be registered by hand if you really want one). A group whose org cannot be determined is kept, so a failed lookup never hides a group silently. dws has no batch form of this call, so the first refresh takes a few seconds and later ones read the cache.
+
 The registered group — not the person — is the permission boundary. `allowed_senders: []` lets anyone in that group trigger the agent; fill it with `openDingTalkId` or display names to narrow that down. Only registered groups are subscribed at all; a mention anywhere else is dropped and logged once per conversation.
 
 Two behaviours are deliberately different from direct messages:

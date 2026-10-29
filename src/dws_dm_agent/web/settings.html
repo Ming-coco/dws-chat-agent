@@ -1001,6 +1001,7 @@
     }
 
     let groupOptions = null;
+    let groupOrg = null;
 
     async function loadGroups(force) {
       if (groupOptions && !force) return groupOptions;
@@ -1008,6 +1009,7 @@
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
       groupOptions = data.groups || [];
+      groupOrg = data.org || null;
       return groupOptions;
     }
 
@@ -1063,18 +1065,22 @@
       });
 
       if (!groups.length) {
-        list.append(node("p", "config-note", "还没有登记群。未登记的群即使被 @ 也不会响应——这是唯一的防线，因为 @所有人 与 @我 在事件里无法区分。"));
+        list.append(node("p", "config-note", "还没有登记群。未登记的群即使你被 @ 也不会响应——只有登记过的群才会被订阅和回应。"));
       }
 
       const searchRow = node("div", "search-row");
       const query = node("input");
       query.type = "search";
-      query.placeholder = "搜索我所在的群（按名称筛选）";
+      query.placeholder = "搜索当前组织里的群（按名称筛选）";
       const reload = node("button", "", "刷新群列表");
       reload.type = "button";
       const results = node("div", "search-results");
       const status = node("span", "config-status");
       status.setAttribute("role", "status");
+      const orgLabel = () => {
+        const name = groupOrg && groupOrg.corpName;
+        return name ? `当前组织：${name}` : "";
+      };
 
       const renderResults = () => {
         clear(results);
@@ -1086,7 +1092,7 @@
         if (!values.length) {
           results.append(node("span", "project-empty", (groupOptions || []).length
             ? "没有匹配的群"
-            : "点「刷新群列表」从钉钉拉取我所在的群"));
+            : "点「刷新群列表」从钉钉拉取当前组织的群"));
           return;
         }
         values.forEach(candidate => {
@@ -1119,10 +1125,11 @@
 
       reload.addEventListener("click", async () => {
         reload.disabled = true;
-        status.textContent = "正在拉取群列表…";
+        status.textContent = "正在拉取当前组织的群…";
         try {
           await loadGroups(true);
-          status.textContent = `共 ${(groupOptions || []).length} 个群`;
+          const org = orgLabel();
+          status.textContent = `共 ${(groupOptions || []).length} 个群${org ? ` · ${org}` : ""}`;
           renderResults();
         } catch (error) {
           status.textContent = `拉取失败：${error.message}`;
@@ -1137,7 +1144,7 @@
         list,
         searchRow,
         results,
-        node("p", "config-note", "只登记真正需要它在场的群：事件里分不出「有人 @ 我」和「有人 @所有人」，未登记的群一律忽略。群聊默认只有被 @ 才响应，不读群里的普通发言。")
+        node("p", "config-note", "只列当前组织架构里的群。只登记真正需要它在场的群：群聊默认只回应点名叫到你的消息，@所有人 和群里的普通发言都不会触发。")
       );
       card.append(manager);
       editor.append(card);
