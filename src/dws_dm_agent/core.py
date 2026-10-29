@@ -220,12 +220,14 @@ def _extract_content(value: Any) -> str:
     return str(value).strip()
 
 
-# @所有人 在事件里的唯一痕迹就是正文文本：user_im_message_receive_at 的
-# 13 个字段没有任何一个告诉你「这条是不是群发」。真实样本里群发正文长这样：
-#   "@所有人 数据同步工具那个你们都知道的吧"
-# 单独 @ 某人则是 "@本人-张三 要找下某同事"，所以只能看正文。
-# 英文 all 加词边界，避免把 "@alliance" 这类正文当成群发。
-_AT_ALL_MARKER = re.compile(r"@\s*(?:所有人|全体成员|all\b)", re.IGNORECASE)
+# 群聊只处理明确点名到本人的消息。user_im_message_receive_at 的 13 个字段
+# 没有任何一个说明「这条是 @我 还是 @所有人」，但 @ 的文本保留在正文里：
+#   "@本人-张三 要找下某同事"          ← 点名我
+#   "@所有人 数据同步工具那个你们都知道的吧"  ← 群发
+#   "这个数据怎么取？"                  ← 没 @ 任何人
+# 所以判定只能看正文。全角 ＠ 也一并认，英文 all 加词边界避免命中 "@alliance"。
+_AT_ALL_MARKER = re.compile(r"[@＠]\s*(?:所有人|全体成员|all\b)", re.IGNORECASE)
+_MENTION_MARKER = re.compile(r"[@＠]\s*")
 
 
 def mentions_at_all(content: str) -> bool:
@@ -233,8 +235,49 @@ def mentions_at_all(content: str) -> bool:
 
 
 def mentions_named_user(content: str, names: Sequence[str]) -> bool:
+    """正文里是否点名到了 names 中的某个人。
+
+    @ 后面必须紧跟完整名字：`@张三龙` 不是本人，`@张三 看下` 才是。
+    """
     text = content or ""
-    return any(name and f"@{name}" in text for name in names)
+    for name in names:
+        name = (name or "").strip()
+        if not name:
+            continue
+        for marker in ("@" + name, "＠" + name):
+            start = text.find(marker)
+            while start >= 0:
+                end = start + len(marker)
+                following = text[end : end + 1]
+                # 名字后面还有字，说明 @ 的是更长的另一个名字。
+                if not following or following in " \t\r\n，,。.、:：;；!！?？)）]】>》\"'“”":
+                    return True
+                if not _is_word_char(following):
+                    return True
+                start = text.find(marker, start + 1)
+    return False
+
+
+def _is_word_char(char: str) -> bool:
+    return bool(char) and (char.isalnum() or "\u4e00" <= char <= "\u9fff")
+
+
+def event_body(line: str) -> str:
+    """取出事件正文，供「为什么不回」这类诊断复用。"""
+    try:
+        outer = json.loads(line)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(outer, Mapping):
+        return ""
+    payload = _json_object(outer.get("data"))
+    sources = [payload, outer] if isinstance(payload, Mapping) else [outer]
+    for source in sources:
+        value = _deep_value(source, {"content", "text", "messageContent"})
+        text = _extract_content(value)
+        if text:
+            return text
+    return ""
 
 
 def parse_dws_event(
@@ -244,6 +287,7 @@ def parse_dws_event(
     self_open_id: str = "",
     self_names: Sequence[str] = (),
     ignore_at_all: bool = True,
+    require_direct_mention: bool = True,
 ) -> IncomingEvent | None:
     try:
         outer = json.loads(line)
@@ -269,13 +313,12 @@ def parse_dws_event(
             return None
         if not contact.accepts_sender(sender_id, sender_name):
             return None
-        # @所有人 也走这个订阅，但只认点名到我自己的：正文里既没有我的名字
-        # 又出现 @所有人，就按群发丢掉（两者同时出现时保留，那是真点名）。
-        if (
-            ignore_at_all
-            and mentions_at_all(content)
-            and not mentions_named_user(content, self_names)
-        ):
+        # 只回点名到本人的消息。订阅本身覆盖 @所有人 和没 @ 任何人的消息，
+        # 所以这里必须自己判断，否则会把群里的普通聊天当成提问。
+        mentions_me = mentions_named_user(content, self_names)
+        if ignore_at_all and mentions_at_all(content) and not mentions_me:
+            return None
+        if require_direct_mention and not mentions_me:
             return None
     elif sender_id and sender_id != contact.open_dingtalk_id:
         return None
