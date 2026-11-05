@@ -204,9 +204,12 @@ class AgentRuntimeTests(unittest.TestCase):
             pi_worker = pi.prepare("worker", "worker", "prompt", root / "pw")
             self.assertEqual(pi_front.protocol, "pi-rpc")
             self.assertIn("rpc", pi_front.argv)
-            # 前台显式工具集在 escalate 之外追加服务工具（no_reply/事项记忆）。
+            # 前台显式工具集在 escalate 之外追加服务工具（no_reply/事项记忆）
+            # 和默认随仓库提供的 issue 读取、GitLab 流水线查询工具。
             self.assertIn(
-                "read,grep,find,ls,escalate,no_reply,task_record,task_lookup",
+                "read,grep,find,ls,escalate,jira_issue,"
+                "gitlab_project,gitlab_pipeline,gitlab_group,browser_run,"
+                "no_reply,task_record,task_lookup",
                 pi_front.argv,
             )
             self.assertNotIn("read,grep,find,ls", pi_worker.argv)
@@ -218,7 +221,9 @@ class AgentRuntimeTests(unittest.TestCase):
             pi_front = pi.prepare("front", "front-fast", "prompt", root / "pf-fast")
             # tools 为空串时 escalate 仍强制挂载，服务工具随之进入列表。
             self.assertIn(
-                "escalate,no_reply,task_record,task_lookup", pi_front.argv
+                "escalate,jira_issue,gitlab_project,gitlab_pipeline,"
+                "gitlab_group,browser_run,no_reply,task_record,task_lookup",
+                pi_front.argv,
             )
             self.assertNotIn("read,grep,find,ls", pi_front.argv)
 
@@ -842,7 +847,9 @@ class PiDwsToolsMountTests(unittest.TestCase):
             self.assertNotIn("pi_escalate.ts", " ".join(worker.argv))
             # 显式工具集只出现在 front；worker 默认全量工具，不能被收窄。
             self.assertIn(
-                "read,grep,find,ls,escalate,no_reply,task_record,task_lookup",
+                "read,grep,find,ls,escalate,jira_issue,"
+                "gitlab_project,gitlab_pipeline,gitlab_group,browser_run,"
+                "no_reply,task_record,task_lookup",
                 front.argv,
             )
             self.assertNotIn("--tools", worker.argv)
@@ -1131,6 +1138,45 @@ class AgentConfigStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "front agent"):
                 store.save(invalid)
             self.assertEqual((root / "config.json").read_bytes(), before)
+
+    def test_external_prompt_edit_blocks_a_stale_save(self) -> None:
+        """页面打开后有人直接改了 prompts/*.md，保存必须冲突而不是静默盖掉。
+
+        真实事故：在设置页移除白名单并保存，把刚加进 prompts/front.md 的规则
+        连同页面里那份旧正文一起写回去了，文件退回旧版本且没有任何提示。
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            AgentRuntimeTests()._runtime(root, "codex")
+            store = AgentConfigStore(
+                root / "config.json", root, is_idle=lambda: True
+            )
+            opened = store.snapshot()
+            original = (root / "prompts" / "front.md").read_text(encoding="utf-8")
+
+            # 模拟在页面开着的时候，用编辑器往提示词里加了一条规则。
+            with (root / "prompts" / "front.md").open("a", encoding="utf-8") as stream:
+                stream.write("\n- 新加的规则\n")
+
+            with self.assertRaises(ConfigConflictError):
+                store.save(opened)
+
+            # 冲突之后文件必须保持外部修改后的内容，没被页面里的旧正文覆盖。
+            self.assertIn("新加的规则", (root / "prompts" / "front.md").read_text(encoding="utf-8"))
+            self.assertNotEqual(
+                (root / "prompts" / "front.md").read_text(encoding="utf-8"), original
+            )
+
+    def test_prompt_edit_alone_changes_the_revision(self) -> None:
+        # 版本号必须随提示词内容变化，否则上面那条冲突检测根本触发不了。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            AgentRuntimeTests()._runtime(root, "codex")
+            store = AgentConfigStore(root / "config.json", root, is_idle=lambda: True)
+            before = store.snapshot()["revision"]
+            with (root / "prompts" / "worker.md").open("a", encoding="utf-8") as stream:
+                stream.write("\n- 另一条规则\n")
+            self.assertNotEqual(store.snapshot()["revision"], before)
 
     def test_dashboard_config_http_endpoint_reads_and_saves_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

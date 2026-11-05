@@ -36,11 +36,38 @@ class Contact:
     display_name: str
     user_id: str
     open_dingtalk_id: str
+    # 该联系人负责的项目目录名（workspace_root 下的子目录）。
+    # 第一个是 agent 的默认工作目录；空表示沿用 workspace_root。
+    projects: tuple[str, ...] = ()
+    # 非空表示这是一个群聊目标：发送与拉历史都走 openConversationId，
+    # 不再按人投递。群聊没有 user_id / open_dingtalk_id。
+    conversation_id: str = ""
+    # 群里只响应这些人的 @（openDingTalkId 或显示名）；空表示群内任何人。
+    allowed_senders: tuple[str, ...] = ()
+
+    @property
+    def is_group(self) -> bool:
+        return bool(self.conversation_id)
 
     @property
     def identity(self) -> str:
         """Stable local key when DingTalk does not expose a userId."""
+        if self.conversation_id:
+            # 群和目标用户的命名空间必须分开，避免 alias 撞上真实 userId。
+            return f"group:{self.conversation_id}"
         return self.user_id or self.open_dingtalk_id
+
+    def accepts_sender(self, sender_open_id: str, sender_name: str) -> bool:
+        """群里的发言人是否允许触发；单聊联络人恒为 True（另有身份校验）。"""
+        if not self.is_group:
+            return True
+        if not self.allowed_senders:
+            return True
+        allowed = {value.strip().casefold() for value in self.allowed_senders}
+        return (
+            sender_open_id.strip().casefold() in allowed
+            or sender_name.strip().casefold() in allowed
+        )
 
 
 @dataclass(frozen=True)
@@ -51,6 +78,13 @@ class IncomingEvent:
     contact: Contact
     content: str
     created_at: datetime
+    # 群聊里 contact 是整个群，真正的发言人在这里；单聊留空表示就是 contact 本人。
+    sender_open_dingtalk_id: str = ""
+    sender_name: str = ""
+
+    @property
+    def sender_label(self) -> str:
+        return self.sender_name or self.contact.display_name
 
 
 @dataclass(frozen=True)
@@ -186,7 +220,75 @@ def _extract_content(value: Any) -> str:
     return str(value).strip()
 
 
-def parse_dws_event(line: str, contact: Contact, timezone: tzinfo) -> IncomingEvent | None:
+# 群聊只处理明确点名到本人的消息。user_im_message_receive_at 的 13 个字段
+# 没有任何一个说明「这条是 @我 还是 @所有人」，但 @ 的文本保留在正文里：
+#   "@本人-张三 要找下某同事"          ← 点名我
+#   "@所有人 数据同步工具那个你们都知道的吧"  ← 群发
+#   "这个数据怎么取？"                  ← 没 @ 任何人
+# 所以判定只能看正文。全角 ＠ 也一并认，英文 all 加词边界避免命中 "@alliance"。
+_AT_ALL_MARKER = re.compile(r"[@＠]\s*(?:所有人|全体成员|all\b)", re.IGNORECASE)
+_MENTION_MARKER = re.compile(r"[@＠]\s*")
+
+
+def mentions_at_all(content: str) -> bool:
+    return bool(_AT_ALL_MARKER.search(content or ""))
+
+
+def mentions_named_user(content: str, names: Sequence[str]) -> bool:
+    """正文里是否点名到了 names 中的某个人。
+
+    @ 后面必须紧跟完整名字：`@张三龙` 不是本人，`@张三 看下` 才是。
+    """
+    text = content or ""
+    for name in names:
+        name = (name or "").strip()
+        if not name:
+            continue
+        for marker in ("@" + name, "＠" + name):
+            start = text.find(marker)
+            while start >= 0:
+                end = start + len(marker)
+                following = text[end : end + 1]
+                # 名字后面还有字，说明 @ 的是更长的另一个名字。
+                if not following or following in " \t\r\n，,。.、:：;；!！?？)）]】>》\"'“”":
+                    return True
+                if not _is_word_char(following):
+                    return True
+                start = text.find(marker, start + 1)
+    return False
+
+
+def _is_word_char(char: str) -> bool:
+    return bool(char) and (char.isalnum() or "\u4e00" <= char <= "\u9fff")
+
+
+def event_body(line: str) -> str:
+    """取出事件正文，供「为什么不回」这类诊断复用。"""
+    try:
+        outer = json.loads(line)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(outer, Mapping):
+        return ""
+    payload = _json_object(outer.get("data"))
+    sources = [payload, outer] if isinstance(payload, Mapping) else [outer]
+    for source in sources:
+        value = _deep_value(source, {"content", "text", "messageContent"})
+        text = _extract_content(value)
+        if text:
+            return text
+    return ""
+
+
+def parse_dws_event(
+    line: str,
+    contact: Contact,
+    timezone: tzinfo,
+    self_open_id: str = "",
+    self_names: Sequence[str] = (),
+    ignore_at_all: bool = True,
+    require_direct_mention: bool = True,
+) -> IncomingEvent | None:
     try:
         outer = json.loads(line)
     except json.JSONDecodeError:
@@ -197,17 +299,33 @@ def parse_dws_event(line: str, contact: Contact, timezone: tzinfo) -> IncomingEv
     sender_id = str(
         _deep_value(payload, {"sender_open_dingtalk_id", "senderOpenDingTalkId", "senderId"}) or ""
     )
-    if sender_id and sender_id != contact.open_dingtalk_id:
-        return None
+    sender_name = str(_deep_value(payload, {"sender", "sender_name", "senderName"}) or "")
+    conversation_id = str(
+        _deep_value(payload, {"conversation_id", "conversationId", "openConversationId"})
+        or (contact.conversation_id if contact.is_group else f"dm:{contact.identity}")
+    )
     content = _extract_content(_deep_value(payload, {"content", "text", "messageContent"}))
+    if contact.is_group:
+        # 一个订阅覆盖所有群，先按会话 id 归到登记的群，再按发言人筛选。
+        if conversation_id != contact.conversation_id:
+            return None
+        if sender_id and sender_id == self_open_id:
+            return None
+        if not contact.accepts_sender(sender_id, sender_name):
+            return None
+        # 只回点名到本人的消息。订阅本身覆盖 @所有人 和没 @ 任何人的消息，
+        # 所以这里必须自己判断，否则会把群里的普通聊天当成提问。
+        mentions_me = mentions_named_user(content, self_names)
+        if ignore_at_all and mentions_at_all(content) and not mentions_me:
+            return None
+        if require_direct_mention and not mentions_me:
+            return None
+    elif sender_id and sender_id != contact.open_dingtalk_id:
+        return None
     if not content:
         return None
     message_id = str(
         _deep_value(payload, {"message_id", "messageId", "openMessageId", "msgId"}) or ""
-    )
-    conversation_id = str(
-        _deep_value(payload, {"conversation_id", "conversationId", "openConversationId"})
-        or f"dm:{contact.identity}"
     )
     event_id = str(_deep_value(outer, {"event_id", "eventId", "id"}) or "")
     if not message_id:
@@ -222,6 +340,8 @@ def parse_dws_event(line: str, contact: Contact, timezone: tzinfo) -> IncomingEv
         contact=contact,
         content=content,
         created_at=parse_local_datetime(created_raw, timezone),
+        sender_open_dingtalk_id=sender_id,
+        sender_name=sender_name,
     )
 
 

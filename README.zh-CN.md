@@ -69,6 +69,9 @@ src/dws_dm_agent/
   runners/runtime.py         Codex、Claude、Pi 和自定义 JSONL 会话协议
   runners/escalate_mcp.py    会话内无参数 stdio MCP 服务
   runners/pi_escalate.ts     Pi 到 stdio MCP 的适配器
+  runners/jira_tools.py      只读 Jira issue 后端（issue 读取能力）
+  runners/pi_jira.ts         注册 jira_issue 工具的 Pi 适配器
+  runners/pi_dws_tools.ts    no_reply 与事项记忆工具的 Pi 适配器
   web/                       仪表盘、设置、主题、动效和 favicon
 tests/                       服务、仪表盘、MCP 和 runner 回归测试
 evals/front-routing.json     前台路由回放样本
@@ -203,6 +206,8 @@ PYTHONPATH=src python3 -m dws_dm_agent.front_eval --concurrency 1
 `command` 是精确参数数组，永远不会通过 shell 执行。因此 `ccr code` 代理启动器、绝对路径、Windows `.cmd` shim 或带固定参数的包装器都不需要额外转义。适配器会追加 `protocol` 所需参数。凭据应放在 `environment` 或进程登录中，绝不能写进 `command`。
 
 `label` 是工作流阶段的展示名称；`options` 保存协议专用设置；`extra_args` 会追加到适配器必需参数之后。`timeout_seconds: 0` 表示 Agent 无截止时间。对 Pi 而言，`options.tools: null` 会省略 `--tools` 白名单并暴露内置工具，前台仍由 `read_only: true` 和提示词共同约束权限。
+
+读取 issue 的能力随仓库走，不随机器走。每个 Pi 阶段都会加载安装包内的 `runners/pi_jira.ts`，注册一个只读的 `jira_issue` 工具；该工具调用同样在包内的 `runners/jira_tools.py`。所以换一个地方部署时，只需要仓库加 `JIRA_PAT`，不必重建任何全局 Pi 配置或 MCP 注册文件。它默认开启，原因正是 `config.json` 被 gitignore：开关只存在那里，新部署就永远拿不到这个能力；要关掉就在阶段的 `options` 里写 `"jira": false`。变量缺失时工具照样加载，每次调用都明确返回「未配置 JIRA_PAT」，而不是静默失败。令牌填在部署目录的 `.env` 里（`JIRA_PAT=…`）即可——服务只用 `.env` 展开 `config.json` 里的 `${...}`，并不会把它导出给子进程，所以后端自己读这个文件（服务把路径作为 `DWS_JIRA_ENV_FILE` 传下来），两处都设置时真实环境变量优先。因此换令牌不需要重启服务。`JIRA_BASE_URL`（默认 `https://issue.hsjdata.com`）和 `JIRA_TIMEOUT_SECONDS`（默认 30）同样从这两处读取。既接受 `CQNSHCYDN-1422` 这样的裸单号，也接受完整的 `/browse/…` 链接，返回标题、状态、解决结果、经办人、报告人、时间、描述、最近评论、子任务、关联单据和附件名；它不会建单、改字段、加评论或流转状态。令牌只经进程环境继承传递，不进提示词也不进命令行。开启该工具不会收窄阶段的工具集：`options.tools` 未设置（worker 的默认情形）时适配器依旧不输出 `--tools` 白名单，只有本来就受限的列表才会补上 `jira_issue`。
 
 内置协议包括 `codex-app-server`、`claude-stream-json` 和 `pi-rpc`。当前 `ccr code` 启动器会转发 Claude Code 参数，Oh My Pi 则提供原生 `--mode rpc`。完全独立的 CLI 可以使用 `custom-jsonl-v1`，其简短 stdin/stdout 协议见 [docs/custom-agent-protocol.md](docs/custom-agent-protocol.md)。前台适配器通过 `DWS_ESCALATE_MCP_CONFIG` 获取当前会话 MCP 路径。
 

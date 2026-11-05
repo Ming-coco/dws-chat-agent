@@ -48,6 +48,7 @@ Inspect the existing `.env`, `config.json`, CLI logins, and repository state fir
 - the operator's DingTalk identity
 - the explicit allowlist of people to monitor
 - aggregate workspace and dedicated worktree roots
+- which projects each monitored person is responsible for (directory names under the workspace root)
 - active front and worker launchers/models
 - whether this installation should remain in `shadow` or switch to `live`
 
@@ -57,7 +58,45 @@ Never echo discovered private values back. Confirm monitored people by display n
 
 If `.env` is absent, copy `.env.example` to `.env`; never overwrite it. On macOS/Linux set mode `0600`. Fill private values in `.env` without displaying the file afterward.
 
-If the service is already running and idle, open the gear on the localhost dashboard, or go directly to `http://127.0.0.1:8765/settings`. This separate page can safely edit public profile, workflow, automatic-message, and prompt fields and applies them to subsequent sessions immediately. It deliberately does not expose `.env`, contact IDs, provider options, or profile environment variables.
+If the service is already running and idle, open the gear on the localhost dashboard, or go directly to `http://127.0.0.1:8765/settings`. This separate page can safely edit public profile, workflow, automatic-message, prompt, and per-contact project assignment fields and applies them to subsequent sessions immediately. Project assignments take effect for agent working directories after the service restarts; the 刷新沙盒 button rebuilds the per-contact sandbox directories right away so a mistake shows up before the next message arrives. The page deliberately does not expose `.env`, contact IDs, provider options, or profile environment variables.
+
+### Group chats
+
+Direct messages and group `@` mentions are separate subscriptions. `contacts` covers one-to-one messages; `groups` covers mentions in registered groups. Both arrays accept the same `projects` field, so a group can be routed to a project just like a person:
+
+```json
+"groups": [
+  {
+    "alias": "客户 B 群",
+    "title": "客户 B 对接群",
+    "open_conversation_id": "cidXXXXXXXX==",
+    "projects": ["客户 B"],
+    "allowed_senders": []
+  }
+]
+```
+
+`alias` and `open_conversation_id` are required; `title` falls back to `alias`. The settings page lists your groups through `dws chat group list-all`, so the ID never has to be copied by hand.
+
+That picker only shows the organization you are currently signed in to. `list-all` returns every group the account joined — including groups from other organizations — and `corpId` is the only field that tells them apart. It is not in the group list itself, so the service reads it per group through `dws chat +conversation-info`, caches the answers in `state/group_orgs.json`, and compares them against `dws profile list`'s `currentProfile`. Groups from other orgs are dropped from the picker (they can still be registered by hand if you really want one). A group whose org cannot be determined is kept, so a failed lookup never hides a group silently. dws has no batch form of this call, so the first refresh takes a few seconds and later ones read the cache.
+
+The registered group — not the person — is the permission boundary. `allowed_senders: []` lets anyone in that group trigger the agent; fill it with `openDingTalkId` or display names to narrow that down. Only registered groups are subscribed at all; a mention anywhere else is dropped and logged once per conversation.
+
+Two behaviours are deliberately different from direct messages:
+
+- The group is only read when someone `@`s the account. Ordinary group chatter never wakes the agent, and group history is never replayed as pending requests, because message history does not record whether a line was a mention.
+- Group history is never replayed, so the `supplement` path is skipped in groups; a newer `@` simply becomes its own request.
+
+`@所有人` and unattended chatter need one extra filter. `user_im_message_receive_at` has no `isAtAll` field and does not say who was mentioned, so the service decides from the message body. The `@` text does survive there — a real broadcast reads `@所有人 数据同步工具那个你们都知道的吧`, a real direct mention reads `@本人-张三 要找下某同事`, and ordinary group chatter has no `@` at all. A group message is answered only when the body names you, matching `self.name` plus the parts either side of a `-`; `@所有人`, `@`s aimed at other people, and plain chatter are dropped and logged once per conversation. A broadcast that also names you is kept.
+
+Two switches control this, both defaulting to true:
+
+- `"require_direct_mention": true` — require the body to name you before answering in a group.
+- `"ignore_at_all": true` — additionally drop `@所有人` / `@全体成员` / `@all` broadcasts.
+
+Turn either off only when debugging why a group message did not get an answer. This is a text heuristic, not a protocol guarantee: registering only the groups that genuinely need the agent remains the primary defence.
+
+Replies in a group are public to every member, and the reply `@`s the person who asked. Prompt templates receive `conversation_kind` and, for groups, `group_reminder`, which tells the worker not to disclose other contacts, other projects, or private conversation content.
 
 For an initial installation, or when the service cannot start, configure reusable profiles under `agents` and choose them from a preset under `workflows.presets`. Each profile must define:
 
