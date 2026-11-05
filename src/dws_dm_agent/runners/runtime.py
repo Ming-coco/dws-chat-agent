@@ -1067,6 +1067,46 @@ class AgentRuntime:
                 environment["DWS_TASK_CONTEXT"], encoding="utf-8"
             )
             environment["DWS_TASK_CONTEXT_FILE"] = str(task_context_path)
+        if protocol == "pi-rpc" and stage.profile.options.get("jira") is not False:
+            # issue 读取后端只传脚本路径与解释器，凭据 JIRA_PAT 由服务进程
+            # 环境继承（pi 子进程拿到的是 os.environ 副本），不写进提示词、
+            # 不进命令行参数，模型看到的是工具结果而不是令牌。
+            environment["DWS_JIRA_PYTHON"] = sys.executable
+            environment["DWS_JIRA_SCRIPT"] = str(
+                Path(__file__).with_name("jira_tools.py").resolve()
+            )
+            # 服务只用 .env 解析 config.json 里的 ${...}，不会把它灌进
+            # os.environ，所以 .env 里的 JIRA_PAT 到不了 pi 子进程。把路径
+            # 交出去，让后端按需自己读：部署方只需在 .env 填一行令牌，
+            # 补上令牌后也不必重启服务就能生效。
+            env_file = (self._config_dir / ".env").resolve()
+            if env_file.is_file():
+                environment["DWS_JIRA_ENV_FILE"] = str(env_file)
+                # 通用名字，后续新增的内置能力都用它，避免每加一个能力
+                # 就要在部署目录里多配一个环境变量。
+                environment["DWS_AGENT_ENV_FILE"] = str(env_file)
+        if protocol == "pi-rpc" and stage.profile.options.get("gitlab") is not False:
+            # 与 jira 同样的约定：脚本路径经环境变量传，令牌由后端自己从
+            # 进程环境或部署目录的 .env 读取，绝不进命令行参数或提示词。
+            environment["DWS_GITLAB_PYTHON"] = sys.executable
+            environment["DWS_GITLAB_SCRIPT"] = str(
+                Path(__file__).with_name("gitlab_tools.py").resolve()
+            )
+            env_file = (self._config_dir / ".env").resolve()
+            if env_file.is_file():
+                environment["DWS_GITLAB_ENV_FILE"] = str(env_file)
+                environment["DWS_AGENT_ENV_FILE"] = str(env_file)
+        if protocol == "pi-rpc" and stage.profile.options.get("browser") is not False:
+            # 浏览器后端只传脚本路径与解释器；不需要任何凭据。
+            # 需要指定浏览器时可配 BROWSER_PATH，后端自己会读 .env。
+            environment["DWS_BROWSER_PYTHON"] = sys.executable
+            environment["DWS_BROWSER_SCRIPT"] = str(
+                Path(__file__).with_name("browser_tools.py").resolve()
+            )
+            env_file = (self._config_dir / ".env").resolve()
+            if env_file.is_file():
+                environment["DWS_BROWSER_ENV_FILE"] = str(env_file)
+                environment["DWS_AGENT_ENV_FILE"] = str(env_file)
         # workspace 是服务按联系人算出的沙盒主项目目录；未提供时沿用全局根。
         cwd = self._workspace_root if workspace is None else Path(workspace)
         if workspace is not None and not cwd.is_dir():
