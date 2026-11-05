@@ -8,15 +8,15 @@
   const designs = [
     {
       id: "metropolis",
-      name: "Metropolis",
+      name: "控制台",
       home: "/",
-      note: "DIAMOND Network · 卡片式运营控制台"
+      note: "默认。卡片式控制台，与设置页同一套外观"
     },
     {
       id: "diamond",
-      name: "Diamond",
+      name: "战术拓扑",
       home: "/diamond-preview",
-      note: "DIAMOND Network · 战术拓扑与菱形几何"
+      note: "菱形几何的实验版首页"
     }
   ];
   const themes = [
@@ -307,7 +307,9 @@
 
   function currentDesign() {
     const stored = localStorage.getItem(DESIGN_KEY);
-    return designs.find(item => item.id === stored) || designs[1];
+    // 默认落在控制台。以前默认是 diamond，会让访问 "/" 立刻被重定向到
+    // /diamond-preview，等于控制台首页默认打不开。
+    return designs.find(item => item.id === stored) || designs[0];
   }
 
   function selectDesign(id) {

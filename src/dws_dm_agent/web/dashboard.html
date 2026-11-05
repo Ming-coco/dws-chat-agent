@@ -1,180 +1,16 @@
 <!doctype html>
-<html lang="zh-CN" data-ark-theme="metropolis" data-ark-depth="minimal">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>PROJECT D.I.A.M.O.N.D. · Metropolis</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Oxanium:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
-  <style>
-    :root {
-      color-scheme: dark;
-      --bg: #06151d;
-      --panel: #102431;
-      --panel-2: #1b2e3a;
-      --control: #0c1d27;
-      --control-deep: #051219;
-      --line: #30434d;
-      --line-strong: #465962;
-      --text: #f2f6f5;
-      --text-secondary: #c9d2d1;
-      --muted: #8e9c9e;
-      --accent: #4ed6c0;
-      --accent-ink: #4ed6c0;
-      --accent-text: #101416;
-      --accent-soft: rgba(78,214,192,.1);
-      --accent-border: rgba(78,214,192,.34);
-      --accent-2: #56c596;
-      --accent-2-ink: #56c596;
-      --accent-2-soft: rgba(86,197,150,.09);
-      --accent-2-border: rgba(86,197,150,.4);
-      --accent-3: #f5bd4f;
-      --accent-3-ink: #f5bd4f;
-      --accent-3-soft: rgba(245,189,79,.09);
-      --accent-3-border: rgba(245,189,79,.4);
-      --normal: #56c596;
-      --attention: #f5bd4f;
-      --urgent: #e85332;
-      --success: #56c596;
-      --success-ink: #56c596;
-      --success-soft: rgba(86,197,150,.12);
-      --success-border: rgba(86,197,150,.42);
-      --info: #4ed6c0;
-      --info-ink: #4ed6c0;
-      --info-soft: rgba(78,214,192,.12);
-      --info-border: rgba(78,214,192,.42);
-      --warning: #f5bd4f;
-      --warning-ink: #f5bd4f;
-      --warning-soft: rgba(245,189,79,.12);
-      --warning-border: rgba(245,189,79,.38);
-      --danger: #e85332;
-      --danger-ink: #ff7659;
-      --danger-soft: rgba(232,83,50,.12);
-      --danger-border: rgba(232,83,50,.4);
-      --lime: var(--accent);
-      --cyan: var(--accent);
-      --red: var(--danger);
-      --amber: var(--warning);
-      --purple: var(--accent);
-      --radius: 18px;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background:
-        radial-gradient(circle at 8% 0%, var(--accent-soft), transparent 28rem),
-        radial-gradient(circle at 95% 12%, var(--accent-2-soft), transparent 25rem),
-        radial-gradient(circle at 55% 100%, var(--accent-3-soft), transparent 32rem),
-        var(--bg);
-      color: var(--text);
-      font: 14px/1.55 "Oxanium", "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
-    }
-    select { font: inherit; }
-    .shell { width: min(1480px, calc(100% - 40px)); margin: 0 auto; padding: 28px 0 48px; }
-    header { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
-    .brand { display: flex; align-items: center; gap: 14px; }
-    .mark {
-      width: 46px; height: 46px; display: grid; place-items: center; overflow: hidden;
-      border: 1px solid var(--accent-border); border-radius: 14px; background: var(--accent);
-      box-shadow: inset 0 1px 0 rgba(255,255,255,.18), 0 8px 24px var(--accent-soft);
-    }
-    .mark svg { width: 34px; height: 34px; display: block; }
-    .mark .glyph { fill: var(--accent-text); }
-    h1 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
-    .eyebrow { color: var(--muted); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
-    .service-state { display: flex; align-items: center; gap: 10px; color: var(--muted); }
-    .header-actions { display: flex; align-items: center; gap: 12px; }
-    .settings-link {
-      width: 38px; height: 38px; display: grid; place-items: center;
-      color: var(--text); text-decoration: none; font-size: 20px; line-height: 1;
-      background: var(--control); border: 1px solid var(--line); border-radius: 11px;
-    }
-    .settings-link:hover, .settings-link:focus-visible { color: var(--lime); border-color: var(--cyan); outline: none; }
-    .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 0 5px var(--danger-soft); }
-    .pulse.live { background: var(--accent); box-shadow: 0 0 0 5px var(--accent-soft); }
-    .metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
-    .metric, .panel { border: 1px solid var(--line); background: var(--panel); border-radius: var(--radius); }
-    .metric { padding: 16px 18px; }
-    .metric span { display: block; color: var(--muted); font-size: 12px; }
-    .metric strong { display: block; margin-top: 4px; font-size: 25px; letter-spacing: -.04em; }
-    .metric strong.brand { color: var(--accent-ink); }
-    .metric strong.success { color: var(--success-ink); }
-    .metric strong.info { color: var(--info-ink); }
-    .metric strong.warning { color: var(--warning-ink); }
-    .metric strong.danger { color: var(--danger-ink); }
-    .workbench { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(280px, .7fr); gap: 14px; margin-bottom: 14px; }
-    .panel { padding: 20px; min-width: 0; }
-    .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
-    .panel h2 { margin: 0; font-size: 14px; letter-spacing: .02em; }
-    .hint { color: var(--muted); font-size: 12px; }
-    .active-list, .queue-list, .recent-list { display: grid; gap: 10px; }
-    .active-card {
-      background: linear-gradient(90deg, var(--info-soft), transparent 28rem), var(--panel-2);
-      border: 1px solid var(--line-strong); border-left: 3px solid var(--info); border-radius: 15px; padding: 18px;
-    }
-    .active-top, .run-top { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
-    .person { font-size: 17px; font-weight: 700; }
-    .request { color: var(--text-secondary); margin: 9px 0 16px; max-width: 78ch; white-space: pre-wrap; }
-    .badge { display: inline-flex; align-items: center; min-height: 25px; padding: 2px 9px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--text-secondary); background: var(--control); font-size: 12px; white-space: nowrap; }
-    .badge.brand { color: var(--accent-ink); border-color: var(--accent-border); background: var(--accent-soft); }
-    .badge.success { color: var(--success-ink); border-color: var(--success-border); background: var(--success-soft); }
-    .badge.info { color: var(--info-ink); border-color: var(--info-border); background: var(--info-soft); }
-    .badge.warning { color: var(--warning-ink); border-color: var(--warning-border); background: var(--warning-soft); }
-    .badge.danger { color: var(--danger-ink); border-color: var(--danger-border); background: var(--danger-soft); }
-    .badge.muted { color: var(--muted); }
-    .steps { display: grid; grid-template-columns: repeat(9, 1fr); gap: 5px; }
-    .step { min-width: 0; }
-    .step-line { height: 4px; border-radius: 999px; background: var(--line); margin-bottom: 7px; }
-    .step.done .step-line { background: var(--success); }
-    .step.current .step-line { background: var(--info); box-shadow: 0 0 0 1px var(--info-border); }
-    .step-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10px; }
-    .step.current .step-label { color: var(--text); }
-    .meta { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--muted); font-size: 12px; margin-top: 14px; }
-    .queue-item { padding: 13px 14px; border: 1px solid var(--line); border-left: 3px solid var(--warning); border-radius: 13px; background: linear-gradient(90deg, var(--warning-soft), transparent 16rem), var(--panel-2); }
-    .queue-item strong { display: block; }
-    .queue-item .request { margin: 6px 0 8px; }
-    .empty { display: grid; place-items: center; min-height: 130px; color: var(--muted); border: 1px dashed var(--line); border-radius: 14px; text-align: center; padding: 20px; }
-    .filters { display: flex; gap: 8px; flex-wrap: wrap; }
-    select { color: var(--text); background: var(--control); border: 1px solid var(--line); border-radius: 10px; padding: 7px 30px 7px 10px; }
-    .run {
-      --tone: var(--line-strong); --tone-soft: transparent;
-      border: 1px solid var(--line); border-left: 3px solid var(--tone); border-radius: 14px;
-      background: linear-gradient(90deg, var(--tone-soft), transparent 24rem), var(--panel-2); overflow: hidden;
-    }
-    .run.tone-success { --tone: var(--success); --tone-soft: var(--success-soft); }
-    .run.tone-info { --tone: var(--info); --tone-soft: var(--info-soft); }
-    .run.tone-warning { --tone: var(--warning); --tone-soft: var(--warning-soft); }
-    .run.tone-danger { --tone: var(--danger); --tone-soft: var(--danger-soft); }
-    .run summary { list-style: none; cursor: pointer; padding: 15px 16px; }
-    .run summary::-webkit-details-marker { display: none; }
-    .run:hover { border-color: var(--line-strong); border-left-color: var(--tone); }
-    .run-title { min-width: 0; }
-    .run-title strong { margin-right: 10px; }
-    .run-title p { margin: 5px 0 0; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .run-time { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
-    .run-body { border-top: 1px solid var(--line); padding: 16px; display: grid; gap: 14px; color: var(--text-secondary); }
-    .detail-block h3 { margin: 0 0 6px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
-    .detail-block p { margin: 0; white-space: pre-wrap; }
-    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-    .chip { max-width: 100%; overflow-wrap: anywhere; border: 1px solid var(--line); background: var(--control); border-radius: 8px; padding: 4px 8px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
-    .code-change { border-left: 2px solid var(--cyan); padding-left: 12px; }
-    footer { color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 12px; margin-top: 14px; }
-    @media (max-width: 900px) {
-      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .workbench { grid-template-columns: 1fr; }
-      .steps { grid-template-columns: repeat(4, 1fr); }
-      header { align-items: flex-start; flex-direction: column; }
-    }
-  </style>
-  <link rel="icon" href="/diamond-favicon.svg?v=3" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=1">
+  <title>DWS Chat Agent · 控制台</title>
+  <link rel="icon" href="/favicon.svg?v=3" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css?v=2">
   <script src="/theme.js"></script>
 </head>
 <body>
-  <main class="shell">
-    <header>
+  <header class="topbar">
+    <div class="topbar-inner">
       <div class="brand">
         <div class="mark" aria-hidden="true">
           <svg viewBox="0 0 64 64" focusable="false">
@@ -182,30 +18,32 @@
             <path class="glyph" d="m32 24 8 8-8 8-8-8 8-8Z"/>
           </svg>
         </div>
-        <div><div class="eyebrow">DIAMOND Network / Metropolis</div><h1>PROJECT D.I.A.M.O.N.D.</h1></div>
+        <div><div class="eyebrow">DWS Chat Agent</div><h1>控制台</h1></div>
       </div>
-      <div class="header-actions">
+      <div class="topbar-actions">
         <div class="service-state"><span id="pulse" class="pulse"></span><span id="serviceText">正在连接本地代理…</span></div>
-        <a class="settings-link" href="/settings" aria-label="打开 DIAMOND Settings" title="DIAMOND Settings">⚙</a>
+        <a class="settings-link" href="/settings" aria-label="打开设置" title="设置">⚙</a>
       </div>
-    </header>
+    </div>
+  </header>
 
+  <main class="shell">
     <section id="metrics" class="metrics"></section>
 
     <section class="workbench">
       <article class="panel">
-        <div class="panel-head"><h2>当前任务 · Operations</h2><span class="hint">真实阶段 · 不显示虚假百分比</span></div>
+        <div class="panel-head"><h2>当前任务</h2><span class="hint">真实阶段 · 不显示虚假百分比</span></div>
         <div id="active" class="active-list"></div>
       </article>
       <aside class="panel">
-        <div class="panel-head"><h2>任务队列 · Operations</h2><span id="queueCount" class="hint"></span></div>
+        <div class="panel-head"><h2>等待队列</h2><span id="queueCount" class="hint"></span></div>
         <div id="queue" class="queue-list"></div>
       </aside>
     </section>
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2>会话 · Channels</h2><span class="hint">点击展开代码、验证与告警</span></div>
+        <div><h2>会话记录</h2><span class="hint">点击展开代码、验证与告警</span></div>
         <div class="filters">
           <select id="contactFilter" aria-label="联系人筛选"><option value="">全部联系人</option></select>
           <select id="statusFilter" aria-label="状态筛选"><option value="">全部状态</option></select>
@@ -213,7 +51,7 @@
       </div>
       <div id="recent" class="recent-list"></div>
     </section>
-    <footer><span>DIAMOND Network · 仅监听 127.0.0.1 · 状态每 3 秒刷新</span><span id="updated"></span></footer>
+    <footer><span>仅监听 127.0.0.1 · 状态每 3 秒刷新</span><span id="updated"></span></footer>
   </main>
 
   <script>

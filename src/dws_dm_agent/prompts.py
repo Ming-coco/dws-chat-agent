@@ -10,15 +10,21 @@ STAGE_PROMPT_VARIABLES = frozenset(
     {
         "self_name", "agent_name", "worker_name", "contact_name",
         "contact_alias", "contact_user_id", "contact_open_dingtalk_id",
+        # conversation_kind 区分单聊与群聊；group_reminder 只在群聊时非空，
+        # 承载「回复全群可见」这类只在群里成立的约束，单聊时渲染成空行。
+        "conversation_kind", "group_reminder",
         "session_id", "prior_attempt",
-        "workspace_root", "worktree_root", "recent_context_json",
+        # project_root 是 agent 的 cwd（沙盒内主项目）；projects_json 只含
+        # 该联系人自己负责的项目。刻意不暴露 workspace_root / worktree_root：
+        # 它们是容器路径，写进提示词等于提示模型去浏览别的项目。
+        "project_root", "projects_json", "delivery_dir", "recent_context_json",
         "current_messages_json", "active_tasks_json", "now",
     }
 )
 SUPPLEMENT_PROMPT_VARIABLES = frozenset(
     {
         "supplement_messages_json", "session_id", "contact_name",
-        "contact_alias", "self_name",
+        "contact_alias", "self_name", "conversation_kind",
     }
 )
 

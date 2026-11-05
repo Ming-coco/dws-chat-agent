@@ -183,6 +183,15 @@ class DwsClient:
         --open-dingtalk-id. Network errors are not downgraded; they retry in the
         caller and would fail identically on either identity.
         """
+        if contact.is_group:
+            return await self._retry_network_json_command(
+                [
+                    "chat", "message", "list",
+                    "--conversation-id", contact.conversation_id,
+                    "--time", query_time, "--direction", "older", "--limit", limit,
+                ],
+                operation="history",
+            )
         if contact.user_id:
             try:
                 return await self._retry_network_json_command(
@@ -211,11 +220,26 @@ class DwsClient:
     async def send(
         self, contact: Contact, content: str, send_uuid: str, *,
         dry_run: bool = False, retry_network: bool = False,
+        at_open_dingtalk_ids: Sequence[str] = (),
     ) -> tuple[str | None, Any]:
         content = re.sub(r"\$(?=\d+\.\d)", "USD ", content)
+        command = self._send_json_command if retry_network else self._json_command
+        if contact.is_group:
+            arguments = [
+                "chat", "message", "send",
+                "--conversation-id", contact.conversation_id,
+                "--text", content,
+                f"--ai-tag={'true' if self.ai_tag else 'false'}",
+                "--uuid", send_uuid, "--yes",
+            ]
+            mentions = [value for value in at_open_dingtalk_ids if value]
+            if mentions:
+                arguments.extend(["--at-open-dingtalk-ids", ",".join(mentions)])
+            if dry_run:
+                arguments.append("--dry-run")
+            return _find_message_id(await command(arguments)), None
         if not contact.user_id and not contact.open_dingtalk_id:
             raise ValueError("DingTalk recipient has no user or open DingTalk id")
-        command = self._send_json_command if retry_network else self._json_command
         if contact.user_id:
             try:
                 payload = await command(
@@ -263,8 +287,21 @@ class DwsClient:
         return arguments
 
     async def send_card(
-        self, contact: Contact
+        self, contact: Contact, at_open_dingtalk_ids: Sequence[str] = ()
     ) -> tuple[str, str | None, Any]:
+        if contact.is_group:
+            arguments = [
+                "chat", "message", "send-card",
+                "--conversation-id", contact.conversation_id,
+            ]
+            mentions = [value for value in at_open_dingtalk_ids if value]
+            if mentions:
+                arguments.extend(["--at-open-dingtalk-ids", ",".join(mentions)])
+            payload = await self._send_json_command(arguments)
+            biz_id = _find_biz_id(payload)
+            if not biz_id:
+                raise RuntimeError("DWS streaming card response did not include bizId")
+            return biz_id, _find_message_id(payload), payload
         if not contact.open_dingtalk_id:
             raise ValueError("streaming cards require an open DingTalk id")
         payload = await self._send_json_command(
@@ -337,7 +374,12 @@ class DwsClient:
     async def send_file(
         self, contact: Contact, file_path: Path, send_uuid: str,
     ) -> tuple[str | None, Any]:
-        target = ["--open-dingtalk-id", contact.open_dingtalk_id] if contact.open_dingtalk_id else ["--user", contact.user_id]
+        if contact.is_group:
+            target = ["--conversation-id", contact.conversation_id]
+        elif contact.open_dingtalk_id:
+            target = ["--open-dingtalk-id", contact.open_dingtalk_id]
+        else:
+            target = ["--user", contact.user_id]
         payload = await self._send_json_command(
             [
                 "chat", "message", "send", *target, "--msg-type", "file",

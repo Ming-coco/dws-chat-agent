@@ -21,7 +21,7 @@ Already installed? The same guide also supports safe inspection and updates:
 ## Runtime flow
 
 ```text
-DingTalk event
+DingTalk event (direct message, or @ mention in a registered group)
   -> zero-token coarse gate
   -> per-conversation queue and serial lock
   -> stabilize and merge recent messages
@@ -69,8 +69,11 @@ src/dws_dm_agent/
   runners/runtime.py         Codex, Claude, Pi, and custom JSONL session protocols
   runners/escalate_mcp.py    session-local zero-argument stdio MCP server
   runners/pi_escalate.ts     Pi-to-stdio-MCP adapter
+  runners/jira_tools.py      read-only Jira issue backend (issue reading)
+  runners/pi_jira.ts         Pi adapter that registers the jira_issue tool
+  runners/pi_dws_tools.ts    Pi adapter for no_reply and task memory tools
   web/                       dashboard, settings, themes, motion, and favicon
-tests/                       service, dashboard, MCP, and runner regressions
+tests/                       service, dashboard, group, MCP, and runner regressions
 evals/front-routing.json     checked-in front-routing replay cases
 prompts/                     editable front, worker, and supplement business rules
 deploy/macos/                LaunchAgent template
@@ -207,13 +210,42 @@ A preset always requires a `worker`; `front` is optional. Omitting `front` sends
 
 `label` is display text for a workflow stage. `options` contains protocol-specific settings, while `extra_args` appends literal CLI arguments after the adapter's required flags. `timeout_seconds: 0` means no agent deadline. For Pi, `options.tools: null` omits the `--tools` allowlist and exposes its built-in tools; the front prompt and `read_only: true` remain the authorization boundary.
 
+Issue reading ships with the repository, not with the machine. Every Pi stage loads `runners/pi_jira.ts` from inside the installed package, which registers a read-only `jira_issue` tool; the tool runs `runners/jira_tools.py`, also shipped in the package. A new deployment therefore needs only the repository plus `JIRA_PAT` — no global Pi configuration and no MCP registration file to recreate. The tool is on by default precisely because `config.json` is gitignored, so a flag stored only there would never reach a fresh deployment; set `"jira": false` in a stage's `options` to turn it off. When the variable is absent the tool still loads and every call returns an explicit "JIRA_PAT is not configured" error instead of failing silently. Put the token in the deployment's `.env` (`JIRA_PAT=…`) — the service only uses `.env` to expand `${...}` in `config.json` and does not export it to child processes, so the backend reads that file itself (the service passes its path as `DWS_JIRA_ENV_FILE`) and a real environment variable still wins when both are set. Replacing the token therefore takes effect without a restart. The backend also reads `JIRA_BASE_URL` (default `https://issue.hsjdata.com`) and `JIRA_TIMEOUT_SECONDS` (default 30) from the same two places. It accepts a bare key such as `CQNSHCYDN-1422` or a full `/browse/…` URL, and returns summary, status, resolution, assignee, reporter, dates, description, recent comments, subtasks, issue links and attachment names. It never creates, edits, comments on or transitions an issue. The token travels only through the inherited process environment, so it never enters a prompt or a command line. Enabling the tool does not narrow a stage's toolset: with `options.tools` unset (the worker default) the adapter still emits no `--tools` allowlist, and only an already-restricted list gets `jira_issue` appended.
+
 The bundled protocols are `codex-app-server`, `claude-stream-json`, and `pi-rpc`. The current `ccr code` launcher forwards Claude Code flags, while Oh My Pi exposes native `--mode rpc`. A completely independent CLI can use `custom-jsonl-v1`; its small stdin/stdout contract is documented in [docs/custom-agent-protocol.md](docs/custom-agent-protocol.md). The front adapter receives the session-local MCP path in `DWS_ESCALATE_MCP_CONFIG`.
 
 Future custom flows can be introduced as additional presets without turning the current pipeline into a general DAG engine.
 
-Prompt text is stored in normal UTF-8 files and the active files are shown verbatim on the localhost settings page. A stage prompt may use `{{self_name}}`, `{{agent_name}}`, `{{worker_name}}`, `{{contact_name}}`, `{{contact_alias}}`, `{{contact_user_id}}`, `{{contact_open_dingtalk_id}}`, `{{session_id}}`, `{{prior_attempt}}`, `{{workspace_root}}`, `{{worktree_root}}`, `{{recent_context_json}}`, `{{current_messages_json}}`, and `{{now}}`. The supplement prompt receives `{{supplement_messages_json}}`, `{{session_id}}`, contact identity fields, and `{{self_name}}`.
+Prompt text is stored in normal UTF-8 files and the active files are shown verbatim on the localhost settings page. A stage prompt may use `{{self_name}}`, `{{agent_name}}`, `{{worker_name}}`, `{{contact_name}}`, `{{contact_alias}}`, `{{contact_user_id}}`, `{{contact_open_dingtalk_id}}`, `{{sender}}`, `{{conversation_kind}}`, `{{group_reminder}}`, `{{session_id}}`, `{{prior_attempt}}`, `{{project_root}}`, `{{projects_json}}`, `{{recent_context_json}}`, `{{current_messages_json}}`, and `{{now}}`. The supplement prompt receives `{{supplement_messages_json}}`, `{{session_id}}`, contact identity fields, `{{conversation_kind}}`, and `{{self_name}}`.
+
+Per-contact project isolation: each contact in `config.json` may list `projects` (directory names under `workspace_root`). At startup the service builds `sandbox_root` — one directory per contact containing only that contact's projects as Windows junctions (symlinks on POSIX) — and runs the agent with the sandbox path of the first project as its working directory. Prompts receive that sandbox path as `{{project_root}}` and only that contact's own project names as `{{projects_json}}`; `workspace_root` is deliberately not exposed, so the agent has no reason to look outside its scope. Note that Pi has no path-level sandbox, so a determined `cd ../..` can still reach the real directories — the isolation is about not advertising them, not about enforcement. The settings page has a 刷新沙盒 button that rebuilds the sandbox from the on-disk `config.json` without a restart; agent working directories themselves only change after a restart.
 
 Cross-organization contacts: DingTalk treats users outside your organization differently. Listing their message history requires a temporary data grant (`dws chat data-auth cross-org --all --grant-type timed --ttl 24h`). The grant expires after about 24 hours; while it is missing, history reconciliation fails and deliveries are deferred until the grant is renewed. A cross-org user's `userId` is often not usable for message listing (`peerUid is required`), so the service falls back to `{{contact_open_dingtalk_id}}` when available.
+
+Group chats: `contacts` covers one-to-one messages, and a separate `groups` array covers `@` mentions in groups. Both use the same `projects` field and the same sandbox, so a group can be routed to a project exactly like a person.
+
+```json
+"groups": [
+  {
+    "alias": "深圳租赁群",
+    "title": "深圳租赁对接群",
+    "open_conversation_id": "cidXXXXXXXX==",
+    "projects": ["深圳租赁"],
+    "allowed_senders": []
+  }
+]
+```
+
+The registered group, not the individual person, is the permission boundary. `allowed_senders: []` responds to anyone in that group; listing `openDingTalkId`s or display names narrows it. `alias` and `open_conversation_id` are required, and the settings page fills the ID in from `dws chat group list-all` so it never has to be copied by hand.
+
+The picker only lists groups from the organization you are currently signed in to. `dws chat group list-all` returns every group the account has joined, other organizations included, and `corpId` is the only field that separates them — reachable per group through `dws chat +conversation-info`. The service resolves it, caches the result in `state/group_orgs.json`, and drops any group whose `corpId` differs from `dws profile list`'s `currentProfile`. A group whose org cannot be determined is kept rather than hidden, so a lookup failure never makes it silently disappear. The first refresh takes a few seconds because dws has no batch API; later refreshes come from the cache.
+
+Two things behave differently from direct messages. First, the agent only reads the group when someone `@`s the account: ordinary chatter never wakes it, and group history is never replayed as pending requests because message history does not record whether a line was a mention. That also means the `supplement` path is skipped in groups; a newer `@` simply becomes its own request. Second, every reply is public to all members of that group.
+
+The `user_im_message_receive_at` event has no `isAtAll` field and does not tell you who was mentioned, so the service decides from the message body. The `@` text does survive there — a real direct mention reads `@行弈-吴铭威 要找下王哥`, a real broadcast reads `@所有人 数据同步工具那个你们都知道的吧`, and a plain group line has no `@` at all. A group message is answered only when the body names you, matching `self.name` plus the parts either side of a `-` (so `@行弈-吴铭威`, `@行弈` and `@吴铭威` all count). Everything else is dropped and logged once per conversation: `@所有人` and `@全体成员` broadcasts, `@`s aimed at other people, and ordinary chatter. A broadcast that also names you is kept, because that is a real mention.
+
+Two switches control this: `"require_direct_mention": true` demands the body name you, and `"ignore_at_all": true` additionally drops broadcasts. Both default to true; turn them off only to debug why a group message did not get an answer.
+
 
 When configured, the front profile must set `read_only: true`. It may use the tools available to its provider for bounded read-only investigation, then answer directly; any write or external side effect must escalate. The worker has normal coding-agent permissions and judges authorization from the original conversation plus repository rules; escalation itself never grants write permission.
 
@@ -225,5 +257,6 @@ With streaming cards enabled, acceptance is shown immediately. Both roles use th
 - Repository AGENTS.md files and the coding agent enforce project-specific change, review, test, and release policy.
 - The service rechecks the conversation before acknowledgements and final replies.
 - Automated DingTalk messages keep the platform AI tag enabled.
+- Group replies are public. Register a group only when it is acceptable for every member to see the answer.
 
 Operational state, logs, audit data, and temporary sessions live under `state/` and are not committed. `.env` and `.env.*` are ignored; `.env.example` is the only exception.
