@@ -131,7 +131,7 @@
     .design-choice { display: grid; grid-template-columns: minmax(168px, .82fr) minmax(0, 1fr); align-items: center; gap: 14px; min-height: 122px; padding: 11px; text-align: left; background: var(--panel-2); }
     .design-choice.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
     .design-choice strong, .design-choice small { display: block; }
-    .design-choice small { margin-top: 5px; color: var(--muted); }
+    .design-choice small { margin-top: 5px; color: var(--muted-strong); font-size: 11.5px; line-height: 1.5; }
     .design-preview {
       position: relative; width: 100%; aspect-ratio: 16 / 9; overflow: hidden;
       border: 1px solid var(--line-strong); background: var(--control-deep);
@@ -148,7 +148,7 @@
     }
     .metropolis .preview-metrics {
       position: absolute; inset: 18px 6px auto; height: 18px;
-      display: grid; grid-template-columns: repeat(5, 1fr);
+      display: grid; grid-template-columns: repeat(4, 1fr);
       border: 1px solid var(--line); background: var(--panel);
     }
     .metropolis .preview-metrics i { border-right: 1px solid var(--line); color: var(--text); }
@@ -218,8 +218,9 @@
     }
     .theme-choice { min-height: 84px; padding: 11px; text-align: left; scroll-snap-align: start; background: var(--panel-2); }
     .theme-choice.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
-    .theme-choice strong { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .theme-choice small { display: block; margin-top: 5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .theme-choice strong { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+    .theme-choice small { display: block; margin-top: 5px; color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .check-field input[type="checkbox"], .form-grid input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
     .swatches { display: grid; grid-template-columns: repeat(4, 1fr); height: 10px; margin-top: 9px; overflow: hidden; border: 1px solid var(--line); border-radius: 4px; }
     .custom-theme { display: grid; grid-template-columns: minmax(150px, 1.4fr) repeat(6, minmax(100px, 1fr)) auto; align-items: end; gap: 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
     .color-field { display: grid; grid-template-columns: 38px minmax(0, 1fr); align-items: center; gap: 8px; }
@@ -228,7 +229,7 @@
     .color-field output { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text-secondary); }
     .theme-entry { position: relative; min-width: 0; }
     .theme-entry .theme-choice { width: 100%; padding-right: 58px; }
-    .theme-remove { position: absolute; top: 8px; right: 8px; padding: 4px 7px; border-radius: 6px; color: var(--danger-ink); font-size: 10px; }
+    .theme-remove { position: absolute; top: 8px; right: 8px; padding: 5px 8px; border-radius: 6px; color: var(--danger-ink); font-size: 11px; }
     .contact-manager { display: grid; gap: 14px; }
     .contact-list, .search-results { display: grid; gap: 8px; }
     .contact-row, .search-result { display: grid; grid-template-columns: minmax(150px, .7fr) minmax(190px, 1fr) auto; align-items: end; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); }
@@ -240,8 +241,8 @@
     .project-chips { display: flex; flex-wrap: wrap; gap: 6px; min-height: 30px; align-items: center; }
     .project-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 4px 3px 10px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--control); font-size: 12px; }
     .project-chip.primary { border-color: var(--accent-border); background: var(--accent-soft); color: var(--accent-ink); }
-    .project-chip button { border: 0; background: transparent; padding: 0 4px; color: var(--muted); font-size: 14px; line-height: 1; cursor: pointer; }
-    .project-chip button:hover { color: var(--danger-ink); }
+    .project-chip button { border: 0; background: transparent; padding: 6px 7px; margin: -3px -3px -3px 0; color: var(--muted-strong); font-size: 13px; line-height: 1; cursor: pointer; border-radius: 999px; }
+    .project-chip button:hover { color: var(--danger-ink); background: var(--danger-soft); }
     .project-empty { color: var(--muted); font-size: 12px; }
     .project-toggle { justify-self: start; padding: 4px 10px; border-radius: 999px; font-size: 12px; }
     .project-menu { position: absolute; z-index: 30; top: calc(100% + 6px); left: 0; right: 0; display: grid; gap: 4px; padding: 8px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--panel); box-shadow: 0 18px 40px rgb(0 0 0 / .32); }
@@ -303,48 +304,257 @@
     }
   </style>
   <link rel="icon" href="/diamond-favicon.svg?v=3" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=1">
+  <link rel="stylesheet" href="/app.css?v=2">
+  <style>
+    /* ===== 现代外观层：最后加载，覆盖上面的旧骨架样式 ===== */
+    :root {
+      --radius: 14px;
+      --radius-lg: 18px;
+      --gap: 14px;
+      --shadow-1: 0 1px 2px rgb(0 0 0 / .16);
+      --shadow-2: 0 18px 40px -22px rgb(0 0 0 / .6);
+      --ui-font: "Inter", "Segoe UI Variable Text", "Segoe UI", -apple-system,
+        BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      /* 主题自带的 --muted 在浅色主题下对白底只有 4.2~4.5:1，正文小字读起来发虚。
+         这里把它朝正文色混一点，得到一个够对比度的弱化色；只在设置页生效，
+         不改 theme.js，也不影响控制台。旧浏览器不支持 color-mix 时退回 --muted。 */
+      --muted-strong: var(--muted);
+      --muted-strong: color-mix(in srgb, var(--muted) 68%, var(--text) 32%);
+    }
+    body {
+      background:
+        radial-gradient(60rem 24rem at 12% -8%, var(--accent-soft), transparent 70%),
+        var(--bg);
+      font: 14px/1.6 var(--ui-font);
+      -webkit-font-smoothing: antialiased;
+    }
+    body::before, header::after { content: none !important; display: none !important; }
+    .shell { width: min(1180px, calc(100% - 32px)); padding: 24px 0 64px; }
+
+    /* 顶栏 */
+    .topbar {
+      position: sticky; top: 0; z-index: 20;
+      border-bottom: 1px solid var(--line);
+      background: color-mix(in srgb, var(--bg) 84%, transparent);
+      backdrop-filter: blur(14px) saturate(140%);
+    }
+    .topbar-inner {
+      width: min(1180px, calc(100% - 32px)); margin: 0 auto;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 18px; min-height: 62px;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .back-link {
+      width: 34px; height: 34px; display: grid; place-items: center; flex: none;
+      color: var(--text-secondary); text-decoration: none; font-size: 15px;
+      border: 1px solid var(--line); border-radius: 9px; background: var(--control);
+      transition: border-color .15s, color .15s, background .15s;
+    }
+    .back-link:hover, .back-link:focus-visible {
+      color: var(--accent-ink); border-color: var(--accent-border);
+      background: var(--accent-soft); outline: none;
+    }
+    h1 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.015em; }
+    .eyebrow { color: var(--muted); font-size: 11.5px; letter-spacing: .01em; text-transform: none; }
+    .topbar-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+
+    /* 按钮 */
+    button {
+      color: var(--text); background: var(--control); border: 1px solid var(--line-strong);
+      border-radius: 9px; padding: 8px 13px; font-size: 13px; font-weight: 550;
+      cursor: pointer; transition: background .15s, border-color .15s, color .15s, transform .06s;
+    }
+    button:hover { border-color: var(--accent-border); color: var(--accent-ink); background: var(--panel-2); }
+    button:active { transform: translateY(1px); }
+    button:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
+    button.primary {
+      color: var(--accent-text); background: var(--accent); border-color: transparent;
+      font-weight: 620; box-shadow: var(--shadow-1);
+    }
+    button.primary:hover { background: var(--accent); color: var(--accent-text); filter: brightness(1.07); }
+    button.danger { color: var(--danger-ink); }
+    button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+    button[aria-busy="true"] { cursor: progress; }
+    button[aria-busy="true"]::before {
+      content: ""; display: inline-block; width: 11px; height: 11px; margin-right: 7px;
+      vertical-align: -1px; border-radius: 50%; border: 2px solid currentColor;
+      border-top-color: transparent; animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* 状态胶囊 */
+    .config-status {
+      min-height: 0; padding: 3px 9px; border-radius: 999px;
+      color: var(--muted); font-size: 12px; text-align: left;
+      background: transparent; border: 1px solid transparent;
+    }
+    .config-status:empty { display: none; }
+    .config-status.ok { color: var(--success-ink); background: var(--success-soft); border-color: var(--success-border); }
+    .config-status.error { color: var(--danger-ink); background: var(--danger-soft); border-color: var(--danger-border); }
+    .dirty-chip {
+      display: none; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px;
+      font-size: 12px; font-weight: 550; color: var(--warning-ink);
+      background: var(--warning-soft); border: 1px solid var(--warning-border);
+    }
+    .dirty-chip.on { display: inline-flex; }
+    .dirty-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+    /* 面板与分节 */
+    .panel, .config-card, .notice {
+      border: 1px solid var(--line); border-radius: var(--radius);
+      background: var(--panel); box-shadow: var(--shadow-1);
+    }
+    .panel { padding: 20px; margin-bottom: var(--gap); }
+    .config-card { padding: 20px; }
+    .section-head { margin-bottom: 16px; align-items: center; }
+    .section-head h2 { font-size: 15px; font-weight: 640; letter-spacing: -.01em; }
+    .section-head p { margin-top: 4px; color: var(--muted); font-size: 12.5px; }
+    .config-card h2, .config-card h3 { font-size: 14px; font-weight: 640; margin-bottom: 14px; }
+    .notice {
+      padding: 13px 16px; color: var(--text-secondary); font-size: 12.5px;
+      background: var(--panel-2); box-shadow: none;
+    }
+    .notice strong { color: var(--accent-ink); font-weight: 620; }
+    /* 说明类小字统一用够对比度的弱化色 */
+    .eyebrow, .section-head p, .theme-group h3, .preset-meta em, .preset-note, footer,
+    .config-note, .contact-summary span, .sandbox-info span, .runtime-meta, .project-empty,
+    .theme-choice small, .empty, .sandbox-detail, .sandbox-detail code { color: var(--muted-strong); }
+    footer { color: var(--muted); font-size: 12px; margin-top: 16px; line-height: 1.7; }
+
+    /* 表单 */
+    .field > span, .project-field > span { color: var(--text-secondary); font-size: 11.5px; font-weight: 550; letter-spacing: .01em; }
+    input, textarea, select {
+      color: var(--text); background: var(--control-deep); border: 1px solid var(--line);
+      border-radius: 9px; padding: 8px 11px; font-size: 13px;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    input:hover, textarea:hover, select:hover { border-color: var(--line-strong); }
+    input:focus, textarea:focus, select:focus {
+      outline: none; border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+    textarea { font: 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    /* 外观：预设磁贴 */
+    .preset-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(178px, 1fr)); gap: 10px; }
+    .preset {
+      display: grid; gap: 9px; padding: 10px; text-align: left; cursor: pointer;
+      border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2);
+      transition: border-color .15s, transform .12s, box-shadow .15s;
+    }
+    .preset:hover { border-color: var(--line-strong); transform: translateY(-1px); box-shadow: var(--shadow-2); }
+    .preset:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
+    .preset[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+    .preset-shot {
+      position: relative; height: 54px; overflow: hidden;
+      border: 1px solid var(--line); border-radius: 8px;
+    }
+    .preset-shot i {
+      position: absolute; display: block; border-radius: 2px; font-style: normal;
+    }
+    .preset-shot .shot-rail { inset: 0 auto 0 0; width: 16px; }
+    .preset-shot .shot-bar { left: 24px; right: 10px; top: 10px; height: 6px; }
+    .preset-shot .shot-line { left: 24px; height: 4px; }
+    .preset-shot .shot-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .preset-meta { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+    .preset-meta strong { font-size: 13px; font-weight: 600; }
+    .preset-meta em { font-style: normal; font-size: 11px; color: var(--muted); }
+    .preset-note { margin: -3px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+
+    /* 高级配色 */
+    details.more-themes { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 14px; }
+    details.more-themes > summary {
+      cursor: pointer; list-style: none; font-size: 12.5px; font-weight: 550;
+      color: var(--text-secondary); display: flex; align-items: center; gap: 7px;
+    }
+    details.more-themes > summary::-webkit-details-marker { display: none; }
+    details.more-themes > summary::before {
+      content: "›"; display: inline-block; transition: transform .15s; color: var(--muted);
+    }
+    details.more-themes[open] > summary::before { transform: rotate(90deg); }
+    details.more-themes > summary:hover { color: var(--accent-ink); }
+    details.more-themes[open] > summary { margin-bottom: 14px; }
+    .theme-group h3 { color: var(--muted); font-size: 11.5px; font-weight: 550; margin: 0 0 8px; }
+    .theme-choice { border-radius: 10px; }
+    .theme-choice.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+
+    /* 提示气泡 */
+    .toasts {
+      position: fixed; z-index: 200; right: 18px; bottom: 18px;
+      display: grid; gap: 9px; justify-items: end; pointer-events: none;
+    }
+    .toast {
+      pointer-events: auto; display: flex; align-items: flex-start; gap: 10px;
+      min-width: 236px; max-width: min(400px, calc(100vw - 36px));
+      padding: 11px 13px; border-radius: 11px; font-size: 13px; line-height: 1.5;
+      color: var(--text); background: var(--panel); border: 1px solid var(--line-strong);
+      box-shadow: var(--shadow-2); animation: toast-in .22s cubic-bezier(.2, .8, .2, 1);
+    }
+    .toast.out { animation: toast-out .18s ease forwards; }
+    .toast .ico {
+      flex: none; width: 17px; height: 17px; margin-top: 1px; border-radius: 50%;
+      display: grid; place-items: center; font-size: 11px; font-weight: 800;
+      color: var(--bg); background: var(--muted);
+    }
+    .toast.ok { border-color: var(--success-border); }
+    .toast.ok .ico { background: var(--success); }
+    .toast.error { border-color: var(--danger-border); }
+    .toast.error .ico { background: var(--danger); }
+    .toast.info .ico { background: var(--info); }
+    @keyframes toast-in { from { opacity: 0; transform: translateY(10px) scale(.98); } }
+    @keyframes toast-out { to { opacity: 0; transform: translateX(12px); } }
+    @media (prefers-reduced-motion: reduce) {
+      .toast, .preset, button { animation: none !important; transition: none !important; }
+    }
+    @media (max-width: 720px) {
+      .topbar-inner { flex-wrap: wrap; padding: 10px 0; }
+      .topbar-actions { width: 100%; }
+      .topbar-actions button { flex: 1; }
+      .preset-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+    }
+  </style>
   <script src="/theme.js"></script>
 </head>
 <body>
-  <main class="shell">
-    <header>
+  <header class="topbar">
+    <div class="topbar-inner">
       <div class="brand">
-        <a id="homeLink" class="back-link" href="/" aria-label="返回 DIAMOND Network" title="返回 DIAMOND Network">←</a>
-        <div><div class="eyebrow">DIAMOND NETWORK / CONFIGURATION</div><h1>DIAMOND Settings</h1></div>
+        <a id="homeLink" class="back-link" href="/" aria-label="返回控制台" title="返回控制台">←</a>
+        <div><div class="eyebrow">DWS Chat Agent · 设置</div><h1>设置</h1></div>
       </div>
-      <div class="toolbar">
+      <div class="topbar-actions">
+        <span id="dirtyChip" class="dirty-chip" hidden>有未保存的改动</span>
+        <span id="saveState" class="config-status" role="status" aria-live="polite"></span>
         <button id="reloadConfig" type="button">重新读取</button>
         <button id="saveConfig" class="primary" type="button">保存并应用</button>
       </div>
-    </header>
+    </div>
+  </header>
 
+  <main class="shell">
     <section class="panel" aria-labelledby="appearanceTitle">
       <div class="section-head">
-        <div><h2 id="appearanceTitle">界面主题</h2><p>主题决定页面结构与视觉语言；颜色可独立搭配任一主题。</p></div>
-        <span id="designStatus" class="config-status" role="status" aria-live="polite"></span>
-      </div>
-      <div id="designThemes" class="design-grid"></div>
-    </section>
-
-    <section class="panel" aria-labelledby="colorTitle">
-      <div class="section-head">
-        <div><h2 id="colorTitle">颜色</h2><p>选择背景、卡片、主色和状态色；不会改变界面主题或页面布局。</p></div>
+        <div><h2 id="appearanceTitle">外观</h2><p>选一套配色，立刻生效并同步到控制台；不需要保存。</p></div>
         <span id="themeStatus" class="config-status" role="status" aria-live="polite"></span>
       </div>
-      <div class="theme-group"><h3>深色</h3><div id="darkThemes" class="theme-strip"></div></div>
-      <div class="theme-group"><h3>浅色</h3><div id="lightThemes" class="theme-strip"></div></div>
-      <div id="customThemeGroup" class="theme-group" hidden><h3>用户配色</h3><div id="customThemes" class="theme-strip"></div></div>
-      <div class="custom-theme">
-        <label class="field"><span>配色名称</span><input id="customThemeName" type="text" maxlength="40" placeholder="例如 Night Shift"></label>
-        <label class="color-field"><span>背景色</span><input id="customBackground" type="color"><output id="customBackgroundValue"></output></label>
-        <label class="color-field"><span>卡片色</span><input id="customSurface" type="color"><output id="customSurfaceValue"></output></label>
-        <label class="color-field"><span>主色</span><input id="customAccent" type="color"><output id="customAccentValue"></output></label>
-        <label class="color-field"><span>正常</span><input id="customNormal" type="color"><output id="customNormalValue"></output></label>
-        <label class="color-field"><span>注意</span><input id="customAttention" type="color"><output id="customAttentionValue"></output></label>
-        <label class="color-field"><span>紧急</span><input id="customUrgent" type="color"><output id="customUrgentValue"></output></label>
-        <button id="saveCustomTheme" type="button">创建配色</button>
-      </div>
+      <div id="themePresets" class="preset-grid"></div>
+      <details class="more-themes">
+        <summary>更多配色与自定义颜色</summary>
+        <div class="theme-group"><h3>深色</h3><div id="darkThemes" class="theme-strip"></div></div>
+        <div class="theme-group"><h3>浅色</h3><div id="lightThemes" class="theme-strip"></div></div>
+        <div id="customThemeGroup" class="theme-group" hidden><h3>用户配色</h3><div id="customThemes" class="theme-strip"></div></div>
+        <div class="custom-theme">
+          <label class="field"><span>配色名称</span><input id="customThemeName" type="text" maxlength="40" placeholder="例如 Night Shift"></label>
+          <label class="color-field"><span>背景色</span><input id="customBackground" type="color"><output id="customBackgroundValue"></output></label>
+          <label class="color-field"><span>卡片色</span><input id="customSurface" type="color"><output id="customSurfaceValue"></output></label>
+          <label class="color-field"><span>主色</span><input id="customAccent" type="color"><output id="customAccentValue"></output></label>
+          <label class="color-field"><span>正常</span><input id="customNormal" type="color"><output id="customNormalValue"></output></label>
+          <label class="color-field"><span>注意</span><input id="customAttention" type="color"><output id="customAttentionValue"></output></label>
+          <label class="color-field"><span>紧急</span><input id="customUrgent" type="color"><output id="customUrgentValue"></output></label>
+          <button id="saveCustomTheme" type="button">创建配色</button>
+        </div>
+        <div class="theme-group"><h3>布局</h3><div id="designThemes" class="design-grid"></div></div>
+      </details>
     </section>
 
     <section class="panel" aria-labelledby="runtimeTitle">
@@ -357,12 +567,13 @@
 
     <section class="notice">
       <span><strong>只编辑本地配置。</strong> 登录态、凭证和 provider 私有参数不会下发；白名单联系人保存到本机 config.json。</span>
-      <span id="configStatus" class="config-status" role="status" aria-live="polite"></span>
     </section>
 
     <div id="configEditor" class="empty">正在读取节点配置…</div>
     <footer>保存前会检查当前没有执行中或排队会话；节点配置立即用于后续会话，联系人白名单需重启服务后生效。</footer>
   </main>
+
+  <div id="toasts" class="toasts" role="region" aria-label="操作结果" aria-live="polite"></div>
 
   <script>
     let agentConfig = null;
@@ -395,57 +606,125 @@
     const themeMessage = text => { document.getElementById("themeStatus").textContent = text || ""; };
 
     function designPreview(design) {
+      // 缩略图里不放真实文字：在 160×90 的尺寸下 5px 字只会糊成噪点，
+      // 留空盒子当线框图更干净。
       const preview = node("span", `design-preview ${design.id}`);
       preview.setAttribute("aria-hidden", "true");
       if (design.id === "metropolis") {
         const metrics = node("span", "preview-metrics");
-        [2, 0, 6, 1, 3].forEach(value => metrics.append(node("i", "", value)));
+        [0, 0, 0, 0].forEach(() => metrics.append(node("i", "", "")));
         preview.append(
-          node("span", "preview-brand", "PROJECT D.I.A.M.O.N.D."),
+          node("span", "preview-brand", ""),
           metrics,
-          node("span", "preview-active", "ACTIVE OPERATIONS"),
-          node("span", "preview-queue", "QUEUE"),
-          node("span", "preview-channels", "CHANNELS · RECENT ACTIVITY")
+          node("span", "preview-active", ""),
+          node("span", "preview-queue", "")
         );
         return preview;
       }
 
       const rail = node("span", "preview-rail");
-      ["01", "02", "03"].forEach(value => rail.append(node("i", "", value)));
+      [0, 0, 0].forEach(() => rail.append(node("i", "", "")));
       const units = node("span", "preview-units");
-      ["UNIT 01", "UNIT 02"].forEach(value => units.append(node("i", "", value)));
+      [0, 0].forEach(() => units.append(node("i", "", "")));
       preview.append(
         rail,
-        node("span", "preview-head", "PROJECT D.I.A.M.O.N.D."),
-        node("b", "preview-title", "NETWORK"),
+        node("span", "preview-head", ""),
+        node("b", "preview-title", ""),
         units,
-        node("span", "preview-status", "STATUS")
+        node("span", "preview-status", "")
       );
       return preview;
     }
 
     function renderDesignPicker() {
-      const selection = window.DwsTheme.currentDesign();
-      const container = document.getElementById("designThemes");
-      clear(container);
-      window.DwsTheme.designs.forEach(design => {
-        const button = node("button", `design-choice ${design.id === selection.id ? "selected" : ""}`.trim());
-        button.type = "button";
-        button.dataset.designId = design.id;
-        button.setAttribute("aria-pressed", String(design.id === selection.id));
-        const preview = designPreview(design);
-        const copy = node("span");
-        copy.append(node("strong", "", design.name), node("small", "", design.note));
-        button.append(preview, copy);
-        button.addEventListener("click", () => {
-          const applied = window.DwsTheme.selectDesign(design.id);
-          renderDesignPicker();
-          document.getElementById("designStatus").textContent = `当前：${applied.name}`;
+      // 位置切到隐藏的 details 里，保持旧布局可切换但不占版面。
+      const holder = document.getElementById("designThemes");
+      if (holder) {
+        const selection = window.DwsTheme.currentDesign();
+        clear(holder);
+        window.DwsTheme.designs.forEach(design => {
+          const button = node("button", `design-choice ${design.id === selection.id ? "selected" : ""}`.trim());
+          button.type = "button";
+          button.dataset.designId = design.id;
+          button.setAttribute("aria-pressed", String(design.id === selection.id));
+          button.append(designPreview(design));
+          const copy = node("span");
+          copy.append(node("strong", "", design.name), node("small", "", design.note));
+          button.append(copy);
+          button.addEventListener("click", () => {
+            const applied = window.DwsTheme.selectDesign(design.id);
+            renderDesignPicker();
+            toast(`已切换布局：${applied.name}`);
+          });
+          holder.append(button);
         });
-        container.append(button);
+        document.getElementById("homeLink").href = selection.home;
+      }
+      renderPresets();
+    }
+
+    // 预设：一套配色配一句人话说明，常用的就这几个。
+    const PRESETS = [
+      { id: "ocean-signal", label: "深海", hint: "默认。深蓝底、青绿高亮，长时间看不累" },
+      { id: "ice-signal", label: "暗黑", hint: "纯黑底、冰蓝点缀，夜里最省眼" },
+      { id: "catppuccin-mocha", label: "午夜紫", hint: "柔和的灰紫底，对比不刺眼" },
+      { id: "gruvbox-dark", label: "暖褐", hint: "复古暖调，偏纸张质感" },
+      { id: "github-light", label: "日照", hint: "白底浅灰，白天或者投屏用" },
+      { id: "warm-paper", label: "暖阳", hint: "米白纸感，适合长文档阅读" }
+    ];
+
+    function presetSwatch(theme) {
+      const shot = node("div", "preset-shot");
+      shot.style.background = theme.background;
+      shot.style.borderColor = theme.surface;
+      const rail = node("i", "shot-rail");
+      rail.style.background = theme.surface;
+      const bar = node("i", "shot-bar");
+      bar.style.background = theme.accent;
+      bar.style.opacity = ".85";
+      const line = node("i", "shot-line");
+      line.style.background = theme.surface;
+      line.style.top = "24px";
+      line.style.right = "28px";
+      line.style.height = "4px";
+      const line2 = node("i", "shot-line");
+      line2.style.background = theme.surface;
+      line2.style.top = "34px";
+      line2.style.right = "42px";
+      line2.style.height = "4px";
+      const dot = node("i", "shot-dot");
+      dot.style.background = theme.normal;
+      dot.style.right = "12px";
+      dot.style.top = "26px";
+      shot.append(rail, bar, line, line2, dot);
+      return shot;
+    }
+
+    function renderPresets() {
+      const holder = document.getElementById("themePresets");
+      if (!holder) return;
+      const current = window.DwsTheme.currentColor();
+      clear(holder);
+      PRESETS.forEach(preset => {
+        const theme = window.DwsTheme.colors.find(item => item.id === preset.id);
+        if (!theme) return;
+        const selected = current.id === preset.id;
+        const card = node("button", "preset");
+        card.type = "button";
+        card.dataset.presetId = preset.id;
+        card.setAttribute("aria-pressed", String(selected));
+        card.append(presetSwatch(theme));
+        const meta = node("div", "preset-meta");
+        meta.append(node("strong", "", preset.label), node("em", "", theme.mode === "light" ? "浅色" : "深色"));
+        card.append(meta, node("p", "preset-note", preset.hint));
+        card.addEventListener("click", () => {
+          const applied = window.DwsTheme.selectColor(preset.id);
+          syncThemeInputs(applied);
+          renderThemePicker();
+          toast(`已切换到「${preset.label}」配色`);
+        });
+        holder.append(card);
       });
-      document.getElementById("designStatus").textContent = `当前：${selection.name}`;
-      document.getElementById("homeLink").href = selection.home;
     }
 
     function customThemeValue() {
@@ -522,6 +801,7 @@
       customGroup.hidden = !customValues.length;
       syncThemeInputs(selection.theme);
       themeMessage(`当前：${selection.theme.name}`);
+      renderPresets();
     }
 
     function previewCustomTheme() {
@@ -615,13 +895,47 @@
       }
     }
 
+    // 提示气泡：所有会改变状态的操作都给一个看得见的反馈。
+    const TOAST_ICONS = { ok: "✓", error: "!", info: "i" };
+    function toast(text, kind = "info", timeout = 3200) {
+      if (!text) return;
+      const stack = document.getElementById("toasts");
+      if (!stack) return;
+      const el = node("div", `toast ${kind}`.trim());
+      el.setAttribute("role", kind === "error" ? "alert" : "status");
+      el.append(node("span", "ico", TOAST_ICONS[kind] || TOAST_ICONS.info), node("span", "", text));
+      stack.append(el);
+      while (stack.children.length > 4) stack.firstElementChild.remove();
+      const close = () => {
+        el.classList.add("out");
+        el.addEventListener("animationend", () => el.remove(), { once: true });
+        setTimeout(() => el.remove(), 400);
+      };
+      const timer = setTimeout(close, timeout);
+      el.addEventListener("click", () => { clearTimeout(timer); close(); });
+      return el;
+    }
+
     const configMessage = (text, kind = "") => {
-      const status = document.getElementById("configStatus");
-      status.textContent = text || "";
-      status.className = `config-status ${kind}`.trim();
+      const status = document.getElementById("saveState");
+      if (status) {
+        status.textContent = text || "";
+        status.className = `config-status ${kind}`.trim();
+      }
+      if (text && kind === "error") toast(text, "error", 6000);
+    };
+    const setDirty = value => {
+      configDirty = value;
+      const chip = document.getElementById("dirtyChip");
+      if (chip) {
+        chip.hidden = !value;
+        chip.classList.toggle("on", value);
+      }
+      const save = document.getElementById("saveConfig");
+      if (save) save.classList.toggle("dirty", value);
     };
     const dirtyConfig = () => {
-      configDirty = true;
+      setDirty(true);
       configMessage("有未保存的改动", "");
     };
     const field = (label, control, wide = false) => {
@@ -861,6 +1175,7 @@
 
       refresh.addEventListener("click", async () => {
         refresh.disabled = true;
+        refresh.setAttribute("aria-busy", "true");
         state.className = "config-status";
         state.textContent = "正在重建…";
         try {
@@ -872,18 +1187,24 @@
           const data = await response.json();
           if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
           describe(data);
-          if (data.healthy) {
+          // healthy 缺失时按 errors 兜底，避免把成功的重建说成有问题。
+          const healthy = data.healthy !== undefined ? data.healthy : !(data.errors || []).length;
+          if (healthy) {
             state.className = "config-status ok";
             state.textContent = `重建完成 · ${(data.contacts || []).length} 个联系人`;
+            toast(`沙盒已重建：${(data.contacts || []).length} 个联系人`, "ok");
           } else {
             state.className = "config-status error";
             state.textContent = `${(data.errors || []).length} 个问题待处理`;
+            toast(`沙盒重建完成，但有 ${(data.errors || []).length} 个问题，见下方明细`, "error", 6000);
           }
         } catch (error) {
           state.className = "config-status error";
           state.textContent = `重建失败：${error.message}`;
+          toast(`沙盒重建失败：${error.message}`, "error", 6000);
         } finally {
           refresh.disabled = false;
+          refresh.removeAttribute("aria-busy");
         }
       });
 
@@ -1304,24 +1625,37 @@
 
     async function loadConfig(force = false) {
       if (force && configDirty && !window.confirm("放弃尚未保存的节点配置改动？")) return;
+      const button = document.getElementById("reloadConfig");
+      const label = button.textContent;
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      button.textContent = "读取中";
       configMessage("正在读取配置…");
       try {
         const response = await fetch("/api/config", {cache:"no-store"});
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
         agentConfig = data;
-        configDirty = false;
+        setDirty(false);
         renderConfig();
         configMessage("配置已载入", "ok");
+        toast("配置已重新读取", "ok", 2400);
       } catch (error) {
         configMessage(`读取失败：${error.message}`, "error");
+      } finally {
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+        button.textContent = label;
       }
     }
 
     async function saveAgentConfig() {
       if (!agentConfig) return;
       const button = document.getElementById("saveConfig");
+      const label = button.textContent;
       button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      button.textContent = "保存中";
       configMessage("正在校验并保存…");
       try {
         const response = await fetch("/api/config", {
@@ -1332,14 +1666,21 @@
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
         agentConfig = data;
-        configDirty = false;
+        setDirty(false);
         renderConfig();
         configMessage("已保存并应用到后续会话", "ok");
+        button.textContent = "已保存 ✓";
+        toast("配置已保存，后续会话立即生效；联系人白名单重启服务后生效", "ok", 4200);
         await loadRuntimeWorkflow();
       } catch (error) {
         configMessage(`保存失败：${error.message}`, "error");
+        toast(`保存失败：${error.message}`, "error", 7000);
       } finally {
-        button.disabled = false;
+        setTimeout(() => {
+          button.disabled = false;
+          button.removeAttribute("aria-busy");
+          button.textContent = label;
+        }, 1400);
       }
     }
 
