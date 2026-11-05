@@ -84,6 +84,26 @@ class AgentConfigStore:
         self._lock = threading.Lock()
         self._mutation_lock = mutation_lock or threading.RLock()
 
+    def _revision(self, raw_bytes: bytes, workflows: Mapping[str, Any]) -> str:
+        """把 config.json 和它引用的提示词文件一起算进版本号。
+
+        设置页会把提示词正文整份读进内存，保存时再整份写回。如果版本号只覆盖
+        config.json，那么「页面打开后、保存前」有人直接改了 prompts/*.md，
+        页面上那份旧正文就会把新改动覆盖掉，而且表面上没有任何冲突提示。
+        （真实发生过：在设置页移除白名单，把刚加的提示词规则冲回了旧版本。）
+        """
+        digest = hashlib.sha256(raw_bytes)
+        for text_path in sorted(self._prompt_kinds(workflows)):
+            path = self._editable_prompt_path(text_path)
+            if path is None:
+                continue
+            digest.update(b"\0" + str(path).encode("utf-8") + b"\0")
+            try:
+                digest.update(path.read_bytes())
+            except OSError:
+                digest.update(b"<missing>")
+        return digest.hexdigest()
+
     def snapshot(self) -> dict[str, Any]:
         raw_bytes = self.config_path.read_bytes()
         raw = json.loads(raw_bytes.decode("utf-8"))
@@ -129,7 +149,7 @@ class AgentConfigStore:
             except OSError:
                 prompts[text_path] = ""
         return {
-            "revision": hashlib.sha256(raw_bytes).hexdigest(),
+            "revision": self._revision(raw_bytes, workflows),
             "supportedProtocols": list(SUPPORTED_PROTOCOLS),
             "agents": agents,
             "workflows": workflows,
@@ -151,12 +171,16 @@ class AgentConfigStore:
             if not self.is_idle():
                 raise ConfigBusyError("有会话正在执行或排队，请空闲后再保存配置")
             current_bytes = self.config_path.read_bytes()
-            current_revision = hashlib.sha256(current_bytes).hexdigest()
-            if str(payload.get("revision") or "") != current_revision:
-                raise ConfigConflictError("配置已被其他操作修改，请重新载入后再保存")
             current = json.loads(current_bytes.decode("utf-8"))
             if not isinstance(current, dict):
                 raise ValueError("config root must be an object")
+            # 版本号要比对的不仅是 config.json，还有提示词文件——否则页面里那份
+            # 旧提示词会在保存时静默盖掉别人刚做的修改。
+            current_revision = self._revision(
+                current_bytes, self._public_workflows(current.get("workflows", {}))
+            )
+            if str(payload.get("revision") or "") != current_revision:
+                raise ConfigConflictError("配置或提示词已被其他操作修改，请重新载入后再保存")
             candidate = copy.deepcopy(current)
             candidate["agents"] = self._merge_agents(
                 current.get("agents", {}), payload.get("agents")
