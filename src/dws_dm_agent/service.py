@@ -422,6 +422,15 @@ class AgentService:
             and not sandbox.is_link(entry)
         )
 
+    def _delivery_dir(self) -> Path:
+        """worker 生成附件的固定目录，随本机安装位置走，不写死别人家的路径。"""
+        directory = self.settings.state_dir / "deliveries"
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            LOG.warning("delivery dir unavailable path=%s error=%s", directory, exc)
+        return directory
+
     def _sandbox_status(self) -> dict[str, Any]:
         return self._rebuild_sandboxes(apply=False).as_dict()
 
@@ -2054,6 +2063,7 @@ class AgentService:
             "projects_json": json.dumps(
                 list(self._contact_projects(contact)), ensure_ascii=False
             ),
+            "delivery_dir": self._delivery_dir(),
             "recent_context_json": json.dumps(
                 list(recent_context), ensure_ascii=False, indent=2
             ),
@@ -2922,7 +2932,7 @@ async def _doctor(settings: Settings) -> int:
         report = sandbox.rebuild(
             settings.workspace_root,
             settings.sandbox_root,
-            ((contact.alias, contact.projects) for contact in settings.contacts),
+            ((contact.alias, contact.projects) for contact in _targets(settings)),
             apply=False,
         )
         links = sum(len(item.links) for item in report.contacts)
@@ -2933,13 +2943,18 @@ async def _doctor(settings: Settings) -> int:
             if link.state == sandbox.LINK_ABSENT
         )
         detail = (
-            f"root={report.root} contacts={len(report.contacts)} links={links}"
+            f"root={report.root} targets={len(report.contacts)} links={links}"
         )
         if pending:
             detail += f" pending={pending}(将在启动时创建)"
         if report.errors:
             detail += f" issues={len(report.errors)}"
+        if report.notes:
+            # 未分配项目会退回完整 workspace_root，等于放弃隔离，必须显式提示。
+            detail += f" 未分配项目={len(report.notes)}"
         checks.append(("sandbox", report.healthy, detail))
+        for note in report.notes:
+            checks.append(("sandbox note", True, note))
     if not errors and shutil.which(str(settings.raw.get("dws", {}).get("binary", "dws"))):
         contact = settings.contacts[0]
         command = _event_consume_command(settings, contact, dry_run=True)

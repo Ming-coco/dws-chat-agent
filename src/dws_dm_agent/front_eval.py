@@ -91,6 +91,7 @@ async def _evaluate_case(
                 "group_reminder": "",
                 "project_root": settings.workspace_root,
                 "projects_json": "[]",
+                "delivery_dir": str(settings.state_dir / "deliveries"),
                 "recent_context_json": json.dumps(
                     recent, ensure_ascii=False, indent=2
                 ),
