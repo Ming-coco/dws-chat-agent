@@ -3437,6 +3437,7 @@ class TaskSnapshotTests(unittest.TestCase):
             raw={"recent_context_messages": 6, "task_memory": {"inactive_days": 2}},
             workspace_root=root,
             worktree_root=root,
+            state_dir=root,
         )
         service.store = AuditStore(root / "audit.sqlite3")
         service.agent_runtime = SimpleNamespace(
