@@ -411,6 +411,53 @@ class ParseWorklogDocTests(unittest.TestCase):
         doc.write_text("**主题**：x\n", encoding="utf-8")
         self.assertEqual(W.find_worklog_docs(self.root, datetime(2026, 11, 5)), [])
 
+    def test_hand_written_section_wins_over_the_auto_summary(self):
+        doc = self.root / "2026-11-06_周五_工作日志.md"
+        doc.write_text(
+            "# 日志\n\n**主题**：自动摘要出来的主题\n\n"
+            "## 一、今日工作\n\n"
+            "**问题**：这条要点不该出现在工时正文里。\n\n"
+            "## 九、工时内容\n\n"
+            "第一段正文。\n"
+            "第二段正文，含 ① ② 这样的编号。\n\n"
+            "## 十、遗留\n\n"
+            "遗留内容不该被带上。\n",
+            encoding="utf-8",
+        )
+        parsed = W.parse_worklog_doc(doc)
+        self.assertIn("第一段正文", parsed["content"])
+        self.assertIn("第二段正文", parsed["content"])
+        self.assertNotIn("遗留内容", parsed["content"])
+
+    def test_hand_written_section_excludes_the_heading_itself(self):
+        doc = self.root / "2026-11-06_周五_工作日志.md"
+        doc.write_text("## 工时内容\n\n只有这一段。\n", encoding="utf-8")
+        self.assertEqual(W.parse_worklog_doc(doc)["content"], "只有这一段。")
+
+    def test_hand_written_heading_is_not_a_headline(self):
+        doc = self.root / "2026-11-06_周五_工作日志.md"
+        doc.write_text("## 一、工时内容\n\n正文。\n", encoding="utf-8")
+        self.assertEqual(W.parse_worklog_doc(doc)["headlines"], [])
+
+    def test_summarize_uses_hand_written_content_verbatim(self):
+        ev = {"mapping": SHENZHEN, "git": [], "commits": 0,
+              "files": {"files": 0, "samples": []},
+              "docs": [{"topic": "主题", "mainline": "", "headlines": [],
+                        "points": [], "content": "第一段。\n第二段。"}]}
+        text = W.summarize("深圳租赁", ev, base_cfg())
+        self.assertIn("第一段。", text)
+        self.assertIn("第二段。", text)
+        self.assertNotIn("\n", text)
+
+    def test_summarize_falls_back_to_auto_summary_without_hand_written_content(self):
+        ev = {"mapping": SHENZHEN, "git": [], "commits": 0,
+              "files": {"files": 0, "samples": []},
+              "docs": [{"topic": "主题甲", "mainline": "主线乙", "headlines": ["推进丙"],
+                        "points": [], "content": ""}]}
+        text = W.summarize("深圳租赁", ev, base_cfg())
+        self.assertIn("主题甲", text)
+        self.assertIn("主线乙", text)
+
 
 class DiscoveryTests(unittest.TestCase):
     def setUp(self):
@@ -702,6 +749,12 @@ class NotificationDedupTests(unittest.TestCase):
 
     def test_missing_log_means_nothing_was_sent_before(self):
         self.assertIsNone(W.last_notified_fingerprint(self.state))
+        self.assertFalse(W.was_notified(self.state, "deadbeef"))
+
+    def test_fingerprint_survives_an_unrelated_entry_in_between(self):
+        self.send([self.draft()])
+        W.append_log(self.state, {"at": "2026-11-05T17:40:00", "date": "2026-11-05", "status": "notified"})
+        self.assertEqual(self.send([self.draft()]).call_count, 0)
 
     def test_failed_send_does_not_record_a_fingerprint(self):
         with patch.object(W, "send_mail", return_value=None):
