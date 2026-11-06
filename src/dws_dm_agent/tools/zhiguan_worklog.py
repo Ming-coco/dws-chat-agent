@@ -340,16 +340,31 @@ def dws_executable(cfg: dict | None = None) -> str:
     return str(cand)
 
 
-def _run_dws(args: list, timeout: int = 90):
+def _dws_command(args: list) -> list:
+    """构造 dws 调用命令。
+
+    Windows 上的 dws.cmd 会把带换行的参数截断（邮件正文只留住第一行），
+    所以只要能找到 node 和 dws.js，就直接用 node 调用，绕开 cmd.exe。
+    """
     dws = dws_executable()
+    js = Path(dws).parent / "node_modules" / "dingtalk-workspace-cli" / "bin" / "dws.js"
+    if js.is_file():
+        node = shutil.which("node") or shutil.which("node.exe")
+        if node:
+            return [node, str(js)] + args
     cmd = [dws] + args
     if os.name == "nt" and dws.lower().endswith((".cmd", ".bat")):
         cmd = ["cmd", "/c"] + cmd
+    return cmd
+
+
+def _run_dws(args: list, timeout: int = 90):
+    cmd = _dws_command(args)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
-        log("[calendar] dws 调用失败（%s）" % type(exc).__name__)
+        log("[dws] 调用失败（%s）" % type(exc).__name__)
         return None
     out = (proc.stdout or "").strip()
     start = out.find("{")
@@ -914,6 +929,135 @@ def append_log(state_dir: Path, record: dict) -> None:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+STATUS_TEXT = {
+    "draft_saved": "草稿已生成，待你确认",
+    "draft_failed": "草稿保存失败",
+    "filled": "已填好",
+    "dry_run": "试算，未写草稿",
+    "context_error": "读不到已有记录，本次跳过",
+    "skipped_on_leave": "请假，跳过",
+    "skipped_no_content": "没有可填内容，跳过",
+    "skipped_no_activity": "当天没有工作痕迹，跳过",
+    "skipped_already_filled": "已有记录，跳过",
+}
+
+
+def _as_list(value) -> list:
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        items = []
+    return [str(v).strip() for v in items if str(v).strip()]
+
+
+def _hours_text(value) -> str:
+    return "%g" % round(float(value or 0), 2)
+
+
+def _normalize_body(text: str) -> str:
+    """邮件正文按纯文本投递，长横线会被服务端拆成连续的减号，先统一成短横。"""
+    for src in ("\u2014", "\u2013", "\u2212"):
+        text = text.replace(src, "-")
+    return text
+
+
+def build_notification(results: list, cfg: dict):
+    """把一次运行的结果拼成（标题, 正文），没有需要通知的内容时返回 None。"""
+    note = cfg.get("notify") or {}
+    if not note.get("enabled") or note.get("channel", "mail") != "mail":
+        return None
+
+    rows = [r for r in results if r.get("date")]
+    if note.get("mode", "always") == "draft_only":
+        rows = [r for r in rows if r.get("status") in ("draft_saved", "filled", "draft_failed")]
+    if not rows:
+        return None
+
+    names = {}
+    for item in cfg.get("mappings") or []:
+        if item.get("targetId"):
+            names[item["targetId"]] = item.get("name") or item["targetId"]
+
+    blocks = []
+    drafts = 0
+    total = 0.0
+    for row in rows:
+        status = row.get("status") or ""
+        if status in ("draft_saved", "filled"):
+            drafts += 1
+        total += float(row.get("totalHours") or 0)
+
+        blocks.append("%s  %s" % (row.get("date"), STATUS_TEXT.get(status, status or "未知")))
+        for entry in row.get("entries") or []:
+            name = names.get(entry.get("targetId")) or entry.get("targetId") or ""
+            line = "%s  %s 小时" % (name, _hours_text(entry.get("hours")))
+            brief = " ".join(str(entry.get("content") or "").split())
+            if brief:
+                line += "  %s" % (brief[:80] + "…" if len(brief) > 80 else brief)
+            blocks.append(line)
+        if row.get("totalHours"):
+            blocks.append("合计 %s 小时" % _hours_text(row.get("totalHours")))
+        if row.get("reviewUrl"):
+            blocks.append("确认后提交：%s" % row["reviewUrl"])
+        if row.get("detail"):
+            blocks.append("失败详情：%s" % json.dumps(row["detail"], ensure_ascii=False)[:300])
+
+    dates = [str(row.get("date")) for row in rows]
+    label = dates[0] if len(dates) == 1 else "%s 等 %d 天" % (dates[0], len(dates))
+    if drafts:
+        subject = "【智管工时】%s 草稿 %s 小时 待确认" % (label, _hours_text(total))
+    else:
+        subject = "【智管工时】%s 未生成草稿" % label
+
+    # 邮件正文按 markdown 渲染，单个换行会被并成空格，所以用空行分段。
+    body = "\n\n".join(blocks) + "\n\n" + "（智管工时助手，每天 17:40 自动运行；草稿只有你确认后才会正式提交。）"
+    return subject, _normalize_body(body)
+
+
+def send_mail(cfg: dict, subject: str, body: str):
+    """用钉钉邮箱把摘要发给用户自己。"""
+    note = cfg.get("notify") or {}
+    sender = (note.get("from") or "").strip()
+    to = _as_list(note.get("to"))
+    cc = _as_list(note.get("cc"))
+    if not sender or not to:
+        log("[notify] 未配置 notify.from / notify.to，跳过发信")
+        return None
+
+    args = ["mail", "message", "send", "--from", sender, "--to", ",".join(to)]
+    if cc:
+        args += ["--cc", ",".join(cc)]
+    args += ["--subject", subject, "--content", body, "--format", "json"]
+    sent = _run_dws(args)
+    if not sent or not sent.get("success"):
+        log("[notify] 发信失败：%s" % (json.dumps(sent, ensure_ascii=False)[:300] if sent else "无返回"))
+        return None
+    return sent
+
+
+def notify_mail(state_dir: Path, cfg: dict, results: list):
+    built = build_notification(results, cfg)
+    if built is None:
+        log("[notify] 本次没有需要通知的内容")
+        return None
+    subject, body = built
+    sent = send_mail(cfg, subject, body)
+    if not sent:
+        return None
+    log("[notify] 已发送：%s" % subject)
+    append_log(state_dir, {
+        "at": datetime.now().isoformat(timespec="seconds"),
+        "date": results[-1].get("date") if results else None,
+        "status": "notified",
+        "subject": subject,
+        "to": _as_list((cfg.get("notify") or {}).get("to")),
+        "internetMessageId": sent.get("internetMessageId"),
+    })
+    return sent
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="把本地工作痕迹填成智管工时草稿")
     ap.add_argument("action", choices=["fill", "context", "check"], nargs="?", default="fill")
@@ -921,6 +1065,8 @@ def main(argv=None):
     ap.add_argument("--days-back", type=int, default=0, help="从今天往前补几天（跳过已填/周末）")
     ap.add_argument("--dry-run", action="store_true", help="只计算不写草稿")
     ap.add_argument("--force", action="store_true", help="已有草稿时覆盖重算（有已提交记录时不覆盖）")
+    ap.add_argument("--no-notify", action="store_true", help="本次不发邮件通知")
+    ap.add_argument("--notify-test", action="store_true", help="只发一封测试邮件后退出")
     ap.add_argument("--state-dir", default=None)
     args = ap.parse_args(argv)
 
@@ -928,6 +1074,35 @@ def main(argv=None):
     cfg = load_json(state_dir / CONFIG_NAME, None)
     if cfg is None:
         raise SystemExit("找不到配置：%s" % (state_dir / CONFIG_NAME))
+
+    if args.notify_test:
+        note = cfg.get("notify") or {}
+        built = build_notification(
+            [{
+                "date": "2026-11-04",
+                "status": "draft_saved",
+                "totalHours": 7.5,
+                "entries": [
+                    {"targetId": "249cc0b7-ae48-3a79-832b-d30f7d014e76", "hours": 0.5,
+                     "content": "参会：项目转型宣贯（10:00–11:00，1 小时，湘湖）。"},
+                    {"targetId": "a114d835-e374-3bec-9ade-d5536cd5638c", "hours": 7.0,
+                     "content": "信创改造：接口联调与回归。"},
+                ],
+                "reviewUrl": "https://zhiguan.youshu.com.cn/work-hours/drafts/00000000-0000-0000-0000-000000000000",
+            }],
+            cfg,
+        )
+        if built is None:
+            raise SystemExit("通知未启用或 mode 过滤掉了这条样例，检查 notify 配置")
+        subject, body = built
+        subject = "[测试] " + subject
+        sent = send_mail(cfg, subject, body)
+        if not sent:
+            raise SystemExit("测试邮件发送失败")
+        print(json.dumps({"subject": subject, "to": note.get("to"), "cc": note.get("cc"),
+                          "internetMessageId": sent.get("internetMessageId")},
+                         ensure_ascii=False, indent=2))
+        return 0
 
     client = McpClient(cfg, state_dir).connect()
 
@@ -963,6 +1138,8 @@ def main(argv=None):
 
     filled = [r for r in results if r.get("status") in ("draft_saved", "filled", "dry_run")]
     log("\n== 汇总：%d 天处理，%d 天生成草稿/预览" % (len(results), len(filled)))
+    if not args.dry_run and not args.no_notify:
+        notify_mail(state_dir, cfg, results)
     return 0
 
 
