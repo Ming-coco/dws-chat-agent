@@ -1,6 +1,6 @@
 # 智管工时自动填写
 
-工作日 17:40（周一到周五，节假日跳过，调休补班照常）按本机工作痕迹生成智管工时**草稿**，你在页面上确认后提交。
+工作日 17:40（周一到周五，节假日跳过，调休补班照常）按本机工作痕迹生成智管工时**草稿**，并把摘要和确认链接**发到你的钉钉邮箱**，你点链接确认后提交。
 
 ## 它怎么工作
 
@@ -9,8 +9,37 @@
 3. 没有手写日志时，退化为 `git log` 当天提交 + 文件修改时间统计。
 4. 按各项目当天的工作量把 7.5 小时分配下去（步长 0.5h）。
 5. 调智管 MCP 的 `save_worklog_draft` 存成草稿，并把 `reviewUrl` 写进 `zhiguan_state\fill-log.jsonl`。
+6. 用 `dws mail message send` 把「日期 / 各项工时 / 合计 / 确认链接」发到你自己的钉钉邮箱；不发信就等于没填成，`fill-log.jsonl` 里会留一条 `status: notified` 的记录。
 
 同一天已经有草稿或已提交记录时默认跳过，不会重复生成。
+
+## 邮件通知
+
+`config.json` 的 `notify` 段控制发信：
+
+```json
+"notify": {
+  "enabled": true,
+  "channel": "mail",
+  "from": "Ming-coco@users.noreply.github.com",
+  "to": ["Ming-coco@users.noreply.github.com"],
+  "cc": ["785_iz8l9f5sn@dingtalk.com"],
+  "mode": "always"
+}
+```
+
+- `mode: always` 每天都发（包括「请假跳过」「当天没有工作痕迹」）；`mode: draft_only` 只在真的生成了草稿时发。
+- 正文按 markdown 渲染，**单个换行会被并成空格**，所以要靠空行分段——邮件里的空行不是笔误。
+- 发信失败不会影响草稿写入，只在 `cron.log` 里记一条 `[notify] 发信失败`。
+- 正文里的长横线（`—` `–`）会被服务端拆成连续减号，代码里已统一换成 `-`。
+
+验证发信链路（不会写草稿、不改 `fill-log.jsonl`）：
+
+```powershell
+python -m dws_dm_agent.tools.zhiguan_worklog fill --notify-test
+```
+
+注意：Windows 上 `dws.cmd` 会把带换行的参数截断（正文只剩第一行），所以程序优先用 `node <...>/dingtalk-workspace-cli/bin/dws.js` 直调，只在找不到 node 时才退回 `cmd /c dws.cmd`。
 
 ## 工作日判断
 
@@ -67,6 +96,12 @@ python -m dws_dm_agent.tools.zhiguan_worklog fill --date 2026-11-05 --force
 
 # 检查令牌
 python -m dws_dm_agent.tools.zhiguan_worklog check
+
+# 只发一封测试邮件，验证通知链路
+python -m dws_dm_agent.tools.zhiguan_worklog fill --notify-test
+
+# 照常填但这次不发信
+python -m dws_dm_agent.tools.zhiguan_worklog fill --no-notify
 ```
 
 ## 计划任务
@@ -92,5 +127,5 @@ schtasks /Delete /TN "ZhiguanWorklogDaily" /F
 
 - 只有 `worklog:read` 和 `worklog:draft` 权限，**不能直接提交**，必须你在 `reviewUrl` 页面点确认。
 - 日历读的是你自己钉钉账号的日历：请假要建在日历上才会被识别（全天或 ≥4 小时的请假视为整天不在）。
-- 只有登录状态才会触发（计划任务是 Interactive only）。
+- 只有登录状态才会触发（计划任务是 Interactive only）；机器关机的那天不会补跑，需要手动 `--date` 补。
 - 令牌 1 小时过期，靠 refresh_token 自动续；如果 refresh_token 也被吊销，需要重新授权。

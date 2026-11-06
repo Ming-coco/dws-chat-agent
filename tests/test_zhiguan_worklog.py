@@ -411,5 +411,102 @@ class ParseWorklogDocTests(unittest.TestCase):
         self.assertEqual(W.find_worklog_docs(self.root, datetime(2026, 11, 5)), [])
 
 
+class NotificationTests(unittest.TestCase):
+    def draft(self, **overrides):
+        row = {
+            "date": "2026-11-04",
+            "status": "draft_saved",
+            "totalHours": 7.5,
+            "entries": [
+                {"targetId": SHENZHEN["targetId"], "hours": 1.5, "content": "推进事项一。"},
+                {"targetId": ZHAOYIN["targetId"], "hours": 6.0, "content": "推进事项二。"},
+            ],
+            "reviewUrl": "https://zhiguan.example/drafts/abc",
+        }
+        row.update(overrides)
+        return row
+
+    def cfg(self, **notify):
+        block = {"enabled": True, "channel": "mail", "from": "a@b.com", "to": ["a@b.com"]}
+        block.update(notify)
+        return base_cfg(notify=block)
+
+    def test_subject_carries_date_and_total(self):
+        subject, body = W.build_notification([self.draft()], self.cfg())
+        self.assertIn("2026-11-04", subject)
+        self.assertIn("7.5", subject)
+        self.assertIn("https://zhiguan.example/drafts/abc", body)
+
+    def test_entry_names_resolve_from_mappings(self):
+        _, body = W.build_notification([self.draft()], self.cfg())
+        self.assertIn("客户 B", body)
+        self.assertIn("客户 A", body)
+
+    def test_paragraphs_are_separated_by_blank_lines(self):
+        _, body = W.build_notification([self.draft()], self.cfg())
+        self.assertIn("\n\n", body)
+        self.assertNotIn("\n\n\n", body)
+
+    def test_disabled_sends_nothing(self):
+        self.assertIsNone(W.build_notification([self.draft()], self.cfg(enabled=False)))
+
+    def test_draft_only_mode_skips_quiet_days(self):
+        quiet = [self.draft(status="skipped_no_activity", totalHours=0, entries=[])]
+        self.assertIsNone(W.build_notification(quiet, self.cfg(mode="draft_only")))
+
+    def test_always_mode_reports_skipped_day(self):
+        quiet = [self.draft(status="skipped_on_leave", totalHours=0, entries=[])]
+        subject, body = W.build_notification(quiet, self.cfg(mode="always"))
+        self.assertIn("请假", body)
+        self.assertIn("未生成草稿", subject)
+
+    def test_long_dashes_are_normalised(self):
+        row = self.draft(entries=[
+            {"targetId": SHENZHEN["targetId"], "hours": 1.0, "content": "会议（10:00\u201311:00）。"},
+        ])
+        _, body = W.build_notification([row], self.cfg())
+        self.assertNotIn("\u2013", body)
+        self.assertNotIn("\u2014", body)
+
+    def test_send_mail_without_recipients_does_not_call_dws(self):
+        cfg = base_cfg(notify={"enabled": True, "from": "a@b.com", "to": []})
+        with patch.object(W, "_run_dws") as run:
+            self.assertIsNone(W.send_mail(cfg, "s", "b"))
+            run.assert_not_called()
+
+    def test_send_mail_passes_expected_arguments(self):
+        cfg = self.cfg(cc=["c@d.com"])
+        reply = {"success": "true", "internetMessageId": "x"}
+        with patch.object(W, "_run_dws", return_value=reply) as run:
+            self.assertEqual(W.send_mail(cfg, "主题", "正文"), reply)
+        args = run.call_args[0][0]
+        self.assertEqual(args[:3], ["mail", "message", "send"])
+        self.assertEqual(args[args.index("--to") + 1], "a@b.com")
+        self.assertEqual(args[args.index("--cc") + 1], "c@d.com")
+        self.assertEqual(args[args.index("--content") + 1], "正文")
+
+    def test_dws_command_prefers_node_when_js_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            js = Path(tmp) / "node_modules" / "dingtalk-workspace-cli" / "bin" / "dws.js"
+            js.parent.mkdir(parents=True)
+            js.write_text("", encoding="utf-8")
+            with patch.object(W, "dws_executable", return_value=str(Path(tmp) / "dws.cmd")):
+                with patch.object(W.shutil, "which", return_value="/usr/bin/node"):
+                    cmd = W._dws_command(["mail", "message", "send"])
+        self.assertEqual(cmd[0], "/usr/bin/node")
+        self.assertTrue(cmd[1].endswith("dws.js"))
+        self.assertEqual(cmd[2:], ["mail", "message", "send"])
+
+    def test_dws_command_falls_back_to_cmd_wrapper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(W, "dws_executable", return_value=str(Path(tmp) / "dws.cmd")):
+                with patch.object(W, "os") as fake_os:
+                    fake_os.name = "nt"
+                    with patch.object(W.shutil, "which", return_value=None):
+                        cmd = W._dws_command(["a"])
+        self.assertEqual(cmd[-1], "a")
+        self.assertIn("dws.cmd", cmd[-2])
+
+
 if __name__ == "__main__":
     unittest.main()
