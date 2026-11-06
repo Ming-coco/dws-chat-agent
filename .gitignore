@@ -224,6 +224,7 @@ config.json.bak*
 .env.*
 !.env.example
 state/
+zhiguan_state/
 /audit.sqlite3
 /agent.db
 .playwright-cli/
