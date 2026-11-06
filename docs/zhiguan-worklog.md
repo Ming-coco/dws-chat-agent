@@ -5,11 +5,12 @@
 ## 它怎么工作
 
 1. 先看**钉钉日历**当天：整天或半天以上的「请假」直接跳过不填；有会议的按标题关键词挂到对应项目，写进该项目的日志内容里（挂不上的写进当天工时最多的项目），**不新增条目、不改变工时分配**。
-2. 读 `D:\workspace` 下每个项目目录当天的**手写工作日志**（`工作日志\YYYY-MM-DD-周X.md` 或 `YYYY-MM-DD_周X_工作日志.md`），从中取主题、主线、章节和要点作为填写内容。
-3. 没有手写日志时，退化为 `git log` 当天提交 + 文件修改时间统计。
-4. 按各项目当天的工作量把 7.5 小时分配下去（步长 0.5h）。
-5. 调智管 MCP 的 `save_worklog_draft` 存成草稿，并把 `reviewUrl` 写进 `zhiguan_state\fill-log.jsonl`。
-6. 用 `dws mail message send` 把「日期 / 各项工时 / 合计 / 确认链接」发到你自己的钉钉邮箱；不发信就等于没填成，`fill-log.jsonl` 里会留一条 `status: notified` 的记录。
+2. **动态枚举** `D:\workspace` 下的一级子目录，挑出当天真有活动的那些——目录会不断增加，清单不写死（见下面「目录与归属」）。
+3. 读每个目录当天的**手写工作日志**（`工作日志\YYYY-MM-DD-周X.md` 或 `YYYY-MM-DD_周X_工作日志.md`），从中取主题、主线、章节和要点作为填写内容。
+4. 没有手写日志时，退化为 `git log` 当天提交 + 文件修改时间统计。
+5. 按各项目当天的工作量把 7.5 小时分配下去（步长 0.5h）。
+6. 调智管 MCP 的 `save_worklog_draft` 存成草稿，并把 `reviewUrl` 写进 `zhiguan_state\fill-log.jsonl`。
+7. 用 `dws mail message send` 把「日期 / 各项工时 / 合计 / 确认链接」发到你的钉钉邮箱。
 
 同一天已经有草稿或已提交记录时默认跳过，不会重复生成。
 
@@ -59,21 +60,42 @@ python -m dws_dm_agent.tools.zhiguan_worklog fill --notify-test
 | `zhiguan_state\run_worklog.cmd` | 计划任务实际调用的入口 |
 | `src\dws_dm_agent\tools\zhiguan_worklog.py` | 主程序 |
 
-## 映射表
+## 目录与归属
 
-`config.json` 的 `mappings` 决定「哪个目录的活记到哪个填写对象」。已确认：
+目录清单**不是写死的**。每次运行都会重新枚举 `workspace_root`（默认 `D:\workspace`）下的所有一级子目录，
+再挑出当天真有活动的目录。工作目录以后会增加，不需要改代码；只有「新目录归到哪个项目」这件事需要一次确认。
+
+判定顺序：
+
+1. **显式映射**——`config.json` 的 `mappings` 里有这个目录，直接用里面人工确认过的 `targetId`。
+2. **按名字归并到已有映射**——新目录名里含某个映射的名字或关键词（如 `区域产业链sql更新` → 区域产业链），就并到那条映射上。
+3. **按名字自动匹配智管可填对象**——目录名和当天可填的项目/产品名、客户名、项目编号有足够长的公共片段就自动挂上去；两个项目打分并列时视为说明不了归属，**不猜**。
+4. **兜底**——都匹配不上的目录，当天如果还有其他已映射项目，工时并到最重的那一项；如果当天**只有**这些目录在动，整体挂到 `fallback_target`，照样出草稿，邮件里点名是哪些目录。
+
+已确认的映射：
 
 | 目录 | 填写对象 |
 | --- | --- |
 | `D:\workspace\客户 B` | 某融资租赁风控预警系统升级（XXXX-0000000P） |
 | `D:\workspace\客户 A` | 某信创改造项目（XXXX-00000000-000） |
 | `D:\workspace\某平台ai-尽调项目` | 某租赁公司智能尽调（售前）（XXXX-00000000-000） |
-| `D:\workspace\区域产业链通用` | 某营销与风控数智化平台（CODE-0000-02，产品） |
+| `D:\workspace\区域产业链通用`（及 `区域产业链sql更新`、`区域产业链交接信息`、`产业链数据加工`） | 某营销与风控数智化平台（CODE-0000-02，产品） |
+| `D:\workspace\标准部署版本` | 技术产品架构V2.0（CODE-0000-03，产品） |
 | `D:\workspace\dws-chat-agent` | 不单独记（工时并入当天主项目） |
 | `D:\workspace\agent-radar` | 不单独记 |
 
-新增项目：在 `mappings` 里加一条，`targetType` 取 `PROJECT` / `PRODUCT`，`targetId` 用填写对象 id；不想单独记就写 `SKIP`。
-`targetType` 写 `DAILY`（日常工作）不会被使用——本项目约定所有工时都挂真实项目/产品。
+相关配置：
+
+```json
+"workspace_root": "D:\\workspace",
+"discovery": { "enabled": true, "match_min_chars": 3, "ignore": ["dsh-acl-recovery"] },
+"fallback_target": { "name": "技术产品架构V2.0", "targetType": "PRODUCT", "targetId": "77ba332d-..." }
+```
+
+- `discovery.ignore` 里的目录永远不单独记（名字归一化后比较）。
+- `match_min_chars` 是自动匹配要求的最短公共片段，调大更保守。
+- 新增项目：在 `mappings` 里加一条，`targetType` 取 `PROJECT` / `PRODUCT`，`targetId` 用填写对象 id；不想单独记就写 `SKIP`。
+- `targetType` 写 `DAILY`（日常工作）不会被使用——本项目约定所有工时都挂真实项目/产品。
 
 ## 手动运行
 
