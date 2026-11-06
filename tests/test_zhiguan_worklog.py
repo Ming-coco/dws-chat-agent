@@ -653,5 +653,61 @@ class NotificationTests(unittest.TestCase):
         self.assertIn("dws.cmd", cmd[-2])
 
 
+class NotificationDedupTests(unittest.TestCase):
+    """同一天重跑但内容没变时，不能再发一封一模一样的邮件。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self.tmp.name)
+        self.cfg = base_cfg(notify={
+            "enabled": True, "channel": "mail", "from": "a@b.com", "to": ["a@b.com"],
+        })
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def draft(self, hours=7.5):
+        return {
+            "date": "2026-11-04",
+            "status": "draft_saved",
+            "totalHours": hours,
+            "entries": [{"targetId": SHENZHEN["targetId"], "hours": hours, "content": "推进事项。"}],
+            "reviewUrl": "https://zhiguan.example/drafts/abc",
+        }
+
+    def send(self, results):
+        reply = {"success": "true", "internetMessageId": "x"}
+        with patch.object(W, "send_mail", return_value=reply) as fake:
+            W.notify_mail(self.state, self.cfg, results)
+        return fake
+
+    def test_identical_rerun_sends_only_once(self):
+        fake = self.send([self.draft()])
+        again = self.send([self.draft()])
+        self.assertEqual(fake.call_count, 1)
+        self.assertEqual(again.call_count, 0)
+
+    def test_changed_content_is_sent_again(self):
+        first = self.send([self.draft(7.5)])
+        second = self.send([self.draft(8.0)])
+        self.assertEqual(first.call_count, 1)
+        self.assertEqual(second.call_count, 1)
+
+    def test_fingerprint_is_recorded_in_the_log(self):
+        self.send([self.draft()])
+        rows = [json.loads(l) for l in (self.state / W.LOG_NAME).read_text(encoding="utf-8").splitlines() if l.strip()]
+        notified = [r for r in rows if r.get("status") == "notified"]
+        self.assertEqual(len(notified), 1)
+        self.assertTrue(notified[0]["fingerprint"])
+
+    def test_missing_log_means_nothing_was_sent_before(self):
+        self.assertIsNone(W.last_notified_fingerprint(self.state))
+
+    def test_failed_send_does_not_record_a_fingerprint(self):
+        with patch.object(W, "send_mail", return_value=None):
+            W.notify_mail(self.state, self.cfg, [self.draft()])
+        self.assertIsNone(W.last_notified_fingerprint(self.state))
+
+
 if __name__ == "__main__":
     unittest.main()
