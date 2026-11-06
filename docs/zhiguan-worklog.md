@@ -131,12 +131,15 @@ python -m dws_dm_agent.tools.zhiguan_worklog fill --no-notify
 已注册 Windows 计划任务 `ZhiguanWorklogDaily`：
 
 ```
-Task To Run:  cmd /c "D:\workspace\dws-chat-agent\zhiguan_state\run_worklog.cmd fill"
+Task To Run:  cmd.exe /c ""D:\workspace\dws-chat-agent\zhiguan_state\run_worklog.cmd" fill --force"
 Schedule:     Daily, 17:40
 Logon Mode:   Interactive only（登录状态下才跑）
 ```
 
 任务本身是**每天**触发，由脚本判断要不要填：法定假日和普通周末跳过，调休补班的周末照常填。这样调休不用手动改任务。
+
+带 `--force` 是为了「生成的草稿你改了之后，第二天重跑不会因为『已有草稿』而报错跳过」——它只覆盖本工具自己创建的草稿，遇到你已在页面上提交的记录仍然跳过。
+（`--force` 只在同一天重复运行时才有区别，正常一天跑一次的行为不变。）
 
 查看 / 删除：
 
