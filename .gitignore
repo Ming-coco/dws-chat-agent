@@ -233,3 +233,7 @@ zhiguan_state/
 # 一次性迁移/排查产物，含凭据备份与附件，绝不入库
 _migration/
 _tools/
+
+# 本地临时脚本与临时目录
+.tmp/
+tmp*/
