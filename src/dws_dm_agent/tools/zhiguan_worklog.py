@@ -443,13 +443,145 @@ def match_mapping_by_title(title: str, cfg: dict):
     return None
 
 
-def collect_day(cfg: dict, day: datetime) -> dict:
-    """Gather per-mapping activity evidence for one calendar day."""
+PLATFORM_DIRS = {
+    ".git", "node_modules", ".venv", "__pycache__", "dist", "build", "target",
+    ".idea", ".vscode", "logs", "log", "state", "tmp", ".dsh-work", ".dsh-tmp",
+}
+
+
+def _squash(text) -> str:
+    """归一化目录名/项目名，去掉空白与标点，便于互相包含判断。"""
+    return re.sub(r"[\s\-_（）()【】\[\]·．.,，。/\\]+", "", str(text or "")).lower()
+
+
+def workspace_root(cfg: dict) -> Path:
+    """项目目录的父目录；新项目就是这里新出现的一级子目录。"""
+    return Path((cfg.get("workspace_root") or cfg.get("workspace") or r"D:\workspace"))
+
+
+def discover_dirs(cfg: dict) -> list:
+    """动态列出 workspace_root 下的一级子目录（跳过隐藏目录与平台目录）。
+
+    目录会不断增加，所以项目清单不能写死在 mappings 里；这里每跑一次就重新枚举。
+    """
+    if (cfg.get("discovery") or {}).get("enabled") is False:
+        return []
+    root = workspace_root(cfg)
+    if not root.is_dir():
+        return []
+    ignore = {_squash(x) for x in ((cfg.get("discovery") or {}).get("ignore") or [])}
+    out = []
+    try:
+        children = sorted(root.iterdir())
+    except OSError:
+        return []
+    for child in children:
+        if not child.is_dir():
+            continue
+        if child.name.startswith((".", "_", "~$")):
+            continue
+        if child.name.lower() in PLATFORM_DIRS or _squash(child.name) in ignore:
+            continue
+        out.append(child)
+    return out
+
+
+def _path_key(path) -> str:
+    try:
+        return str(Path(path).resolve()).lower()
+    except OSError:
+        return str(path).lower()
+
+
+def _lcs_len(a: str, b: str) -> int:
+    """最长公共子串长度；目录名很短，O(n*m) 足够。"""
+    if not a or not b:
+        return 0
+    best = 0
+    prev = [0] * (len(b) + 1)
+    for i in range(1, len(a) + 1):
+        cur = [0] * (len(b) + 1)
+        for j in range(1, len(b) + 1):
+            if a[i - 1] == b[j - 1]:
+                cur[j] = prev[j - 1] + 1
+                if cur[j] > best:
+                    best = cur[j]
+        prev = cur
+    return best
+
+
+def auto_match(name: str, eligible: list, cfg: dict):
+    """把新目录按名字匹配到智管可填对象；匹配不到或并列就返回 None，绝不硬猜。"""
+    if not eligible:
+        return None
+    target = _squash(name)
+    if len(target) < 2:
+        return None
+    need = int((cfg.get("discovery") or {}).get("match_min_chars", 3))
+    scored = []
+    for item in eligible:
+        if item.get("targetType") == "DAILY":
+            continue
+        score = 0
+        for field in ("name", "customerName", "code"):
+            token = _squash(item.get(field))
+            if len(token) < 2:
+                continue
+            if target in token:
+                # 目录名被项目名整段包含，最强信号
+                score = max(score, len(target) + 100)
+            elif len(token) >= need and token in target:
+                score = max(score, len(token) + 100)
+            else:
+                shared = _lcs_len(target, token)
+                if shared >= need:
+                    score = max(score, shared)
+        if score:
+            scored.append((score, item))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: -x[0])
+    if len(scored) > 1 and scored[0][0] == scored[1][0]:
+        # 两个项目打分并列，说明这个目录名说明不了归属，交给人来定
+        return None
+    item = scored[0][1]
+    return {
+        "name": name,
+        "targetType": item.get("targetType"),
+        "targetId": item.get("id"),
+        "auto": True,
+        "note": "按目录名自动匹配：%s" % (item.get("name") or item.get("code") or item.get("id")),
+    }
+
+
+def collect_day(cfg: dict, day: datetime, eligible: list | None = None) -> dict:
+    """Gather per-project activity evidence for one calendar day.
+
+    目录来源是动态的：先算 config.mappings 里显式配置的目录（它们的 targetId 是人工确认过的），
+    再把 workspace_root 下新出现、且有当天活动的目录一并纳入；新目录优先按已有映射的名字/关键词
+    归一，其次按智管可填对象的名字自动匹配，都匹配不上的标记为未归属，交给上层并入主项目并在通知里点名。
+    """
     patterns = cfg.get("exclude_patterns") or []
     depth = int(cfg.get("file_scan_depth", 4))
-    evidence = {}
+    min_files = int(cfg.get("min_files_without_commits", 10))
+
+    sources = []
+    seen = set()
     for m in cfg.get("mappings") or []:
         root = Path(m["workspace"])
+        seen.add(_path_key(root))
+        sources.append((m.get("name") or root.name, m, root))
+
+    for root in discover_dirs(cfg):
+        key = _path_key(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        mapping = match_mapping_for_dir(root.name, cfg) or auto_match(root.name, eligible or [], cfg)
+        sources.append((root.name, mapping, root))
+
+    evidence = {}
+    for name, mapping, root in sources:
         if not root.exists():
             continue
         repos = git_repos(root, max_depth=3)
@@ -460,19 +592,51 @@ def collect_day(cfg: dict, day: datetime) -> dict:
         docs = [parse_worklog_doc(p) for p in find_worklog_docs(root, day)]
         docs = [d for d in docs if d]
         # 噪声过滤：只有零星文件改动、既没提交也没手写日志的目录不算“今天在做这个”
-        min_files = int(cfg.get("min_files_without_commits", 10))
         if not git_bits and not docs and files["files"] < min_files:
             continue
         if not git_bits and files["files"] == 0 and not docs:
             continue
-        evidence[m["name"]] = {
-            "mapping": m,
+
+        key = (mapping or {}).get("name") or name
+        bit = {
+            "mapping": mapping,
             "git": sorted(git_bits, key=lambda g: -g["commits"]),
             "files": files,
             "docs": docs,
             "commits": sum(g["commits"] for g in git_bits),
+            "dirs": [root.name],
         }
+        if key in evidence:
+            # 同一个项目的多个目录（如「重庆产业链通用」与「重庆产业链sql更新」）合并
+            acc = evidence[key]
+            acc["git"] = sorted(acc["git"] + bit["git"], key=lambda g: -g["commits"])
+            acc["files"]["files"] += bit["files"]["files"]
+            acc["files"]["samples"] = (acc["files"].get("samples") or []) + (bit["files"].get("samples") or [])
+            acc["docs"] = acc["docs"] + bit["docs"]
+            acc["commits"] += bit["commits"]
+            acc["dirs"] = acc["dirs"] + bit["dirs"]
+            if acc["mapping"] is None and mapping is not None:
+                acc["mapping"] = mapping
+        else:
+            evidence[key] = bit
     return evidence
+
+
+def match_mapping_for_dir(dirname: str, cfg: dict):
+    """把一个新目录按名字/关键词挂到已有映射上；命中取最长匹配。"""
+    target = _squash(dirname)
+    if len(target) < 2:
+        return None
+    best = None
+    for m in cfg.get("mappings") or []:
+        for token in [m.get("name") or ""] + list(m.get("keywords") or []):
+            tok = _squash(token)
+            if len(tok) < 2:
+                continue
+            if tok in target or target in tok:
+                if best is None or len(tok) > best[0]:
+                    best = (len(tok), m)
+    return best[1] if best else None
 
 
 # --------------------------------------------------------------------------- compose
@@ -632,6 +796,31 @@ def summarize(mapping_name: str, ev: dict, cfg: dict) -> str:
     return text[:max_len]
 
 
+def merge_evidence(evidence: dict, names: list, mapping: dict) -> dict:
+    """把若干「没匹配上项目」的目录合并成一份痕迹，挂到兜底项目上。"""
+    git, docs = [], []
+    files = {"files": 0, "samples": []}
+    commits = 0
+    dirs = []
+    for n in names:
+        ev = evidence[n]
+        git += ev["git"]
+        docs += ev.get("docs") or []
+        files["files"] += ev["files"]["files"]
+        files["samples"] += ev["files"].get("samples") or []
+        commits += ev["commits"]
+        dirs += ev.get("dirs") or [n]
+    return {
+        "mapping": mapping,
+        "git": sorted(git, key=lambda g: -g["commits"]),
+        "files": files,
+        "docs": docs,
+        "commits": commits,
+        "dirs": dirs,
+        "fallback": True,
+    }
+
+
 def allocate_hours(evidence: dict, cfg: dict) -> dict:
     """Split the day's hours by commit count, never below min, rounded to step."""
     total = float(cfg.get("default_daily_hours", 7.5))
@@ -773,6 +962,12 @@ def fill_day(client: McpClient, cfg: dict, day: date, dry_run: bool = False, for
     if ctx.get("_isError"):
         return {"date": day.isoformat(), "status": "context_error", "detail": ctx}
 
+    # 当天可以填的项目/产品（DAILY 日常工作排除在外，本项目约定所有工时都挂真实项目）
+    eligible_list = [
+        t for t in ((ctx.get("eligibleTargets") or {}).get("items") or [])
+        if t.get("targetType") != "DAILY"
+    ]
+
     existing = ctx.get("existingEntries") or []
     drafts = ctx.get("drafts") or []
     my_draft = None
@@ -805,24 +1000,49 @@ def fill_day(client: McpClient, cfg: dict, day: date, dry_run: bool = False, for
         }
     meetings = [e for e in events if not e["is_leave"] and not e["all_day"] and e["hours"] > 0]
 
-    evidence = collect_day(cfg, day_dt)
+    evidence = collect_day(cfg, day_dt, eligible_list)
     if not evidence:
         return {"date": day.isoformat(), "status": "skipped_no_activity"}
 
-    # 配置为 SKIP 的目录（内部工具、调研归档）不参与工时分配
-    active, skipped = {}, []
+    # 配置为 SKIP 的目录（内部工具、调研归档）不参与工时分配；
+    # 新目录里既没配映射、也没自动匹配上的，同样不占条目，但要报给用户。
+    active, skipped, unmapped = {}, [], []
     for name, ev in evidence.items():
-        if ev["mapping"].get("targetType") == "SKIP":
+        m = ev.get("mapping")
+        if not m:
+            unmapped.append(name)
+            continue
+        if m.get("targetType") == "SKIP":
             skipped.append(name)
             continue
         active[name] = ev
     if skipped:
         log("[skip] %s 配置为不单独记工时，工时并入当天主项目" % "、".join(skipped))
+
+    fallback = cfg.get("fallback_target") or {}
+    fallback_name = None
+    if unmapped and not active and fallback.get("targetId"):
+        # 当天只有「没匹配上项目」的目录在动：不空着，整体挂到兜底项目，邮件里点名
+        fallback_name = fallback.get("name") or "兜底项目"
+        active = {fallback_name: merge_evidence(
+            evidence, unmapped,
+            {"name": fallback_name, "targetType": fallback.get("targetType") or "PRODUCT",
+             "targetId": fallback.get("targetId"), "fallback": True},
+        )}
+        log("[unmapped] %s 没有对应项目，整体挂到兜底项目 %s" % ("、".join(unmapped), fallback_name))
+    elif unmapped:
+        log("[unmapped] %s 有工作痕迹但没有对应项目，工时并入当天主项目" % "、".join(unmapped))
+
     if not active:
-        return {"date": day.isoformat(), "status": "skipped_no_content"}
+        return {
+            "date": day.isoformat(),
+            "status": "skipped_no_content",
+            "skipped": skipped,
+            "unmapped": unmapped,
+        }
 
     hours = allocate_hours(active, cfg)
-    eligible = {(t.get("targetType"), t.get("id")) for t in ((ctx.get("eligibleTargets") or {}).get("items") or [])}
+    eligible = {(t.get("targetType"), t.get("id")) for t in eligible_list}
 
     entries = []
     owner = {}
@@ -851,7 +1071,12 @@ def fill_day(client: McpClient, cfg: dict, day: date, dry_run: bool = False, for
         entries.append(entry)
 
     if not entries:
-        return {"date": day.isoformat(), "status": "skipped_no_content"}
+        return {
+            "date": day.isoformat(),
+            "status": "skipped_no_content",
+            "skipped": skipped,
+            "unmapped": unmapped,
+        }
 
     # 被跳过的工时并到当天最重的项目上
     if dropped_hours > 0:
@@ -898,6 +1123,8 @@ def fill_day(client: McpClient, cfg: dict, day: date, dry_run: bool = False, for
         "status": "dry_run" if dry_run else "draft_saved",
         "totalHours": total,
         "entries": entries,
+        "unmapped": unmapped,
+        "fallback": fallback_name,
     }
     if dry_run:
         return result
@@ -979,6 +1206,9 @@ def build_notification(results: list, cfg: dict):
     for item in cfg.get("mappings") or []:
         if item.get("targetId"):
             names[item["targetId"]] = item.get("name") or item["targetId"]
+    fallback = cfg.get("fallback_target") or {}
+    if fallback.get("targetId"):
+        names.setdefault(fallback["targetId"], fallback.get("name") or "兜底项目")
 
     blocks = []
     drafts = 0
@@ -999,6 +1229,17 @@ def build_notification(results: list, cfg: dict):
             blocks.append(line)
         if row.get("totalHours"):
             blocks.append("合计 %s 小时" % _hours_text(row.get("totalHours")))
+        if row.get("unmapped"):
+            if row.get("fallback"):
+                blocks.append(
+                    "以下目录有工作痕迹、但没匹配到项目，工时已整体挂到「%s」，请确认归属：%s"
+                    % (row["fallback"], "、".join(row["unmapped"]))
+                )
+            else:
+                blocks.append(
+                    "以下目录有工作痕迹、但没匹配到项目，工时已并入上面的主项目，请确认归属：%s"
+                    % "、".join(row["unmapped"])
+                )
         if row.get("reviewUrl"):
             blocks.append("确认后提交：%s" % row["reviewUrl"])
         if row.get("detail"):

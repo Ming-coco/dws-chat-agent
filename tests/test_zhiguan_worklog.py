@@ -80,11 +80,12 @@ class FakeClient:
         raise AssertionError("unexpected tool call: %s" % name)
 
 
-def eligible_targets() -> list:
-    return [
+def eligible_targets(extra: list | None = None) -> list:
+    items = [
         {"targetType": m["targetType"], "id": m["targetId"], "name": m["name"]}
         for m in (SHENZHEN, ZHAOYIN)
     ]
+    return items + list(extra or [])
 
 
 class HolidayTableTests(unittest.TestCase):
@@ -409,6 +410,150 @@ class ParseWorklogDocTests(unittest.TestCase):
         doc = self.root / "2026-11-04_周三_工作日志.md"
         doc.write_text("**主题**：x\n", encoding="utf-8")
         self.assertEqual(W.find_worklog_docs(self.root, datetime(2026, 11, 5)), [])
+
+
+class DiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        for name in ("招银", "新项目", ".hidden", "_scratch", "node_modules", "dbeaver统一导出sql"):
+            (self.root / name).mkdir()
+        (self.root / "afile.txt").write_text("x", encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def cfg(self, **discovery):
+        block = {"enabled": True, "ignore": ["dbeaver统一导出sql"]}
+        block.update(discovery)
+        return base_cfg(workspace_root=str(self.root), discovery=block)
+
+    def names(self, cfg):
+        return sorted(p.name for p in W.discover_dirs(cfg))
+
+    def test_skips_hidden_platform_and_ignored_dirs(self):
+        self.assertEqual(set(self.names(self.cfg())), {"新项目", "招银"})
+
+    def test_disabled_discovery_yields_nothing(self):
+        self.assertEqual(self.names(self.cfg(enabled=False)), [])
+
+    def test_missing_root_is_tolerated(self):
+        cfg = base_cfg(workspace_root=str(self.root / "nope"), discovery={"enabled": True})
+        self.assertEqual(W.discover_dirs(cfg), [])
+
+    def test_new_dir_matches_existing_mapping_by_keyword(self):
+        self.assertEqual(W.match_mapping_for_dir("招银二期", base_cfg())["name"], "招银金租")
+
+    def test_generic_dir_name_matches_nothing(self):
+        self.assertIsNone(W.match_mapping_for_dir("标准本地部署版本", base_cfg()))
+
+    def test_auto_match_uses_project_name(self):
+        items = [{"targetType": "PROJECT", "id": "x", "name": "慧企宝2026智客平台企业视图部署服务"}]
+        hit = W.auto_match("慧企宝部署", items, base_cfg())
+        self.assertEqual(hit["targetId"], "x")
+        self.assertTrue(hit["auto"])
+
+    def test_auto_match_never_picks_daily(self):
+        items = [{"targetType": "DAILY", "id": "d", "name": "日常工作"}]
+        self.assertIsNone(W.auto_match("日常工作", items, base_cfg()))
+
+    def test_auto_match_ignores_single_char_overlap(self):
+        items = [{"targetType": "PROJECT", "id": "x", "name": "甲"}]
+        self.assertIsNone(W.auto_match("甲乙丙", items, base_cfg()))
+
+    def test_auto_match_bails_out_on_a_tie(self):
+        items = [
+            {"targetType": "PROJECT", "id": "a", "name": "重庆产业链风控"},
+            {"targetType": "PROJECT", "id": "b", "name": "重庆产业链营销"},
+        ]
+        self.assertIsNone(W.auto_match("重庆产业链", items, base_cfg()))
+
+    def test_auto_match_prefers_exact_containment(self):
+        items = [
+            {"targetType": "PROJECT", "id": "a", "name": "无关项目"},
+            {"targetType": "PROJECT", "id": "b", "customerName": "招银金融租赁有限公司"},
+        ]
+        self.assertEqual(W.auto_match("招银", items, base_cfg())["targetId"], "b")
+
+
+FALLBACK = {
+    "name": "技术产品架构V2.0",
+    "targetType": "PRODUCT",
+    "targetId": "77ba332d-b8bc-31b2-a030-55cd52016963",
+}
+
+
+class UnmappedDirectoryTests(unittest.TestCase):
+    """当天只有「没匹配上项目」的目录在动时，挂兜底项目，不空跑。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self.tmp.name)
+        self.cfg = base_cfg(fallback_target=FALLBACK)
+        self.ev = {
+            "某个新目录": {
+                "mapping": None,
+                "git": [],
+                "commits": 21,
+                "files": {"files": 3, "samples": []},
+                "docs": [],
+                "dirs": ["某个新目录"],
+            }
+        }
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_fill(self):
+        client = FakeClient(self.state, eligible_targets(
+            [{"targetType": FALLBACK["targetType"], "id": FALLBACK["targetId"], "name": FALLBACK["name"]}]
+        ))
+        with patch.object(W, "calendar_events", return_value=[]), \
+                patch.object(W, "collect_day", return_value=self.ev):
+            return W.fill_day(client, self.cfg, date(2026, 11, 4), dry_run=True)
+
+    def test_unmatched_day_still_produces_a_draft_on_the_fallback(self):
+        result = self.run_fill()
+        self.assertEqual(result["status"], "dry_run")
+        self.assertEqual(len(result["entries"]), 1)
+        self.assertEqual(result["entries"][0]["targetId"], FALLBACK["targetId"])
+        self.assertEqual(result["entries"][0]["hours"], 7.5)
+
+    def test_fallback_day_names_the_unknown_directories(self):
+        self.assertEqual(self.run_fill()["unmapped"], ["某个新目录"])
+        self.assertEqual(self.run_fill()["fallback"], FALLBACK["name"])
+
+    def test_without_a_fallback_the_day_is_left_empty(self):
+        cfg = base_cfg()
+        client = FakeClient(self.state, eligible_targets())
+        with patch.object(W, "calendar_events", return_value=[]), \
+                patch.object(W, "collect_day", return_value=self.ev):
+            result = W.fill_day(client, cfg, date(2026, 11, 4), dry_run=True)
+        self.assertEqual(result["status"], "skipped_no_content")
+        self.assertEqual(result["unmapped"], ["某个新目录"])
+
+    def test_merge_evidence_adds_up_the_directories(self):
+        other = {
+            "mapping": None, "git": [], "commits": 4,
+            "files": {"files": 2, "samples": [("09:00", "a.py")]},
+            "docs": [], "dirs": ["另一个目录"],
+        }
+        ev = dict(self.ev, 另一个目录=other)
+        merged = W.merge_evidence(ev, ["某个新目录", "另一个目录"], FALLBACK)
+        self.assertEqual(merged["commits"], 25)
+        self.assertEqual(merged["files"]["files"], 5)
+        self.assertEqual(merged["dirs"], ["某个新目录", "另一个目录"])
+        self.assertTrue(merged["fallback"])
+
+    def test_notification_says_where_the_hours_went(self):
+        result = dict(self.run_fill(), status="draft_saved")
+        subject, body = W.build_notification([result], base_cfg(
+            notify={"enabled": True, "from": "a@b.com", "to": ["a@b.com"]},
+            fallback_target=FALLBACK,
+        ))
+        self.assertIn("某个新目录", body)
+        self.assertIn(FALLBACK["name"], body)
+        self.assertIn("7.5", subject)
 
 
 class NotificationTests(unittest.TestCase):
