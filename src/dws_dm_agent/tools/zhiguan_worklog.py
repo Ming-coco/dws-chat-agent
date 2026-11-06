@@ -590,7 +590,11 @@ def collect_day(cfg: dict, day: datetime, eligible: list | None = None) -> dict:
         # 只有“当天有提交”的仓库才算当天工作；长期存在的 dirty 工作树不算
         git_bits = [g for g in git_bits if g["commits"]]
         files = file_activity(root, day, patterns, depth)
-        docs = [parse_worklog_doc(p) for p in find_worklog_docs(root, day)]
+        docs = [parse_worklog_doc(
+            p,
+            max_points=int(cfg.get("max_worklog_points", 3)),
+            max_point_len=int(cfg.get("max_worklog_point_len", 90)),
+        ) for p in find_worklog_docs(root, day)]
         docs = [d for d in docs if d]
         # 噪声过滤：只有零星文件改动、既没提交也没手写日志的目录不算“今天在做这个”
         if not git_bits and not docs and files["files"] < min_files:
@@ -677,7 +681,8 @@ def find_worklog_docs(root: Path, day: datetime, max_depth: int = 3):
     return hits
 
 
-def parse_worklog_doc(path: Path, max_len: int = 1200) -> dict:
+def parse_worklog_doc(path: Path, max_len: int = 1200, max_points: int = 3,
+                      max_point_len: int = 90) -> dict:
     """Pull the useful summary lines out of a hand-written daily log."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -710,6 +715,8 @@ def parse_worklog_doc(path: Path, max_len: int = 1200) -> dict:
         s = ln.strip()
         if s.startswith("## "):
             title = s.lstrip("# ").strip()
+            if re.match(r"^([一二三四五六七八九十]+、\s*)?(工时内容|智管内容|填写内容)$", title):
+                continue
             if re.match(r"^[一二三四五六七八九十]+、\s*(当日总览|今日目标|今日工作|今日产出|遗留|当日结果|结论|总结)", title):
                 continue
             title = re.sub(r"^[一二三四五六七八九十]+、\s*", "", title)
@@ -731,21 +738,43 @@ def parse_worklog_doc(path: Path, max_len: int = 1200) -> dict:
         body = re.split(r"[。；;]", body)[0].strip()
         if len(body) < 12:
             continue
-        if len(body) > 90:
-            body = body[:90].rstrip("，,、 ") + "…"
+        if len(body) > max_point_len:
+            body = body[:max_point_len].rstrip("，,、 ") + "…"
         points.append("%s：%s" % (label, body))
-        if len(points) >= 3:
+        if len(points) >= max_points:
             break
 
+    # 手写的「工时内容」段落原样使用，不再走自动摘要
+    hand_written = []
+    collecting = False
+    for ln in lines:
+        s = ln.strip()
+        if re.match(r"^#{2,4}\s*([一二三四五六七八九十]+、\s*)?(工时内容|智管内容|填写内容)\s*$", s):
+            collecting = True
+            continue
+        if collecting:
+            if re.match(r"^#{1,4}\s", s):
+                break
+            if s:
+                hand_written.append(s)
+    content = "\n".join(hand_written).strip()
+
     return {"path": str(path), "topic": topic or project, "mainline": mainline,
-            "headlines": headlines[:6], "points": points,
-            "chars": len(text)}
+            "headlines": headlines[:8], "points": points,
+            "content": content, "chars": len(text)}
 
 
 def summarize(mapping_name: str, ev: dict, cfg: dict) -> str:
     limit = int(cfg.get("max_commit_subjects", 6))
+    max_heads = int(cfg.get("max_worklog_headlines", 5))
+    max_points = int(cfg.get("max_worklog_points", 3))
     parts = []
     for doc in ev.get("docs") or []:
+        hand = (doc.get("content") or "").strip()
+        if hand:
+            text = "【%s】%s" % (mapping_name, hand.replace("**", ""))
+            max_len = int(cfg.get("max_content_len", 1800))
+            return re.sub(r"\s*\n\s*", "", text)[:max_len]
         topic = (doc.get("topic") or "").strip()
         mainline = (doc.get("mainline") or "").strip()
         heads = [h for h in (doc.get("headlines") or []) if h and not h.startswith("遗留")]
@@ -755,9 +784,9 @@ def summarize(mapping_name: str, ev: dict, cfg: dict) -> str:
         if mainline:
             parts.append("当日主线：%s。" % re.sub(r"\s+", " ", mainline)[:220])
         if heads:
-            parts.append("推进内容：%s。" % "；".join(heads[:5]))
+            parts.append("推进内容：%s。" % "；".join(heads[:max_heads]))
         if points:
-            parts.append("要点：%s。" % "；".join(points[:3]))
+            parts.append("要点：%s。" % "；".join(points[:max_points]))
         if parts:
             text = " ".join(parts).replace("**", "")
             max_len = int(cfg.get("max_content_len", 1800))
@@ -1279,8 +1308,30 @@ def send_mail(cfg: dict, subject: str, body: str):
     return sent
 
 
+def was_notified(state_dir: Path, fingerprint: str) -> bool:
+    """这个指纹的邮件是不是已经发过了。扫全量日志，避免中间夹了别的日期就漏判。"""
+    path = Path(state_dir) / LOG_NAME
+    if not path.exists():
+        return False
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if row.get("status") == "notified" and row.get("fingerprint") == fingerprint:
+            return True
+    return False
+
+
 def last_notified_fingerprint(state_dir: Path):
-    """上一次真正发出去的邮件指纹，用来避免同内容重复发信。"""
+    """最近一次真正发出去的邮件指纹。"""
     path = Path(state_dir) / LOG_NAME
     if not path.exists():
         return None
@@ -1307,10 +1358,10 @@ def notify_mail(state_dir: Path, cfg: dict, results: list):
         log("[notify] 本次没有需要通知的内容")
         return None
     subject, body = built
-    # 同一天重跑（比如 --force 重算但内容没变）不该再发一封一模一样的邮件
+    # 同一份内容只发一次：手动验证跑一次、定时任务再跑一次，不该收到两封一模一样的邮件
     fingerprint = hashlib.sha1((subject + "\n" + body).encode("utf-8")).hexdigest()
-    if last_notified_fingerprint(state_dir) == fingerprint:
-        log("[notify] 与上次发出的内容完全一致，不重复发信")
+    if was_notified(state_dir, fingerprint):
+        log("[notify] 这份内容已经发过，不重复发信")
         return None
     sent = send_mail(cfg, subject, body)
     if not sent:
