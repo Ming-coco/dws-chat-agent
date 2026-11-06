@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -1278,12 +1279,39 @@ def send_mail(cfg: dict, subject: str, body: str):
     return sent
 
 
+def last_notified_fingerprint(state_dir: Path):
+    """上一次真正发出去的邮件指纹，用来避免同内容重复发信。"""
+    path = Path(state_dir) / LOG_NAME
+    if not path.exists():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if row.get("status") == "notified":
+            return row.get("fingerprint")
+    return None
+
+
 def notify_mail(state_dir: Path, cfg: dict, results: list):
     built = build_notification(results, cfg)
     if built is None:
         log("[notify] 本次没有需要通知的内容")
         return None
     subject, body = built
+    # 同一天重跑（比如 --force 重算但内容没变）不该再发一封一模一样的邮件
+    fingerprint = hashlib.sha1((subject + "\n" + body).encode("utf-8")).hexdigest()
+    if last_notified_fingerprint(state_dir) == fingerprint:
+        log("[notify] 与上次发出的内容完全一致，不重复发信")
+        return None
     sent = send_mail(cfg, subject, body)
     if not sent:
         return None
@@ -1295,6 +1323,7 @@ def notify_mail(state_dir: Path, cfg: dict, results: list):
         "subject": subject,
         "to": _as_list((cfg.get("notify") or {}).get("to")),
         "internetMessageId": sent.get("internetMessageId"),
+        "fingerprint": fingerprint,
     })
     return sent
 
