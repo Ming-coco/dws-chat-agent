@@ -768,6 +768,9 @@ def trim_content(text: str, cfg: dict) -> str:
     """按时长上限截断，并且一定在句末断开，不留半截句子。"""
     text = re.sub(r"\s+", " ", text).strip()
     limit = int(cfg.get("max_content_len", 1800))
+    soft = int(cfg.get("soft_content_len", 0) or 0)
+    if soft and len(text) > soft:
+        log("[content] 正文 %d 字，超过精简建议值 %d 字，能压就再压一点" % (len(text), soft))
     if len(text) <= limit:
         return text
     head = text[:limit]
