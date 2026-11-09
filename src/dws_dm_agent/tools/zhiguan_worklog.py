@@ -764,6 +764,19 @@ def parse_worklog_doc(path: Path, max_len: int = 1200, max_points: int = 3,
             "content": content, "chars": len(text)}
 
 
+def trim_content(text: str, cfg: dict) -> str:
+    """按时长上限截断，并且一定在句末断开，不留半截句子。"""
+    text = re.sub(r"\s+", " ", text).strip()
+    limit = int(cfg.get("max_content_len", 1800))
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    cut = max(head.rfind(mark) for mark in "。；;")
+    if cut >= limit // 3:
+        return head[: cut + 1]
+    return head.rstrip("，,、；;:： ") + "。"
+
+
 def summarize(mapping_name: str, ev: dict, cfg: dict) -> str:
     limit = int(cfg.get("max_commit_subjects", 6))
     max_heads = int(cfg.get("max_worklog_headlines", 5))
@@ -774,7 +787,7 @@ def summarize(mapping_name: str, ev: dict, cfg: dict) -> str:
         if hand:
             text = "【%s】%s" % (mapping_name, hand.replace("**", ""))
             max_len = int(cfg.get("max_content_len", 1800))
-            return re.sub(r"\s*\n\s*", "", text)[:max_len]
+            return trim_content(re.sub(r"\s*\n\s*", "", text), cfg)
         topic = (doc.get("topic") or "").strip()
         mainline = (doc.get("mainline") or "").strip()
         heads = [h for h in (doc.get("headlines") or []) if h and not h.startswith("遗留")]
@@ -1287,12 +1300,25 @@ def build_notification(results: list, cfg: dict):
     return subject, _normalize_body(body)
 
 
+def unique_addresses(*groups):
+    """收件人去重，保持顺序；同一个地址不会既在 to 又在 cc。"""
+    seen, out = set(), []
+    for group in groups:
+        for addr in group:
+            key = str(addr or "").strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(key)
+    return out
+
+
 def send_mail(cfg: dict, subject: str, body: str):
     """用钉钉邮箱把摘要发给用户自己。"""
     note = cfg.get("notify") or {}
     sender = (note.get("from") or "").strip()
-    to = _as_list(note.get("to"))
-    cc = _as_list(note.get("cc"))
+    to = unique_addresses(_as_list(note.get("to")))
+    cc = [a for a in unique_addresses(_as_list(note.get("cc"))) if a not in set(to)]
     if not sender or not to:
         log("[notify] 未配置 notify.from / notify.to，跳过发信")
         return None

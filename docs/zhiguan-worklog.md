@@ -24,11 +24,12 @@
   "channel": "mail",
   "from": "Ming-coco@users.noreply.github.com",
   "to": ["Ming-coco@users.noreply.github.com"],
-  "cc": ["785_iz8l9f5sn@dingtalk.com"],
+  "cc": [],
   "mode": "always"
 }
 ```
 
+- **`cc` 留空**。收件人写一个邮箱就够了：`to` 和 `cc` 都填自己的邮箱时，每封邮件会投递两份，钉钉里就是两张一模一样的卡片。代码里也做了兜底，`cc` 中与 `to` 重复的地址会被丢掉。
 - `mode: always` 每天都发（包括「请假跳过」「当天没有工作痕迹」）；`mode: draft_only` 只在真的生成了草稿时发。
 - 正文按 markdown 渲染，**单个换行会被并成空格**，所以要靠空行分段——邮件里的空行不是笔误。
 - 发信失败不会影响草稿写入，只在 `cron.log` 里记一条 `[notify] 发信失败`。
@@ -41,7 +42,27 @@
 python -m dws_dm_agent.tools.zhiguan_worklog fill --notify-test
 ```
 
-注意：Windows 上 `dws.cmd` 会把带换行的参数截断（正文只剩第一行），所以程序优先用 `node <...>/dingtalk-workspace-cli/bin/dws.js` 直调，只在找不到 node 时才退回 `cmd /c dws.cmd`。
+同上。注意：Windows 上 `dws.cmd` 会把带换行的参数截断（正文只剩第一行），所以程序优先用 `node <...>/dingtalk-workspace-cli/bin/dws.js` 直调，只在找不到 node 时才退回 `cmd /c dws.cmd`。
+
+## 工时内容怎么写
+
+智管的工时内容要**精简**，一条问题一句话，不要把定位过程、日志原文、命令输出都贴进去。参考长度：
+
+- 单个项目：**400~600 字**
+- 多项目：每个项目 200~300 字
+
+推荐结构（就三句）：
+
+```
+一句话说今天做了什么。
+当日主线：一句话说为什么做、结论是什么。
+① 问题一：现象 → 根因 → 怎么修（带 MR / commit）。
+② 问题二：……
+```
+
+写长了会用 `max_content_len`（默认 1800）截断，而且改成在句号处断开，不会留半截句子。但截断只是兜底，别指望它——**该精简就精简**。
+
+`## 工时内容` 里写什么就提交什么，所以这一节直接决定最终文字；上面那些定位细节留在日志正文里给自己看即可。
 
 ## 工作日判断
 

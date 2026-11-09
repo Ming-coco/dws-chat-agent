@@ -458,6 +458,16 @@ class ParseWorklogDocTests(unittest.TestCase):
         self.assertIn("主题甲", text)
         self.assertIn("主线乙", text)
 
+    def test_trim_content_cuts_at_a_sentence_end(self):
+        text = "第一句。" * 20 + "最后半句不该留"
+        trimmed = W.trim_content(text, base_cfg(max_content_len=30))
+        self.assertLessEqual(len(trimmed), 30)
+        self.assertTrue(trimmed.endswith("。"))
+        self.assertNotIn("最后半句", trimmed)
+
+    def test_trim_content_leaves_short_text_alone(self):
+        self.assertEqual(W.trim_content("短内容。", base_cfg()), "短内容。")
+
 
 class DiscoveryTests(unittest.TestCase):
     def setUp(self):
@@ -676,6 +686,26 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(args[args.index("--to") + 1], "a@b.com")
         self.assertEqual(args[args.index("--cc") + 1], "c@d.com")
         self.assertEqual(args[args.index("--content") + 1], "正文")
+
+    def test_cc_that_repeats_a_recipient_is_dropped(self):
+        """同一个人两个邮箱各投一份，钉钉里就会出现两张一模一样的卡片。"""
+        cfg = self.cfg(cc=["A@B.com"])
+        with patch.object(W, "_run_dws", return_value={"success": "true"}) as run:
+            W.send_mail(cfg, "s", "b")
+        self.assertNotIn("--cc", run.call_args[0][0])
+
+    def test_duplicate_addresses_inside_one_list_are_collapsed(self):
+        self.assertEqual(W.unique_addresses(["a@b.com", "A@b.com ", ""]), ["a@b.com"])
+
+    def test_cc_only_carries_addresses_not_already_in_to(self):
+        self.assertEqual(
+            W.unique_addresses(["a@b.com"]),
+            ["a@b.com"],
+        )
+        cfg = self.cfg(cc=["a@b.com", "c@d.com"])
+        with patch.object(W, "_run_dws", return_value={"success": "true"}) as run:
+            W.send_mail(cfg, "s", "b")
+        self.assertEqual(run.call_args[0][0][run.call_args[0][0].index("--cc") + 1], "c@d.com")
 
     def test_dws_command_prefers_node_when_js_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
