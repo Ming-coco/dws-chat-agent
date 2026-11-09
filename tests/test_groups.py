@@ -24,7 +24,7 @@ from dws_dm_agent.service import (
 TZ = ZoneInfo("Asia/Shanghai")
 SELF_OPEN_ID = "open-self"
 # 群里 @ 用的是显示名；config 会把「部门-姓名」拆出各段，这里照同样的形状给。
-SELF_NAMES = ("本人-张三", "张三", "张三")
+SELF_NAMES = ("本人-张三", "张三")
 
 
 def group_contact(
