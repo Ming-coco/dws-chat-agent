@@ -44,6 +44,16 @@ class Contact:
     conversation_id: str = ""
     # 群里只响应这些人的 @（openDingTalkId 或显示名）；空表示群内任何人。
     allowed_senders: tuple[str, ...] = ()
+    # 控制台模式：这个群是使用者自己的对话入口，由服务轮询群历史，把本人
+    # 手打的消息当成提问（不需要 @，也不受「人工接管」冷却影响）。
+    console: bool = False
+    # 本人 @ 本人也回复：普通群里同样靠轮询群历史实现（本人发的消息不会回到
+    # 自己的事件流），但只认点名到自己的那些，避免把本人对同事说的话当成指令。
+    self_mention: bool = False
+    # 是否自动回复（设置页的开关，按人/按群分别设置）。关掉之后消息照样被
+    # 接收并落账（事件表记 reply_disabled），但不再调用 agent、也不发任何消息。
+    # 缺省开启，老配置不用改。
+    reply_enabled: bool = True
 
     @property
     def is_group(self) -> bool:
@@ -95,6 +105,9 @@ class HistoryMessage:
     sender_open_dingtalk_id: str
     content: str
     created_at: datetime
+    # 钉钉会给 agent 发的消息打 AI 标记（DWS 发送时是 "DWS"）。控制台里靠它
+    # 区分「我自己打的字」和「agent 自己发的回复」，避免自言自语触发循环。
+    ai_sent: bool = False
 
 
 @dataclass(frozen=True)
@@ -440,6 +453,10 @@ class AuditStore:
             );
             CREATE INDEX IF NOT EXISTS manual_conversation_time
                 ON manual_messages(conversation_id, sent_at);
+            CREATE TABLE IF NOT EXISTS console_cursors (
+                conversation_id TEXT PRIMARY KEY,
+                last_seen_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS runs (
                 session_id TEXT PRIMARY KEY,
                 conversation_id TEXT NOT NULL,
@@ -963,6 +980,29 @@ class AuditStore:
             return datetime.fromisoformat(row["sent_at"])
         except ValueError:
             return None
+
+    def console_cursor(self, conversation_id: str) -> datetime | None:
+        """控制台模式读过群历史的最晚时间，避免重复把旧消息当成新指令。"""
+        row = self.connection.execute(
+            "SELECT last_seen_at FROM console_cursors WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if not row or not row["last_seen_at"]:
+            return None
+        try:
+            return datetime.fromisoformat(row["last_seen_at"])
+        except ValueError:
+            return None
+
+    def set_console_cursor(self, conversation_id: str, seen_at: datetime) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO console_cursors(conversation_id, last_seen_at) VALUES (?, ?)
+            ON CONFLICT(conversation_id) DO UPDATE SET last_seen_at = excluded.last_seen_at
+            """,
+            (conversation_id, seen_at.isoformat()),
+        )
+        self.connection.commit()
 
     def record_run(
         self,

@@ -246,6 +246,8 @@ The `user_im_message_receive_at` event has no `isAtAll` field and does not tell 
 
 Two switches control this: `"require_direct_mention": true` demands the body name you, and `"ignore_at_all": true` additionally drops broadcasts. Both default to true; turn them off only to debug why a group message did not get an answer.
 
+Either a person or an entire group can also be muted without deleting it. Every contact and group carries `reply_enabled` (default `true`), edited from the settings page: set it to `false` and the service still receives those messages, audits them and advances past them — the event is stored as `skipped` with reason `reply_disabled` — but it never calls an agent and never sends anything, so switching it back on does not replay the backlog. The flag covers both intake paths, the `@` event stream and the console/self-mention poller, and it takes effect as soon as the settings page saves: the running service rebuilds its disabled set from the saved config, so no restart is needed. A reply that was already being generated when you flipped the switch is still delivered.
+
 
 When configured, the front profile must set `read_only: true`. It may use the tools available to its provider for bounded read-only investigation, then answer directly; any write or external side effect must escalate. The worker has normal coding-agent permissions and judges authorization from the original conversation plus repository rules; escalation itself never grants write permission.
 

@@ -221,6 +221,10 @@ def groups_from_raw(items: Any) -> tuple[Contact, ...]:
                 projects=_contact_projects(item),
                 conversation_id=conversation_id,
                 allowed_senders=_text_list(item.get("allowed_senders")),
+                console=bool(item.get("console", False)),
+                self_mention=bool(item.get("self_mention", False)),
+                # 设置页的「是否自动回复」开关；缺省开启，老配置无需修改。
+                reply_enabled=bool(item.get("reply_enabled", True)),
             )
         )
     return tuple(groups)
@@ -246,6 +250,7 @@ def contacts_from_raw(items: Any) -> tuple[Contact, ...]:
                     user_id=str(item.get("user_id") or ""),
                     open_dingtalk_id=str(item["open_dingtalk_id"]),
                     projects=_contact_projects(item),
+                    reply_enabled=bool(item.get("reply_enabled", True)),
                 )
             )
         except KeyError:

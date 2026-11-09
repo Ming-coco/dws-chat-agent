@@ -13,6 +13,9 @@ STAGE_PROMPT_VARIABLES = frozenset(
         # conversation_kind 区分单聊与群聊；group_reminder 只在群聊时非空，
         # 承载「回复全群可见」这类只在群里成立的约束，单聊时渲染成空行。
         "conversation_kind", "group_reminder",
+        # console_reminder 只在「控制台群」非空：那种群里提问的人就是本人，
+        # 回复不需要对外客套，也不该自称是替谁办事。
+        "console_reminder",
         "session_id", "prior_attempt",
         # project_root 是 agent 的 cwd（沙盒内主项目）；projects_json 只含
         # 该联系人自己负责的项目。刻意不暴露 workspace_root / worktree_root：

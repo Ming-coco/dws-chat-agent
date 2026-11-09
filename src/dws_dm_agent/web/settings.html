@@ -235,6 +235,12 @@
     .contact-row, .search-result { display: grid; grid-template-columns: minmax(150px, .7fr) minmax(190px, 1fr) auto; align-items: end; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); }
     .contact-row { padding: 8px 10px; }
     .contact-row .field { grid-template-columns: 72px minmax(0, 1fr); align-items: center; }
+    /* 「是否启用回复」开关占满一整行：放在名称字段之后、项目之前。 */
+    .contact-row .check-field { grid-column: 1 / -1; min-height: 0; }
+    /* 关掉自动回复的目标：列表上直接标出来，避免静音之后忘记开回来。 */
+    .reply-off-badge { display: inline-block; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--attention); color: var(--attention); font-size: 10px; letter-spacing: .05em; white-space: nowrap; }
+    .reply-off-badge[hidden] { display: none; }
+    .contact-row > .reply-off-badge { grid-column: 1 / -1; justify-self: start; margin: -2px 0 0; }
     .project-field { grid-column: 1 / -1; display: grid; grid-template-columns: 72px minmax(0, 1fr); align-items: start; }
     .project-field > span { color: var(--muted); font-size: 11px; letter-spacing: .03em; padding-top: 7px; }
     .project-picker { position: relative; display: grid; gap: 6px; }
@@ -1234,10 +1240,19 @@
           renderConfig();
           dirtyConfig();
         });
+        // 角标常驻 DOM、只切显隐：切开关时不必整块重绘，不会打断旁边正在输入的字段。
+        const mutedBadge = node("span", "reply-off-badge", "已静音 · 只记录不回复");
+        mutedBadge.hidden = contact.reply_enabled !== false;
         row.append(
           field("显示名称", textControl(contact.display_name, value => { contact.display_name = value; })),
           field("别名", textControl(contact.alias, value => { contact.alias = value; })),
           remove,
+          mutedBadge,
+          // 单聊的开/关：关掉之后消息照收照记账，但不调 agent、不发消息。
+          checkboxControl(contact.reply_enabled !== false, "启用自动回复（关闭后只记录不回复）", value => {
+            contact.reply_enabled = value;
+            mutedBadge.hidden = value;
+          }),
           // 只标脏、不重绘：项目芯片由 projectPicker 自己维护，
           // 重绘整块会把正在操作的菜单连同输入框一起销毁。
           projectPicker(contact, () => { dirtyConfig(); })
@@ -1289,7 +1304,8 @@
                 display_name: candidate.name || candidate.nick || candidate.flowerName,
                 user_id: candidate.userId,
                 open_dingtalk_id: candidate.openDingTalkId,
-                projects: []
+                projects: [],
+                reply_enabled: true
               });
               renderConfig();
               dirtyConfig();
@@ -1365,7 +1381,7 @@
           node("strong", "", group.display_name || group.alias || "未命名群"),
           node("span", "", `群 ID：${group.open_conversation_id || "-"} · 别名：${group.alias || "-"}`)
         );
-
+        const muted = group.reply_enabled === false;
         const senders = textControl(
           (group.allowed_senders || []).join(", "),
           value => {
@@ -1374,11 +1390,20 @@
         );
         senders.placeholder = "留空＝群内任何人 @ 都回；填了就只认这些人";
 
+        // 角标常驻 DOM、只切显隐：切开关时不必整块重绘。
+        const mutedBadge = node("span", "reply-off-badge", "已静音 · 只记录不回复");
+        mutedBadge.hidden = !muted;
         row.append(
           meta,
           field("显示名称", textControl(group.display_name, value => { group.display_name = value; })),
           field("别名", textControl(group.alias, value => { group.alias = value; })),
           field("允许触发的人", senders, true),
+          mutedBadge,
+          // 群的开/关：与单聊同一个语义，关掉之后整群静默。
+          checkboxControl(group.reply_enabled !== false, "启用自动回复（关闭后只记录不回复）", value => {
+            group.reply_enabled = value;
+            mutedBadge.hidden = value;
+          }),
           projectPicker(group, () => { dirtyConfig(); }),
           remove
         );
@@ -1433,7 +1458,8 @@
               display_name: candidate.title,
               open_conversation_id: candidate.openConversationId,
               projects: [],
-              allowed_senders: []
+              allowed_senders: [],
+              reply_enabled: true
             });
             renderConfig();
             dirtyConfig();
