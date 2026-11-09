@@ -190,6 +190,32 @@ Before updating, inspect the current service status, active/queued work, Git sta
 
 Codex response-stream errors with `willRetry: true` are non-terminal notifications. Do not add an outer retry loop or fail the message immediately; the adapter waits for the final `turn/completed` status. A non-completed turn or a terminated process remains a real failure.
 
+## Deployment-local values
+
+Real names, DingTalk IDs, customer and group names belong to the deployment, not to the repository. They live in files that are gitignored, so the tracked tree stays publishable:
+
+| Value | Where it lives | Tracked |
+| --- | --- | --- |
+| own display name and openDingTalkId | `.env` (`DWS_CHAT_AGENT_SELF_NAME`, `DWS_CHAT_AGENT_SELF_OPEN_ID`) | no |
+| workspace / worktree / sandbox roots | `.env` | no |
+| Jira and GitLab tokens and base URLs | `.env` | no |
+| registered contacts and groups, with their real IDs | `config.json` | no |
+| dashboard host and port | `config.json` (`dashboard.host`, `dashboard.port`) | no |
+| worklog mapping (directories to customer projects) | `zhiguan_state/config.json` | no |
+| runtime audit data, cursors, caches | `state/` | no |
+
+Only `config.example.json` and `.env.example` are tracked; both carry placeholders and environment references rather than real values. To adapt the service to another person or organization, copy the two example files and fill them in — no source change is needed.
+
+`dashboard.port` exists because the port used to be hardcoded to `8765`. A machine where that port is already taken can now move the dashboard without editing code:
+
+```json
+"dashboard": { "host": "127.0.0.1", "port": 3010 }
+```
+
+The default stays `127.0.0.1:8765`. Keep `host` at a loopback address unless you have deliberately put an authenticating proxy in front; the dashboard has no authentication of its own.
+
+When committing, treat these files as the review boundary: anything in the table above must not appear in a diff. If a tracked file needs an example, use an obvious placeholder (`张三`, `客户 A`, `cid-example`) so that no real identifier can leak through documentation or test fixtures.
+
 ## Completion report
 
 Report in plain language:

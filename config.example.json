@@ -7,7 +7,31 @@
     "open_dingtalk_id": "${DWS_CHAT_AGENT_SELF_OPEN_ID}"
   },
   "contacts": "${DWS_CHAT_AGENT_CONTACTS_JSON}",
-  "groups": [],
+  "groups": [
+    {
+      "alias": "控制台",
+      "display_name": "我的控制台",
+      "open_conversation_id": "${DWS_CHAT_AGENT_CONSOLE_GROUP_ID}",
+      "console": true,
+      "self_mention": false,
+      "reply_enabled": true,
+      "projects": []
+    },
+    {
+      "alias": "示例工作群",
+      "display_name": "示例工作群",
+      "open_conversation_id": "${DWS_CHAT_AGENT_WORK_GROUP_ID}",
+      "console": false,
+      "self_mention": true,
+      "reply_enabled": true,
+      "allowed_senders": [],
+      "projects": ["示例项目"]
+    }
+  ],
+  "dashboard": {
+    "host": "127.0.0.1",
+    "port": 8765
+  },
   "ignore_at_all": true,
   "require_direct_mention": true,
   "quiet_window_seconds": 5,

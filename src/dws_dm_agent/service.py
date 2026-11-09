@@ -477,6 +477,8 @@ class AgentService:
             project_lister=self._list_projects,
             sandbox_status=self._sandbox_status,
             sandbox_refresh=self._refresh_sandboxes,
+            host=getattr(settings, "dashboard_host", "127.0.0.1"),
+            port=getattr(settings, "dashboard_port", 8765),
         )
 
     def _list_projects(self) -> list[str]:
@@ -605,6 +607,24 @@ class AgentService:
             self.runtime_heartbeat,
             return_exceptions=True,
         )
+        self._sweep_listener_processes()
+        LOG.info("listeners stopped")
+
+    def _sweep_listener_processes(self) -> None:
+        """兜底：把还没退出的监听子进程整棵树结束掉。
+
+        监听协程在 finally 里已经会结束自己的子进程，但任务若是被直接
+        cancel 而 finally 没能执行到底，进程就会残留。这里在 gather 之后
+        再统一扫一遍，保证退出时不留下 dws 孤儿。
+        """
+        leftovers = [
+            process for process in self.listener_processes if process.returncode is None
+        ]
+        if leftovers:
+            LOG.warning("killing leftover listener processes count=%d", len(leftovers))
+        for process in leftovers:
+            _kill_process_tree(process.pid)
+        self.listener_processes.clear()
 
     def request_stop(self) -> None:
         self.stop_event.set()
@@ -1274,15 +1294,16 @@ class AgentService:
             finally:
                 if stderr_task:
                     stderr_task.cancel()
-                    await asyncio.gather(stderr_task, return_exceptions=True)
                 if process is not None:
                     self.listener_processes.discard(process)
                     if process.returncode is None:
-                        process.terminate()
-                    try:
-                        await asyncio.wait_for(process.communicate(), timeout=10)
-                    except TimeoutError:
-                        LOG.error("listener did not stop after SIGTERM contact=%s", contact.alias)
+                        # 这里不能用 await：协程此时已被 cancel，任何 await 都会
+                        # 立刻再抛 CancelledError，收尾被跳过，dws 拉起的孙进程
+                        # 就留成孤儿。改用同步的整树结束。
+                        _kill_process_tree(process.pid)
+                if stderr_task:
+                    with suppress(BaseException):
+                        await asyncio.gather(stderr_task, return_exceptions=True)
             if not self.stop_event.is_set():
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30)
@@ -1334,15 +1355,15 @@ class AgentService:
             finally:
                 if stderr_task:
                     stderr_task.cancel()
-                    await asyncio.gather(stderr_task, return_exceptions=True)
                 if process is not None:
                     self.listener_processes.discard(process)
                     if process.returncode is None:
-                        process.terminate()
-                    try:
-                        await asyncio.wait_for(process.communicate(), timeout=10)
-                    except TimeoutError:
-                        LOG.error("mention listener did not stop after SIGTERM")
+                        # 同上：被 cancel 的协程里不能 await，用同步整树结束，
+                        # 否则 dws 的子进程会留下来继续占着长连接。
+                        _kill_process_tree(process.pid)
+                if stderr_task:
+                    with suppress(BaseException):
+                        await asyncio.gather(stderr_task, return_exceptions=True)
             if not self.stop_event.is_set():
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30)
@@ -3255,9 +3276,39 @@ async def _doctor(settings: Settings) -> int:
     return 0 if all(item[1] for item in checks) else 1
 
 
+def _kill_process_tree(pid: int | None) -> None:
+    """同步结束 pid 及其整棵子进程树。
+
+    只能在不能 await 的地方（例如已被 cancel 的协程 finally 里）调用。
+    dws 自己会再拉起子进程，只结束父进程会把孙进程留成孤儿——实测留下过
+    ppid 已经不存在的 dws.exe。Windows 上用 taskkill /T 清整棵树。
+    """
+    if not pid:
+        return
+    if os.name == "nt":
+        with suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+        return
+    with suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+
+
 def _acquire_single_instance(state_dir: Path):
     state_dir.mkdir(parents=True, exist_ok=True)
     lock_path = state_dir / "agent.lock"
+    # 上一次异常退出会留下内容为旧 pid 的锁文件。真正的互斥靠下面的文件锁，
+    # 所以这里先把内容清空；不清的话下次启动看到残留 pid 容易误判成
+    # "另一个实例在跑"，而实际上那只是个没来得及删除的旧文件。
+    stale_pid = ""
+    if lock_path.exists():
+        with suppress(OSError):
+            stale_pid = lock_path.read_text(encoding="utf-8").strip()
     handle = lock_path.open("a+")
     try:
         if os.name == "nt":
@@ -3271,6 +3322,8 @@ def _acquire_single_instance(state_dir: Path):
     except (BlockingIOError, OSError):
         handle.close()
         raise RuntimeError("another dws-chat-agent instance is already running")
+    if stale_pid and stale_pid != str(os.getpid()):
+        LOG.warning("replacing stale lock file previous_pid=%s", stale_pid)
     handle.seek(0)
     handle.truncate()
     handle.write(str(os.getpid()))
@@ -3278,10 +3331,25 @@ def _acquire_single_instance(state_dir: Path):
     return handle
 
 
+def _release_single_instance(handle, lock_path: Path) -> None:
+    """关闭锁并把锁文件删掉。
+
+    只 close() 不够：文件本身会留在 state 目录里，里面还是死掉的 pid。
+    下次启动虽然能靠文件锁区分出来，但日志和 state 目录里会一直显示一个
+    并不存在的实例。主动删除，让 state 目录只反映真实运行状态。
+    """
+    with suppress(OSError):
+        handle.close()
+    with suppress(OSError):
+        lock_path.unlink(missing_ok=True)
+
+
+
 async def _run_service(
     settings: Settings, mode: str | None, *, open_dashboard: bool = False
 ) -> int:
     lock_handle = _acquire_single_instance(settings.state_dir)
+    lock_path = settings.state_dir / "agent.lock"
     service = AgentService(settings, mode, open_dashboard=open_dashboard)
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -3291,7 +3359,7 @@ async def _run_service(
         await service.run()
     finally:
         service.close()
-        lock_handle.close()
+        _release_single_instance(lock_handle, lock_path)
     return 0
 
 
