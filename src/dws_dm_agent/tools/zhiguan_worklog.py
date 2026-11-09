@@ -1378,12 +1378,45 @@ def last_notified_fingerprint(state_dir: Path):
     return None
 
 
-def notify_mail(state_dir: Path, cfg: dict, results: list):
+def notified_today(state_dir: Path, day: str):
+    """今天是不是已经为这个日期发过邮件了。"""
+    path = Path(state_dir) / LOG_NAME
+    if not path.exists():
+        return None
+    today = date.today().isoformat()
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if row.get("status") != "notified" or row.get("date") != day:
+            continue
+        stamp = str(row.get("at") or "")[:10]
+        if stamp == today:
+            return row
+    return None
+
+
+def notify_mail(state_dir: Path, cfg: dict, results: list, renotify: bool = False):
     built = build_notification(results, cfg)
     if built is None:
         log("[notify] 本次没有需要通知的内容")
         return None
     subject, body = built
+    day = (results[-1].get("date") if results else "") or ""
+    # 一天最多一封。重跑一次就多收一封，哪怕正文措辞有变化也不是用户想要的
+    if not renotify and day:
+        prior = notified_today(state_dir, day)
+        if prior:
+            log("[notify] %s 今天已经发过（%s），不再重复发信；确实要再发加 --renotify" % (day, prior.get("at")))
+            return None
     # 同一份内容只发一次：手动验证跑一次、定时任务再跑一次，不该收到两封一模一样的邮件
     fingerprint = hashlib.sha1((subject + "\n" + body).encode("utf-8")).hexdigest()
     if was_notified(state_dir, fingerprint):
@@ -1395,7 +1428,7 @@ def notify_mail(state_dir: Path, cfg: dict, results: list):
     log("[notify] 已发送：%s" % subject)
     append_log(state_dir, {
         "at": datetime.now().isoformat(timespec="seconds"),
-        "date": results[-1].get("date") if results else None,
+        "date": day or None,
         "status": "notified",
         "subject": subject,
         "to": _as_list((cfg.get("notify") or {}).get("to")),
@@ -1414,6 +1447,7 @@ def main(argv=None):
     ap.add_argument("--force", action="store_true", help="已有草稿时覆盖重算（有已提交记录时不覆盖）")
     ap.add_argument("--no-notify", action="store_true", help="本次不发邮件通知")
     ap.add_argument("--notify-test", action="store_true", help="只发一封测试邮件后退出")
+    ap.add_argument("--renotify", action="store_true", help="今天已发过邮件时强制再发一封")
     ap.add_argument("--state-dir", default=None)
     args = ap.parse_args(argv)
 
@@ -1486,7 +1520,7 @@ def main(argv=None):
     filled = [r for r in results if r.get("status") in ("draft_saved", "filled", "dry_run")]
     log("\n== 汇总：%d 天处理，%d 天生成草稿/预览" % (len(results), len(filled)))
     if not args.dry_run and not args.no_notify:
-        notify_mail(state_dir, cfg, results)
+        notify_mail(state_dir, cfg, results, renotify=args.renotify)
     return 0
 
 

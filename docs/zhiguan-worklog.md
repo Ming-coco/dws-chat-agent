@@ -35,6 +35,7 @@
 - 发信失败不会影响草稿写入，只在 `cron.log` 里记一条 `[notify] 发信失败`。
 - 正文里的长横线（`—` `–`）会被服务端拆成连续减号，代码里已统一换成 `-`。
 - 同一天重复跑但**内容没变**时不会重复发信：标题+正文的指纹记在 `fill-log.jsonl` 的 `fingerprint` 字段里，扫全量日志比对，一致就跳过；内容真变了（比如换了工时正文）才会再发一封。
+- **一天最多一封**：当天的通知今天已经发过，就不再发，哪怕正文因为多提交了几个文件而变了措辞。确实要再发一封时显式加 `--renotify`。
 
 验证发信链路（不会写草稿、不改 `fill-log.jsonl`）：
 
@@ -147,6 +148,9 @@ python -m dws_dm_agent.tools.zhiguan_worklog fill --notify-test
 
 # 照常填但这次不发信
 python -m dws_dm_agent.tools.zhiguan_worklog fill --no-notify
+
+# 今天已经发过邮件，确实要再发一封
+python -m dws_dm_agent.tools.zhiguan_worklog fill --force --renotify
 ```
 
 ## 计划任务

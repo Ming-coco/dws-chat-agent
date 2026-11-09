@@ -752,10 +752,10 @@ class NotificationDedupTests(unittest.TestCase):
             "reviewUrl": "https://zhiguan.example/drafts/abc",
         }
 
-    def send(self, results):
+    def send(self, results, renotify=False):
         reply = {"success": "true", "internetMessageId": "x"}
         with patch.object(W, "send_mail", return_value=reply) as fake:
-            W.notify_mail(self.state, self.cfg, results)
+            W.notify_mail(self.state, self.cfg, results, renotify=renotify)
         return fake
 
     def test_identical_rerun_sends_only_once(self):
@@ -764,11 +764,22 @@ class NotificationDedupTests(unittest.TestCase):
         self.assertEqual(fake.call_count, 1)
         self.assertEqual(again.call_count, 0)
 
-    def test_changed_content_is_sent_again(self):
+    def test_same_day_never_gets_a_second_mail_even_if_the_wording_changes(self):
+        """重跑一次正文措辞会变（文件数、提交数），但一天只该收一封。"""
         first = self.send([self.draft(7.5)])
         second = self.send([self.draft(8.0)])
         self.assertEqual(first.call_count, 1)
-        self.assertEqual(second.call_count, 1)
+        self.assertEqual(second.call_count, 0)
+
+    def test_renotify_forces_the_mail_out_again(self):
+        self.send([self.draft(7.5)])
+        again = self.send([self.draft(8.0)], renotify=True)
+        self.assertEqual(again.call_count, 1)
+
+    def test_a_different_day_still_gets_its_own_mail(self):
+        self.send([self.draft()])
+        other = dict(self.draft(), date="2026-11-05")
+        self.assertEqual(self.send([other]).call_count, 1)
 
     def test_fingerprint_is_recorded_in_the_log(self):
         self.send([self.draft()])
