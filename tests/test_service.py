@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dws_dm_agent.core import (
@@ -45,6 +46,10 @@ from dws_dm_agent.dashboard import AgentConfigStore, DashboardServer
 
 TZ = ZoneInfo("Asia/Shanghai")
 CONTACT = Contact("teammate", "Teammate", "u-1", "open-contact")
+# 「本人 @ 本人」测试用：群里 @ 用的是显示名，config 会把「部门-姓名」拆成各段。
+SELF_OPEN_ID = "open-self"
+SELF_NAMES = ("本人-张三", "张三", "张三")
+CONVERSATION_ID = "cid-self=="
 
 
 class SettingsTests(unittest.TestCase):
@@ -1151,13 +1156,19 @@ class PlainAgentFlowTests(unittest.TestCase):
                     )
                 )
 
-            self.assertEqual(card_id, "")
+            # 认领不到 message_id 不影响交付：卡片照样返回，投递仍走卡片，
+            # 不能返回空串让投递再发一条纯文本（那样同一段答复会出现两次）。
+            self.assertEqual(card_id, "card-biz")
             self.assertEqual(
                 store.connection.execute(
                     "SELECT COUNT(*) FROM outgoing"
                 ).fetchone()[0],
                 1,
             )
+            # 卡片内容不能被改写成失败提示，否则答复会被擦掉、群里留下残骸。
+            written = [call.args[1] for call in service.dws.update_card.await_args_list]
+            self.assertNotIn("卡片识别失败，请等待普通文本回复。", written)
+            self.assertIn("正在处理", written)
             failed_card = HistoryMessage(
                 "card-message",
                 "conversation-1",
@@ -3718,6 +3729,203 @@ class SteerContextRefreshTests(unittest.TestCase):
             self.assertTrue(lease["revoked_at"])
             self.assertEqual(lease["revoke_reason"], "run_finished")
             service.store.close()
+
+
+class SelfMentionPollTests(unittest.TestCase):
+    """「本人 @ 本人也回复」：普通群靠轮询历史，只认点名到自己的消息。"""
+
+    def _service(self, store, contact, history):
+        service = AgentService.__new__(AgentService)
+        service.mode = "live"
+        service.settings = SimpleNamespace(
+            timezone=TZ,
+            self_open_id=SELF_OPEN_ID,
+            self_names=SELF_NAMES,
+            groups=(contact,),
+        )
+        service.store = store
+        service.dws = SimpleNamespace(history=AsyncMock(return_value=history))
+        service._enqueue = Mock()
+        return service
+
+    def _message(self, content: str, *, message_id: str) -> HistoryMessage:
+        return HistoryMessage(
+            message_id,
+            CONVERSATION_ID,
+            "本人-张三",
+            SELF_OPEN_ID,
+            content,
+            datetime.now(TZ),
+        )
+
+    def _workdir(self) -> Path:
+        # 沙箱会拒绝 tempfile 的 chmod/删除清理，所以这里只用普通目录，不自动删。
+        base = Path(__file__).resolve().parent.parent / "build" / "test-tmp"
+        directory = base / f"selfmention-{uuid4().hex[:12]}"
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def _run(self, contact: Contact, history):
+        directory = self._workdir()
+        store = AuditStore(directory / "audit.sqlite3")
+        try:
+            # 先立游标，避开「首次启用从当前时刻起算」那条分支。
+            store.set_console_cursor(CONVERSATION_ID, datetime.now(TZ) - timedelta(hours=1))
+            service = self._service(store, contact, history)
+            asyncio.run(service._poll_console_group(contact))
+            return service._enqueue.call_count
+        finally:
+            store.close()
+
+    def test_self_mention_group_accepts_message_that_mentions_self(self) -> None:
+        contact = Contact(
+            alias="客户技术服务群",
+            display_name="客户技术服务群",
+            user_id="",
+            open_dingtalk_id="",
+            projects=("客户 A",),
+            conversation_id=CONVERSATION_ID,
+            self_mention=True,
+        )
+
+        accepted = self._run(
+            contact, [self._message("@张三 帮我看下这个报错", message_id="m-1")]
+        )
+
+        self.assertEqual(accepted, 1)
+
+    def test_self_mention_group_ignores_self_message_without_mention(self) -> None:
+        contact = Contact(
+            alias="客户技术服务群",
+            display_name="客户技术服务群",
+            user_id="",
+            open_dingtalk_id="",
+            projects=("客户 A",),
+            conversation_id=CONVERSATION_ID,
+            self_mention=True,
+        )
+
+        accepted = self._run(contact, [self._message("我部署到环境上了", message_id="m-2")])
+
+        self.assertEqual(accepted, 0)
+
+    def test_console_group_still_accepts_message_without_mention(self) -> None:
+        contact = Contact(
+            alias="管理内部控制台",
+            display_name="管理内部控制台",
+            user_id="",
+            open_dingtalk_id="",
+            projects=(),
+            conversation_id=CONVERSATION_ID,
+            console=True,
+        )
+
+        accepted = self._run(contact, [self._message("看一下昨天的日志", message_id="m-3")])
+
+        self.assertEqual(accepted, 1)
+
+    def test_self_mention_group_does_not_register_manual_takeover(self) -> None:
+        contact = Contact(
+            alias="客户技术服务群",
+            display_name="客户技术服务群",
+            user_id="",
+            open_dingtalk_id="",
+            projects=("客户 A",),
+            conversation_id=CONVERSATION_ID,
+            self_mention=True,
+        )
+        directory = self._workdir()
+        store = AuditStore(directory / "audit.sqlite3")
+        try:
+            service = self._service(store, contact, [])
+            message = self._message("@张三 查下漏推", message_id="m-4")
+            service._register_manual_messages([message])
+            # 本人 @ 自己是指令，不能被记成「人工接管」，否则会触发冷却不回复。
+            self.assertIsNone(store.latest_manual(CONVERSATION_ID))
+        finally:
+            store.close()
+
+
+class DeliveryCardRowTests(unittest.TestCase):
+    """投递路径的卡片必须复用投递行，不能一条回复落两行 outgoing。"""
+
+    def _workdir(self) -> Path:
+        # 沙箱会拒绝 tempfile 的 chmod/删除清理，所以这里只用普通目录，不自动删。
+        base = Path(__file__).resolve().parent.parent / "build" / "test-tmp"
+        directory = base / f"deliverycard-{uuid4().hex[:12]}"
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def _service(self, store, history_side_effect) -> AgentService:
+        service = AgentService.__new__(AgentService)
+        service.mode = "live"
+        service.settings = SimpleNamespace(timezone=TZ, self_open_id=SELF_OPEN_ID)
+        service.store = store
+        service.streaming_card_send_uuids = {}
+        service.dws = SimpleNamespace(
+            send_card=AsyncMock(return_value=("card-biz", None, {})),
+            update_card=AsyncMock(),
+            history=AsyncMock(side_effect=history_side_effect),
+        )
+        return service
+
+    def test_delivery_card_reuses_the_delivery_row(self) -> None:
+        directory = self._workdir()
+        store = AuditStore(directory / "audit.sqlite3")
+        try:
+            event = IncomingEvent(
+                event_id="evt-1",
+                message_id="in-1",
+                conversation_id=CONVERSATION_ID,
+                contact=Contact("alias", "Alias", CONVERSATION_ID, ""),
+                content="测试卡片",
+                created_at=datetime.now(TZ),
+                sender_open_dingtalk_id="peer-id",
+                sender_name="Peer",
+            )
+            delivery_uuid = "delivery-uuid"
+            store.enqueue_delivery(
+                delivery_uuid, event, "答复正文", "dm-session", event_ids=["in-1"]
+            )
+            claimed = HistoryMessage(
+                "card-message",
+                CONVERSATION_ID,
+                "本人-张三",
+                SELF_OPEN_ID,
+                "答复正文",
+                datetime.now(TZ),
+                ai_sent=True,
+            )
+            service = self._service(store, [[], *([[claimed]] * 4)])
+
+            with (
+                patch(
+                    "dws_dm_agent.service.asyncio.sleep", new_callable=AsyncMock
+                ),
+                patch(
+                    "dws_dm_agent.service.uuid.uuid4", return_value="cardtoken"
+                ),
+            ):
+                card_id = asyncio.run(
+                    service._start_delivery_card(
+                        event.contact,
+                        CONVERSATION_ID,
+                        "答复正文",
+                        "dm-session",
+                        delivery_uuid,
+                    )
+                )
+
+            rows = store.connection.execute(
+                "SELECT send_uuid, message_id FROM outgoing"
+            ).fetchall()
+
+            self.assertEqual(card_id, "card-biz")
+            self.assertEqual(len(rows), 1, "一条回复只应有一行 outgoing")
+            self.assertEqual(rows[0]["send_uuid"], delivery_uuid)
+            self.assertEqual(rows[0]["message_id"], "card-message")
+        finally:
+            store.close()
 
 
 if __name__ == "__main__":

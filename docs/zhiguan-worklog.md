@@ -22,8 +22,8 @@
 "notify": {
   "enabled": true,
   "channel": "mail",
-  "from": "Ming-coco@users.noreply.github.com",
-  "to": ["Ming-coco@users.noreply.github.com"],
+  "from": "someone@example.com",
+  "to": ["someone@example.com"],
   "cc": [],
   "mode": "always"
 }
@@ -103,7 +103,7 @@ python -m dws_dm_agent.tools.zhiguan_worklog fill --notify-test
 | --- | --- |
 | `D:\workspace\客户 B` | 某融资租赁风控预警系统升级（XXXX-0000000P） |
 | `D:\workspace\客户 A` | 某信创改造项目（XXXX-00000000-000） |
-| `D:\workspace\某平台ai-尽调项目` | 某租赁公司智能尽调（售前）（XXXX-00000000-000） |
+| `D:\workspace\尽调项目` | 某租赁公司智能尽调（售前）（XXXX-00000000-000） |
 | `D:\workspace\区域产业链通用`（及 `区域产业链sql更新`、`区域产业链交接信息`、`产业链数据加工`） | 某营销与风控数智化平台（CODE-0000-02，产品） |
 | `D:\workspace\标准部署版本` | 技术产品架构V2.0（CODE-0000-03，产品） |
 | `D:\workspace\dws-chat-agent` | 不单独记（工时并入当天主项目） |

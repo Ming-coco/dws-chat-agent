@@ -24,7 +24,7 @@ from dws_dm_agent.service import (
 TZ = ZoneInfo("Asia/Shanghai")
 SELF_OPEN_ID = "open-self"
 # 群里 @ 用的是显示名；config 会把「部门-姓名」拆出各段，这里照同样的形状给。
-SELF_NAMES = ("本人-张三", "张三", "张三")
+SELF_NAMES = ("本人-张三", "张三")
 
 
 def group_contact(
@@ -747,6 +747,21 @@ class GroupOrgFilterTests(unittest.TestCase):
         listing = service._list_dingtalk_groups()
         self.assertTrue(listing["groups"][0]["registered"])
 
+    def test_profile_current_profile_drops_user_suffix(self) -> None:
+        # dws profile list 把 currentProfile 给成 "corpId:userId"，而群的 corpId
+        # 只有 bare corpId。不剥掉后缀，org_matches 永远不相等，群列表会被整表
+        # 过滤成空（设置页因此一个群都搜不到）。
+        service = self._service([])
+        service._run_dws = lambda command, timeout=30: {
+            "currentProfile": "ding-current:user-1",
+            "profiles": [
+                {"corpId": "ding-current", "corpName": "当前组织"},
+            ],
+        }
+        org = service._read_profile_org()
+        self.assertEqual(org["corpId"], "ding-current")
+        self.assertEqual(org["corpName"], "当前组织")
+
 
 class OrgMatchTests(unittest.TestCase):
     def test_matching(self) -> None:
@@ -767,6 +782,137 @@ class OrgMatchTests(unittest.TestCase):
         self.assertEqual(_current_corp_id_from_profile(""), "")
         self.assertEqual(_current_corp_id_from_profile(None), "")
         self.assertEqual(_current_corp_id_from_profile("null"), "")
+
+
+class ReplySwitchConfigTests(unittest.TestCase):
+    """「是否启用回复」开关：缺省开启，关闭后配置能原样往返。"""
+
+    def test_group_switch_defaults_to_enabled(self) -> None:
+        (group,) = groups_from_raw(
+            [{"alias": "群", "open_conversation_id": "cid-a=="}]
+        )
+        self.assertTrue(group.reply_enabled)
+
+    def test_group_switch_is_parsed(self) -> None:
+        enabled, disabled = groups_from_raw(
+            [
+                {"alias": "a", "open_conversation_id": "cid-a==", "reply_enabled": True},
+                {"alias": "b", "open_conversation_id": "cid-b==", "reply_enabled": False},
+            ]
+        )
+        self.assertTrue(enabled.reply_enabled)
+        self.assertFalse(disabled.reply_enabled)
+
+    def test_merge_groups_keeps_the_switch(self) -> None:
+        merged = AgentConfigStore._merge_groups(
+            [
+                {"alias": "a", "open_conversation_id": "cid-a==", "reply_enabled": False},
+                # 设置页不认识这个字段的老记录不带它，必须落成True 而不是丢失。
+                {"alias": "b", "open_conversation_id": "cid-b=="},
+            ],
+            allow_empty=True,
+        )
+        self.assertFalse(merged[0]["reply_enabled"])
+        self.assertTrue(merged[1]["reply_enabled"])
+
+    def test_merge_contacts_keeps_the_switch(self) -> None:
+        merged = AgentConfigStore._merge_contacts(
+            [
+                {
+                    "alias": "teammate",
+                    "display_name": "同事",
+                    "user_id": "u-1",
+                    "open_dingtalk_id": "open-1",
+                    "reply_enabled": False,
+                }
+            ]
+        )
+        self.assertFalse(merged[0]["reply_enabled"])
+
+    def test_merge_contacts_defaults_to_enabled(self) -> None:
+        merged = AgentConfigStore._merge_contacts(
+            [
+                {
+                    "alias": "teammate",
+                    "display_name": "同事",
+                    "user_id": "u-1",
+                    "open_dingtalk_id": "open-1",
+                }
+            ]
+        )
+        self.assertTrue(merged[0]["reply_enabled"])
+
+
+class ReplySwitchRuntimeTests(unittest.TestCase):
+    """运行态的禁用集合：保存配置后不重启就生效。"""
+
+    def _service(self, contacts=(), groups=()):
+        from dws_dm_agent.service import AgentService
+
+        service = object.__new__(AgentService)
+        service.settings = type(
+            "S", (), {"contacts": tuple(contacts), "groups": tuple(groups), "raw": {}}
+        )()
+        return service
+
+    def test_disabled_identities_use_contact_identity_format(self) -> None:
+        from dws_dm_agent.service import _reply_disabled_identities
+
+        disabled = _reply_disabled_identities(
+            {
+                "contacts": [
+                    {"user_id": "u-1", "open_dingtalk_id": "open-1", "reply_enabled": False},
+                    {"user_id": "u-2", "open_dingtalk_id": "open-2", "reply_enabled": True},
+                ],
+                "groups": [
+                    {"open_conversation_id": "cid-a==", "reply_enabled": False},
+                    {"open_conversation_id": "cid-b=="},
+                ],
+            }
+        )
+        # 单聊用 userId（与 Contact.identity 一致），群加 group: 前缀。
+        self.assertEqual(disabled, {"u-1", "group:cid-a=="})
+
+    def test_switch_starts_from_loaded_contacts(self) -> None:
+        off = Contact(
+            alias="客户 B 群",
+            display_name="客户 B 对接群",
+            user_id="",
+            open_dingtalk_id="",
+            conversation_id="cid-off==",
+            reply_enabled=False,
+        )
+        service = self._service(groups=(off,))
+        service.reply_disabled = {
+            item.identity for item in service.settings.groups if not item.reply_enabled
+        }
+        self.assertFalse(service._reply_enabled(off))
+        self.assertTrue(service._reply_enabled(group_contact(conversation_id="cid-on==")))
+
+    def test_saving_config_flips_the_switch_without_restart(self) -> None:
+        group = group_contact(conversation_id="cid-a==")
+        service = self._service(groups=(group,))
+        service.reply_disabled = set()
+        self.assertTrue(service._reply_enabled(group))
+
+        service._sync_reply_switches(
+            {"groups": [{"open_conversation_id": "cid-a==", "reply_enabled": False}]}
+        )
+        self.assertFalse(service._reply_enabled(group))
+
+        # 重新打开同样立即生效。
+        service._sync_reply_switches(
+            {"groups": [{"open_conversation_id": "cid-a==", "reply_enabled": True}]}
+        )
+        self.assertTrue(service._reply_enabled(group))
+
+    def test_partial_config_does_not_reset_the_switch(self) -> None:
+        # 没有 contacts/groups 键的配置（例如只改 agents）不能把开关全部重置。
+        group = group_contact(conversation_id="cid-a==")
+        service = self._service(groups=(group,))
+        service.reply_disabled = {group.identity}
+        service._sync_reply_switches({"agents": {}})
+        self.assertFalse(service._reply_enabled(group))
 
 
 if __name__ == "__main__":

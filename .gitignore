@@ -237,3 +237,7 @@ _tools/
 # 本地临时脚本与临时目录
 .tmp/
 tmp*/
+
+# local agent scratch dirs
+.dsh-tmp-inspect/
+.dsh-session-repair-*/

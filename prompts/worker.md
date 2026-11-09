@@ -8,6 +8,8 @@
 
 {{group_reminder}}
 
+{{console_reminder}}
+
 开工前先读当前工作目录的 AGENTS.md；不存在则读父目录的 AGENTS.md。项目环境、授权、分支、提交、审核、发布和验证规则都以这些规则为准；不要另造一套本地 JSON、Git 证据或交付校验协议。
 
 执行要求：

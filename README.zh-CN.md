@@ -217,6 +217,8 @@ PYTHONPATH=src python3 -m dws_dm_agent.front_eval --concurrency 1
 
 跨组织联系人：钉钉对组织外的用户区别对待。拉取其会话历史需要临时数据授权（`dws chat data-auth cross-org --all --grant-type timed --ttl 24h`），授权约 24 小时后过期；过期期间历史同步失败、投递会被延迟，需要重新授权。跨组织用户的 userId 通常无法用于消息拉取（报 `peerUid is required`），可用时服务会回退到 `{{contact_open_dingtalk_id}}`。
 
+群聊与单聊都可以单独静音，不必删掉配置：每个联系人和群都有一个 `reply_enabled` 开关（缺省 `true`），在设置页勾选，也可以直接改 `config.json`。关掉后服务照常收取这些消息、照常落账并推进游标——事件记成 `skipped`，原因写 `reply_disabled`——但不再调用 Agent、不发任何消息，所以重新打开时不会把这段时间积压的消息整段补答。它同时约束两条入口：`@` 事件推送和 console/自点名轮询；设置页保存后立即生效，运行中的服务会按刚保存的配置重建禁用集合，不需要重启。已经在生成中的那一条回复仍会发完。
+
 配置前台时必须设置 `read_only: true`。它可以使用 Provider 提供的工具完成范围明确的只读调查并直接回复，任何写入或外部副作用都必须升级。执行 Agent 拥有正常编码权限，并依据原始会话和仓库规则判断授权；升级本身不会授予写权限。
 
 启用流式卡片后，服务会立即展示已接收状态。两个角色共用 Provider 无关的流式表面：Codex 映射 reasoning summary，Pi 映射原生 thinking，Claude 映射 thinking block，自定义适配器也可以输出 `thinking`。服务不会编造进度标签、固定进度间隔或心跳文本；模型没有原生 thinking 时也不会伪造进度。最终自然语言正文会先持久化到本地 outbox，临时失败后使用同一 send UUID 重试，并在最终新鲜度检查后替换思考卡片。

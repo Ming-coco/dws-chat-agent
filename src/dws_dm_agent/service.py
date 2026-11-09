@@ -89,6 +89,13 @@ _GROUP_REMINDER = (
     "群里的追问可能来自不同的人，以最新一条被 @ 的消息为准判断当前对象。"
 )
 
+_CONSOLE_REMINDER = (
+    "这是{{self_name}}本人的控制台群，不是对外接待：提问的人就是{{self_name}}自己，"
+    "他把这里当成命令行在用。直接给结果、结论和下一步，不要称呼、不要客套、"
+    "不要解释你是什么身份，也不要写「已收到」「我帮你」这类过渡句。"
+    "有多步动作时把做了什么、结果如何简短列出。"
+)
+
 
 def _event_consume_command(
     settings: Settings, contact: Contact, *, dry_run: bool = False
@@ -162,6 +169,60 @@ def _targets(settings: Settings) -> tuple[Contact, ...]:
     contacts = tuple(getattr(settings, "contacts", ()) or ())
     groups = tuple(getattr(settings, "groups", ()) or ())
     return (*contacts, *groups)
+
+
+def _reply_disabled_identities(raw: Mapping[str, Any]) -> set[str]:
+    """从配置里取出「关闭了自动回复」的目标身份。
+
+    身份口径与 Contact.identity 一致：群是 group:<openConversationId>，
+    单聊是 userId（没有就用 openDingTalkId）。设置页保存后用它重建禁用
+    集合，因此开关改完不必重启服务就生效。
+    """
+    disabled: set[str] = set()
+    contacts = raw.get("contacts")
+    if isinstance(contacts, Sequence) and not isinstance(contacts, (str, bytes)):
+        for item in contacts:
+            if not isinstance(item, Mapping) or item.get("reply_enabled", True):
+                continue
+            identity = str(
+                item.get("user_id") or item.get("open_dingtalk_id") or ""
+            ).strip()
+            if identity:
+                disabled.add(identity)
+    groups = raw.get("groups")
+    if isinstance(groups, Sequence) and not isinstance(groups, (str, bytes)):
+        for item in groups:
+            if not isinstance(item, Mapping) or item.get("reply_enabled", True):
+                continue
+            conversation_id = str(
+                item.get("open_conversation_id") or item.get("conversation_id") or ""
+            ).strip()
+            if conversation_id:
+                disabled.add(f"group:{conversation_id}")
+    return disabled
+
+
+def _pick_card_message(
+    candidates: Mapping[str, HistoryMessage], marked_content: str
+) -> HistoryMessage | None:
+    """从回查到的本人新消息里挑出刚发出的那张卡片。
+
+    钉钉回存卡片消息时 text 与我们写入的内容并不逐字一致（实测在认领窗口
+    内拿不到带「处理编号」的原文），所以精确比对只作首选；比对不上就退到
+    AI 发送标记：卡片和 agent 的回复都带 messageAiSendFlag=DWS，而本人手打
+    的消息没有这个标记，正好用来区分。只有唯一命中时才认领，避免把别处
+    同时发出的消息错绑到这张卡片上。
+    """
+    exact = [
+        message
+        for message in candidates.values()
+        if canonical_message_text(message.content)
+        == canonical_message_text(marked_content)
+    ]
+    if len(exact) == 1:
+        return exact[0]
+    marked = [message for message in candidates.values() if message.ai_sent]
+    return marked[0] if len(marked) == 1 else None
 
 
 def _event_conversation_id(line: str) -> str:
@@ -359,6 +420,14 @@ class AgentService:
         self._ignored_conversations: set[str] = set()
         self._ignored_at_all: dict[str, int] = {}
         self._ignored_without_mention: dict[str, int] = {}
+        # 「是否启用回复」开关：禁用身份的集合。用集合而不是直接读 Contact
+        # 上的字段，是因为 Contact 在启动时就固定了，改配置不重建对象；
+        # 保存配置时 _sync_reply_switches 会刷新它，开关立刻生效。
+        self.reply_disabled: set[str] = {
+            item.identity
+            for item in _targets(settings)
+            if not getattr(item, "reply_enabled", True)
+        }
         self.stop_event = asyncio.Event()
         self.capacity = int(settings.raw.get("max_parallel_conversations", 2))
         self.global_slots = asyncio.Semaphore(self.capacity)
@@ -387,6 +456,7 @@ class AgentService:
                         "user_id": item.user_id,
                         "open_dingtalk_id": item.open_dingtalk_id,
                         "projects": list(item.projects),
+                        "reply_enabled": bool(getattr(item, "reply_enabled", True)),
                     }
                     for item in settings.contacts
                 ],
@@ -397,6 +467,7 @@ class AgentService:
                         "open_conversation_id": item.conversation_id,
                         "projects": list(item.projects),
                         "allowed_senders": list(item.allowed_senders),
+                        "reply_enabled": bool(getattr(item, "reply_enabled", True)),
                     }
                     for item in settings.groups
                 ],
@@ -506,6 +577,9 @@ class AgentService:
         self.history_reconciler = asyncio.create_task(
             self._reconcile_history_loop(), name="history-reconciler"
         )
+        self.console_poller = asyncio.create_task(
+            self._console_poll_loop(), name="console-poller"
+        )
         self.outbox_dispatcher = asyncio.create_task(
             self._dispatch_outbox(), name="outbox-dispatcher"
         )
@@ -519,12 +593,14 @@ class AgentService:
         for task in self.workers.values():
             task.cancel()
         self.history_reconciler.cancel()
+        self.console_poller.cancel()
         self.outbox_dispatcher.cancel()
         self.runtime_heartbeat.cancel()
         await asyncio.gather(
             *self.listeners,
             *self.workers.values(),
             self.history_reconciler,
+            self.console_poller,
             self.outbox_dispatcher,
             self.runtime_heartbeat,
             return_exceptions=True,
@@ -638,6 +714,76 @@ class AgentService:
             await asyncio.sleep(interval)
             await self._reconcile_missing_events()
 
+    async def _console_poll_loop(self) -> None:
+        """控制台群：把本人手打的消息当成指令。
+
+        钉钉的个人事件流只推「@我」的消息，而且本人发出去的消息不会再回到
+        自己的事件流，所以控制台群不能靠事件通道，改读群历史。机器人自己发的
+        回复带 AI 标记，据此区分「我下的指令」和「agent 的答复」。
+        """
+        interval = float(self.settings.raw.get("console_poll_seconds", 8))
+        groups = [
+            item
+            for item in _groups(self.settings)
+            if getattr(item, "console", False) or getattr(item, "self_mention", False)
+        ]
+        if not groups:
+            return
+        LOG.info("console poller ready targets=%d interval=%ss", len(groups), interval)
+        while not self.stop_event.is_set():
+            await asyncio.sleep(interval)
+            for group in groups:
+                try:
+                    await self._poll_console_group(group)
+                except Exception as exc:
+                    LOG.warning(
+                        "console poll failed target=%s error=%s",
+                        group.alias,
+                        sanitize_text(str(exc), 200),
+                    )
+
+    async def _poll_console_group(self, contact: Contact) -> None:
+        history = await self.dws.history(contact)
+        if not history:
+            return
+        newest = history[-1].created_at
+        cursor = self.store.console_cursor(contact.conversation_id)
+        if cursor is None:
+            # 首次启用从当前时刻起算，避免把历史聊天整段当成待办指令重放。
+            self.store.set_console_cursor(contact.conversation_id, newest)
+            LOG.info("console cursor initialised target=%s at=%s", contact.alias, newest.isoformat())
+            return
+        accepted = 0
+        for message in history:
+            if message.created_at <= cursor or not message.content:
+                continue
+            if message.sender_open_dingtalk_id != self.settings.self_open_id:
+                continue
+            if message.ai_sent or self.store.is_agent_outgoing(message):
+                # agent 自己的答复；不能当成新指令，否则会自问自答。
+                continue
+            if not getattr(contact, "console", False):
+                # self_mention 模式：只把点名到自己的消息当指令，本人对同事说的
+                # 普通工作消息照常放过，否则群里每句话都会被 agent 接话。
+                if not mentions_named_user(message.content, self.settings.self_names):
+                    continue
+            event = IncomingEvent(
+                event_id=f"console:{message.message_id}",
+                message_id=message.message_id,
+                conversation_id=contact.conversation_id,
+                contact=contact,
+                content=message.content,
+                created_at=message.created_at,
+                sender_open_dingtalk_id=message.sender_open_dingtalk_id,
+                sender_name=message.sender,
+            )
+            if self.store.claim_event(event):
+                self._enqueue(event)
+                accepted += 1
+        if accepted:
+            LOG.info("console instructions accepted target=%s count=%d", contact.alias, accepted)
+        self.store.set_console_cursor(contact.conversation_id, newest)
+
     async def _keep_runtime_alive(self) -> None:
         while True:
             await asyncio.sleep(5)
@@ -648,6 +794,53 @@ class AgentService:
             return not self.runtime_states and all(
                 queue.empty() for queue in self.queues.values()
             )
+
+    def _reply_enabled(self, contact: Contact) -> bool:
+        """这个联系人或群当前是否允许自动回复。"""
+        disabled = getattr(self, "reply_disabled", None)
+        if disabled is None:
+            disabled = self.reply_disabled = {
+                item.identity
+                for item in _targets(self.settings)
+                if not getattr(item, "reply_enabled", True)
+            }
+        return contact.identity not in disabled
+
+    def _sync_reply_switches(self, raw: Mapping[str, Any]) -> None:
+        """按刚保存的配置重建禁用集合。
+
+        raw 里没有 contacts/groups 键时不改（避免一次不完整的配置把开关
+        全部重置成“开启”）。
+        """
+        if "contacts" not in raw and "groups" not in raw:
+            return
+        self.reply_disabled = _reply_disabled_identities(raw)
+
+    async def _skip_reply_disabled(self, batch: Sequence[IncomingEvent]) -> None:
+        """「已关闭自动回复」的唯一落账路径。
+
+        消息照收、照落账、照推进游标（否则重新打开会把这段时间积压的
+        消息整段补答），但不调 agent、不发任何消息，残留的处理中卡片
+        一并收口。
+
+        运行状态单独记成 muted，不复用 no_reply：no_reply 是模型显式
+        调用同名工具后的成功终态，而这里是使用者关掉了开关、agent 根本
+        没被启动。两者混在一个状态码里，按状态统计「模型沉默率」时会把
+        人为静音算进去。
+        """
+        await self._close_active_streaming_card(
+            batch[0].conversation_id, "处理已结束。"
+        )
+        self._record_without_agent(
+            batch,
+            status="muted",
+            action="skip",
+            handled="已关闭自动回复，本次未处理",
+            reason="reply_disabled",
+        )
+        self.store.update_event_status(
+            (item.message_id for item in batch), "skipped", "reply_disabled"
+        )
 
     def _search_dingtalk_contacts(self, query: str) -> list[dict[str, Any]]:
         command = [
@@ -810,8 +1003,10 @@ class AgentService:
             return {"corpId": "", "corpName": ""}
         if not isinstance(payload, Mapping):
             return {"corpId": "", "corpName": ""}
-        # currentProfile 就是当前组织的 corpId；corpName 再从 profiles 里找回来。
-        current = str(payload.get("currentProfile") or "").strip()
+        # currentProfile 是 "corpId:userId" 形式的 profile 键，而群的 corpId 来自
+        # conversationInfo，只有 bare corpId。不剥掉 userId 后缀，两者永远不等，
+        # 群列表会被整表过滤成空。
+        current = _current_corp_id_from_profile(payload.get("currentProfile"))
         name = ""
         profiles = payload.get("profiles")
         if isinstance(profiles, list):
@@ -934,12 +1129,15 @@ class AgentService:
         previous_dws = self.settings.raw.get("dws")
         previous_ai_tag = self.dws.ai_tag
         previous_runtime = self.agent_runtime
+        previous_disabled = set(getattr(self, "reply_disabled", ()))
         try:
             self.settings.raw["agents"] = candidate["agents"]
             self.settings.raw["workflows"] = candidate["workflows"]
             self.settings.raw["dws"] = candidate["dws"]
             self.dws.ai_tag = bool(candidate["dws"].get("ai_tag", False))
             self.agent_runtime = runtime
+            # 开关变化不需要重启：这里就把禁用集合换成新配置里的。
+            self._sync_reply_switches(raw)
             self._write_runtime()
         except Exception:
             self.settings.raw["agents"] = previous_agents
@@ -947,6 +1145,7 @@ class AgentService:
             self.settings.raw["dws"] = previous_dws
             self.dws.ai_tag = previous_ai_tag
             self.agent_runtime = previous_runtime
+            self.reply_disabled = previous_disabled
             raise
 
     def _write_runtime(self) -> None:
@@ -1293,6 +1492,11 @@ class AgentService:
                         for item in self._deduplicate(batch)
                         if self.store.event_is_pending(item.message_id)
                     ]
+                    if pending and not self._reply_enabled(pending[0].contact):
+                        # 在点「处理中」表情和拉历史之前就拦下来：关掉自动回复的
+                        # 目标不该被点表情，也不该每次消息都跑一趟 dws history。
+                        await self._skip_reply_disabled(pending)
+                        pending = []
                     if pending:
                         await self._set_processing_reactions(pending, active=True)
                         try:
@@ -1359,7 +1563,16 @@ class AgentService:
         return sorted(by_id.values(), key=lambda item: item.created_at)
 
     def _register_manual_messages(self, history: Sequence[HistoryMessage]) -> datetime | None:
+        console_ids = {
+            group.conversation_id
+            for group in _groups(self.settings)
+            if getattr(group, "console", False) or getattr(group, "self_mention", False)
+        }
         for message in history:
+            if message.conversation_id in console_ids:
+                # 控制台群里本人发的就是指令，不能记成「人工接管」，
+                # 否则每条消息都会触发冷却，agent 永远不会回复。
+                continue
             if message.sender_open_dingtalk_id != self.settings.self_open_id:
                 continue
             if self.store.is_agent_outgoing(message):
@@ -1369,6 +1582,9 @@ class AgentService:
             else:
                 self.store.record_manual(message)
         if not history:
+            return None
+        if history[-1].conversation_id in console_ids:
+            # 控制台群永远不做「人工接管」判断，本人说话就是要 agent 回答。
             return None
         return self.store.latest_manual(history[-1].conversation_id)
 
@@ -1547,6 +1763,12 @@ class AgentService:
                 )
                 return
 
+            if not self._reply_enabled(batch[0].contact):
+                # 工作线程已在入口拦过一次；这里再拦是因为批处理还可能从历史
+                # 里补进新事件，且配置可能在会话进行中被改。
+                await self._skip_reply_disabled(batch)
+                return
+
             gate = self.gate.inspect([item.content for item in batch])
             if gate.action == "drop":
                 await self._close_active_streaming_card(
@@ -1684,12 +1906,9 @@ class AgentService:
                 await self._finish_silent(batch, result)
                 return
             if result.reply is None:
-                # 失败要通知联系人：卡片在此时点才创建（见 _ensure_streaming_card）。
-                stream_card_id = await self._ensure_streaming_card(
-                    batch, result.session_id
-                )
-                await self._safe_update_streaming_card(
-                    stream_card_id, "处理失败，请稍后重试或转人工处理。", 5
+                # 失败要通知联系人：卡片模式下此时才建卡，纯文本模式直接发文本。
+                await self._notify_terminal(
+                    batch, result.session_id, "处理失败，请稍后重试或转人工处理。"
                 )
                 self._record_agent_result(batch, result, status="error")
                 self.store.update_event_status(
@@ -1724,11 +1943,10 @@ class AgentService:
                 )
             return
 
-        stream_card_id = await self._ensure_streaming_card(
-            batch, f"code-{uuid.uuid4().hex[:12]}"
-        )
-        await self._safe_update_streaming_card(
-            stream_card_id, "补充消息过多，本轮已停止自动处理。", 5
+        await self._notify_terminal(
+            batch,
+            f"code-{uuid.uuid4().hex[:12]}",
+            "补充消息过多，本轮已停止自动处理。",
         )
         self._record_without_agent(
             batch,
@@ -1741,10 +1959,15 @@ class AgentService:
             (item.message_id for item in batch), "skipped", "max_replans_reached"
         )
 
-
     def _agent_rate_limited(self, contact: Contact) -> bool:
         limits = self.settings.raw.get("rate_limit", {})
-        contact_limit = int(limits.get("per_contact_per_hour", 12))
+        if getattr(contact, "console", False) or getattr(contact, "self_mention", False):
+            # 控制台群和「本人 @ 本人」都是使用者自己的对话入口，按对外接待的
+            # 12 次/小时算会几分钟就撞墙，而且撞上后是静默丢弃，看起来像
+            # 「不响应」。这里单独给一套额度，仍然保留上限，用来兜住死循环。
+            contact_limit = int(limits.get("console_per_hour", 240))
+        else:
+            contact_limit = int(limits.get("per_contact_per_hour", 12))
         global_limit = int(limits.get("global_per_hour", 40))
         since = datetime.now(self.settings.timezone) - timedelta(hours=1)
         contact_count, global_count = self.store.agent_run_counts_since(
@@ -1781,6 +2004,44 @@ class AgentService:
             if item.message_id not in known
         ]
         return ("supplement", supplements) if supplements else ("fresh", [])
+
+    async def _notify_terminal(
+        self, batch: Sequence[IncomingEvent], session_id: str, content: str
+    ) -> None:
+        """终态通知：卡片模式走卡片，纯文本模式走带 AI 标识的文本。
+
+        这些提示原本只靠流式卡片下发，关掉 streaming_cards 后就没有载体，
+        出错会变成静默失败，所以这里补一条文本兜底。
+        """
+        if getattr(getattr(self, "dws", None), "streaming_cards", False):
+            stream_card_id = await self._ensure_streaming_card(batch, session_id)
+            await self._safe_update_streaming_card(stream_card_id, content, 5)
+            return
+        if getattr(self, "mode", "live") == "shadow":
+            LOG.info("shadow terminal notice chars=%d", len(content))
+            return
+        contact = batch[0].contact
+        send_uuid = str(uuid.uuid4())
+        try:
+            message_id, _ = await self.dws.send(
+                contact, content, send_uuid, retry_network=True
+            )
+        except Exception as exc:
+            LOG.warning(
+                "terminal notice failed contact=%s error=%s",
+                contact.alias,
+                sanitize_text(str(exc), 300),
+            )
+            return
+        self.store.record_outgoing(
+            send_uuid,
+            message_id,
+            batch[0].conversation_id,
+            contact.identity,
+            datetime.now(self.settings.timezone),
+            content,
+            session_id,
+        )
 
     async def _ensure_streaming_card(
         self, batch: Sequence[IncomingEvent], session_id: str
@@ -2055,6 +2316,12 @@ class AgentService:
             "contact_alias": contact.alias,
             "conversation_kind": "群聊" if contact.is_group else "单聊",
             "group_reminder": _GROUP_REMINDER if contact.is_group else "",
+            "console_reminder": (
+                _CONSOLE_REMINDER.replace("{{self_name}}", self.settings.self_name)
+                if getattr(contact, "console", False)
+                or getattr(contact, "self_mention", False)
+                else ""
+            ),
             "contact_user_id": contact.user_id,
             "contact_open_dingtalk_id": contact.open_dingtalk_id,
             "session_id": session_id,
@@ -2507,7 +2774,15 @@ class AgentService:
         conversation_id: str,
         content: str,
         session_id: str,
+        send_uuid: str = "",
     ) -> str:
+        """创建（或复用）流式卡片。
+
+        send_uuid 为空表示这张卡就是本次对外消息本身（ack/失败通知路径），
+        会新开一行 outgoing 记账；投递路径必须把投递行的 send_uuid 传进来，
+        让「一张卡」只对应「一行 outgoing」，否则一条回复会落两行，
+        审计和消息计数都会翻倍。
+        """
         if self.mode == "shadow":
             LOG.info(
                 "shadow streaming card contact=%s chars=%d",
@@ -2541,20 +2816,27 @@ class AgentService:
             )
             return ""
         sent_at = datetime.now(self.settings.timezone)
-        send_uuid = str(uuid.uuid4())
+        # 投递路径复用投递行，不再新开一行；标记仍用该行的 uuid，保证幂等。
+        reuse_row = bool(send_uuid)
+        send_uuid = send_uuid or str(uuid.uuid4())
         marked_content = f"{content}\n\n处理编号：{send_uuid[:8]}"
         biz_id, message_id, _ = await self.dws.send_card(contact)
-        self.store.record_outgoing(
-            send_uuid,
-            message_id,
-            conversation_id,
-            contact.identity,
-            sent_at,
-            marked_content,
-            session_id,
-            card_biz_id=biz_id,
-            card_flow_status=2,
-        )
+        if reuse_row:
+            # 卡片就是这次投递，直接挂到既有投递行上：一张卡一行 outgoing。
+            self.store.bind_delivery_card(send_uuid, biz_id)
+            self.store.update_streaming_card(send_uuid, marked_content, 2)
+        else:
+            self.store.record_outgoing(
+                send_uuid,
+                message_id,
+                conversation_id,
+                contact.identity,
+                sent_at,
+                marked_content,
+                session_id,
+                card_biz_id=biz_id,
+                card_flow_status=2,
+            )
         card_send_uuids = getattr(self, "streaming_card_send_uuids", None)
         if card_send_uuids is None:
             card_send_uuids = self.streaming_card_send_uuids = {}
@@ -2569,7 +2851,13 @@ class AgentService:
         if message_id:
             await self._safe_update_streaming_card(biz_id, content, 2)
             return biz_id
+        # 发卡响应通常不带 message_id，只能回查群历史认领。认领只是补审计用的
+        # 消息号，不是交付前提：卡片本身已经承载最终正文，投递路径随后会用
+        # 完整内容覆盖。所以这里认领不到时，既不能把卡片改写成失败提示
+        # （那样答复被从卡片里擦掉，群里留下一条看不懂的残骸），也不能返回
+        # 空串（那会让投递再发一条纯文本，同一段答复出现两次）。
         new_messages: dict[str, HistoryMessage] = {}
+        claimed = False
         try:
             async with asyncio.timeout(_STREAM_CARD_BIND_TIMEOUT_SECONDS):
                 for delay in (0.25, 0.5, 1.0, 2.0):
@@ -2583,38 +2871,28 @@ class AgentService:
                         and message.sender_open_dingtalk_id
                         == self.settings.self_open_id
                     }
-                    marked_candidates = [
-                        message
-                        for message in new_messages.values()
-                        if canonical_message_text(message.content)
-                        == canonical_message_text(marked_content)
-                    ]
-                    if (
-                        len(marked_candidates) == 1
-                        and self.store.bind_outgoing_id(
-                            send_uuid, marked_candidates[0].message_id
-                        )
+                    candidate = _pick_card_message(new_messages, marked_content)
+                    if candidate and self.store.bind_outgoing_id(
+                        send_uuid, candidate.message_id
                     ):
-                        self.store.remove_manual(marked_candidates[0].message_id)
-                        await self._safe_update_streaming_card(
-                            biz_id, content, 2
-                        )
-                        return biz_id
+                        self.store.remove_manual(candidate.message_id)
+                        claimed = True
+                        break
         except Exception as exc:
             LOG.warning(
                 "streaming card message-id reconciliation failed session=%s error=%s",
                 session_id,
                 sanitize_text(str(exc), 300),
             )
-        await self._safe_update_streaming_card(
-            biz_id, "卡片识别失败，请等待普通文本回复。", 5
-        )
-        LOG.warning(
-            "streaming card message-id ambiguous session=%s new_self_messages=%d",
-            session_id,
-            len(new_messages),
-        )
-        return ""
+        if not claimed:
+            LOG.info(
+                "streaming card message-id unclaimed session=%s new_self_messages=%d",
+                session_id,
+                len(new_messages),
+            )
+        # 无论有没有认领到，都去掉「处理编号」标记，让卡片只显示正文。
+        await self._safe_update_streaming_card(biz_id, content, 2)
+        return biz_id
 
     async def _start_delivery_card(
         self,
@@ -2622,16 +2900,18 @@ class AgentService:
         conversation_id: str,
         content: str,
         session_id: str,
+        send_uuid: str = "",
     ) -> str:
         """投递时点创建（或复用）承载最终回复的流式卡片。
 
         只在 _dispatch_due_delivery 的最终新鲜度检查通过后调用；初始内容
         直接用最终回复（含消息编号标记以便回绑 message_id）。创建失败返回
-        空串，投递回退纯文本。
+        空串，投递回退纯文本。send_uuid 是投递行的键，传进去让卡片复用这
+        一行，一条回复只落一行 outgoing。
         """
         try:
             return await self._start_streaming_card(
-                contact, conversation_id, content, session_id
+                contact, conversation_id, content, session_id, send_uuid
             )
         except Exception as exc:
             LOG.warning(
@@ -2789,6 +3069,7 @@ class AgentService:
                     str(row["conversation_id"]),
                     content,
                     str(row["session_id"]),
+                    send_uuid,
                 )
                 if card_biz_id:
                     self.store.bind_delivery_card(send_uuid, card_biz_id)

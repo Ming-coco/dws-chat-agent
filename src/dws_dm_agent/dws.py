@@ -16,6 +16,23 @@ from .core import Contact, HistoryMessage, parse_local_datetime, sha256_text
 LOG = logging.getLogger("dws-chat-agent")
 
 
+def _is_ai_send(raw: Mapping[str, Any]) -> bool:
+    """钉钉给 AI 发出的消息打标记（DWS 发送时为 "DWS"）。
+
+    控制台模式靠它区分「本人手打的消息」和「agent 自己的回复」：前者才是指令，
+    后者必须跳过，否则会自问自答。字段名在不同接口上有差异，值也可能是布尔。
+    """
+    for key in ("messageAiSendFlag", "aiSendFlag", "message_ai_send_flag"):
+        value = raw.get(key)
+        if value is None or value == "":
+            continue
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        return text not in {"0", "false", "none", "n", "no"}
+    return False
+
+
 def _find_message_id(value: Any) -> str | None:
     queue = [value]
     while queue:
@@ -168,6 +185,7 @@ class DwsClient:
                     sender_open_dingtalk_id=str(raw.get("senderOpenDingTalkId") or ""),
                     content=str(raw.get("content") or "").strip(),
                     created_at=parse_local_datetime(raw.get("createTime"), self.settings.timezone),
+                    ai_sent=_is_ai_send(raw),
                 )
             )
         return sorted(result, key=lambda item: item.created_at)

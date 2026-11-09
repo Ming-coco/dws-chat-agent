@@ -23,7 +23,8 @@
   "max_reply_chars": 16000,
   "rate_limit": {
     "per_contact_per_hour": 12,
-    "global_per_hour": 40
+    "console_per_hour": 240,
+    "global_per_hour": 300
   },
   "workspace_root": "${DWS_CHAT_AGENT_WORKSPACE_ROOT}",
   "worktree_root": "${DWS_CHAT_AGENT_WORKTREE_ROOT}",

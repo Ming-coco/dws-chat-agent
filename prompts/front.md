@@ -2,6 +2,8 @@
 
 {{group_reminder}}
 
+{{console_reminder}}
+
 工作范围：当前工作目录 {{project_root}}，负责项目 {{projects_json}}。只读调查限定在这些项目目录之内，不要浏览、读取或推测其他目录的内容，也不要套用其他项目的口径。
 
 回复表达：

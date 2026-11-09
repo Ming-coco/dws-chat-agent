@@ -82,6 +82,15 @@ That picker only shows the organization you are currently signed in to. `list-al
 
 The registered group — not the person — is the permission boundary. `allowed_senders: []` lets anyone in that group trigger the agent; fill it with `openDingTalkId` or display names to narrow that down. Only registered groups are subscribed at all; a mention anywhere else is dropped and logged once per conversation.
 
+Two optional flags change who can start a run in the group:
+
+- `"console": true` — the group is your own console. Every message you type there is a prompt; no `@` is needed and manual-takeover cooling does not apply. Use it on a group that is only you, never on a group shared with other people.
+- `"self_mention": true` — keep normal `@` behaviour for everyone else, and additionally let you `@` yourself to ask the agent. DingTalk never delivers your own messages back on your personal event stream, so this reads the group history instead and accepts only the messages that name you; your ordinary messages to colleagues are ignored.
+
+Both read history rather than the event stream, so a self-mention is answered within `console_poll_seconds` (8s by default) rather than instantly. Agent replies carry the AI flag, which is how a run started this way avoids answering itself.
+
+Either array entry accepts `"reply_enabled": false` to mute one person or one group without unregistering it. The target keeps receiving and auditing messages — the event row is marked `skipped` with reason `reply_disabled` and the console cursor still advances — but no agent is started and nothing is sent, so turning it back on later does not answer a backlog. It defaults to `true`, applies to both the `@` event stream and the console/self-mention poller, and the settings page exposes it as a checkbox on every contact and group; saving applies it immediately without a restart, though a reply already being generated is still delivered.
+
 Two behaviours are deliberately different from direct messages:
 
 - The group is only read when someone `@`s the account. Ordinary group chatter never wakes the agent, and group history is never replayed as pending requests, because message history does not record whether a line was a mention.

@@ -309,6 +309,9 @@ class AgentConfigStore:
             contact["projects"] = AgentConfigStore._merge_projects(
                 item.get("projects")
             )
+            # 「是否自动回复」开关：bool 不能走上面的长度/控制字符校验，
+            # 所以放在校验之后单独归一。缺省开启，老配置无需修改。
+            contact["reply_enabled"] = bool(item.get("reply_enabled", True))
             contacts.append(contact)
         if not contacts and not allow_empty:
             raise ValueError("at least one whitelist contact is required")
@@ -362,6 +365,13 @@ class AgentConfigStore:
                     "allowed_senders": AgentConfigStore._merge_senders(
                         item.get("allowed_senders")
                     ),
+                    # 控制台开关必须原样保留：设置页不认识这个字段，丢掉它
+                    # 会让「直接说话就响应」在每次保存后静默失效。
+                    "console": bool(item.get("console", False)),
+                    "self_mention": bool(item.get("self_mention", False)),
+                    # 同上：设置页新增的「是否自动回复」开关，必须原样保留并
+                    # 回写，否则每次保存都会把它抹回默认（开着）。
+                    "reply_enabled": bool(item.get("reply_enabled", True)),
                 }
             )
         if len(groups) > 100:
