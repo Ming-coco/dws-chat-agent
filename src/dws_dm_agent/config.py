@@ -41,6 +41,8 @@ class Settings:
     workspace_root: Path
     worktree_root: Path
     sandbox_root: Path
+    dashboard_host: str = "127.0.0.1"
+    dashboard_port: int = 8765
 
     @property
     def mode(self) -> str:
@@ -275,6 +277,19 @@ def load_settings(path: Path, env_path: Path = DEFAULT_ENV) -> Settings:
         if sandbox_value
         else (workspace_root.parent / ".agent-sandboxes").resolve()
     )
+    # 面板监听地址与端口：端口曾被写死成 8765，想避开占用端口只能改代码。
+    # 放到配置里，换机器/换端口不用动源码。
+    dashboard = raw.get("dashboard") or {}
+    if not isinstance(dashboard, Mapping):
+        raise ValueError("dashboard must be an object")
+    dashboard_host = str(dashboard.get("host") or "127.0.0.1").strip()
+    dashboard_port_raw = dashboard.get("port", 8765)
+    try:
+        dashboard_port = int(dashboard_port_raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"dashboard.port must be an integer: {dashboard_port_raw!r}")
+    if not 1 <= dashboard_port <= 65535:
+        raise ValueError(f"dashboard.port out of range: {dashboard_port}")
     return Settings(
         raw=raw,
         config_path=path.resolve(),
@@ -286,6 +301,8 @@ def load_settings(path: Path, env_path: Path = DEFAULT_ENV) -> Settings:
         workspace_root=workspace_root,
         worktree_root=worktree_root,
         sandbox_root=sandbox_root,
+        dashboard_host=dashboard_host,
+        dashboard_port=dashboard_port,
     )
 
 

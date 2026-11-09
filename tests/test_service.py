@@ -3928,5 +3928,116 @@ class DeliveryCardRowTests(unittest.TestCase):
             store.close()
 
 
+class DashboardPortConfigTests(unittest.TestCase):
+    """面板端口必须来自配置，不能写死在代码里。
+
+    之前端口硬编码成 8765，目标机器上该端口被占用时只能改源码。
+    """
+
+    def _workdir(self) -> Path:
+        # 沙箱会拒绝 tempfile 的 chmod/删除清理，这里只用普通目录，不自动删。
+        base = Path(__file__).resolve().parent.parent / "build" / "test-tmp"
+        directory = base / f"dashboardport-{uuid4().hex[:12]}"
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def _config(self, directory: Path, **extra) -> Path:
+        workspace = directory / "workspace"
+        workspace.mkdir(exist_ok=True)
+        payload = {
+            "self": {"name": "本人", "open_dingtalk_id": SELF_OPEN_ID},
+            "contacts": [
+                {
+                    "alias": "one",
+                    "display_name": "One",
+                    "user_id": "u-1",
+                    "open_dingtalk_id": "open-one",
+                }
+            ],
+            "workspace_root": str(workspace),
+            "worktree_root": str(directory / "worktrees"),
+            "sandbox_root": str(directory / "sandboxes"),
+        }
+        payload.update(extra)
+        config = directory / "config.json"
+        config.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return config
+
+    def test_port_comes_from_config(self) -> None:
+        directory = self._workdir()
+        config = self._config(directory, dashboard={"host": "0.0.0.0", "port": 3010})
+
+        settings = load_settings(config, directory / "missing.env")
+
+        self.assertEqual(settings.dashboard_port, 3010)
+        self.assertEqual(settings.dashboard_host, "0.0.0.0")
+
+    def test_defaults_when_dashboard_absent(self) -> None:
+        directory = self._workdir()
+        config = self._config(directory)
+
+        settings = load_settings(config, directory / "missing.env")
+
+        self.assertEqual(settings.dashboard_port, 8765)
+        self.assertEqual(settings.dashboard_host, "127.0.0.1")
+
+    def test_out_of_range_port_is_rejected(self) -> None:
+        directory = self._workdir()
+        config = self._config(directory, dashboard={"port": 70000})
+
+        with self.assertRaisesRegex(ValueError, "dashboard.port out of range"):
+            load_settings(config, directory / "missing.env")
+
+    def test_non_integer_port_is_rejected(self) -> None:
+        directory = self._workdir()
+        config = self._config(directory, dashboard={"port": "not-a-port"})
+
+        with self.assertRaisesRegex(ValueError, "dashboard.port must be an integer"):
+            load_settings(config, directory / "missing.env")
+
+
+class SingleInstanceLockTests(unittest.TestCase):
+    """退出时必须把锁文件删掉，否则 state 目录里会一直留着死 pid。"""
+
+    def _workdir(self) -> Path:
+        base = Path(__file__).resolve().parent.parent / "build" / "test-tmp"
+        directory = base / f"lock-{uuid4().hex[:12]}"
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def test_release_removes_lock_file(self) -> None:
+        from dws_dm_agent.service import (
+            _acquire_single_instance,
+            _release_single_instance,
+        )
+
+        directory = self._workdir()
+        handle = _acquire_single_instance(directory)
+        lock_path = directory / "agent.lock"
+        self.assertTrue(lock_path.exists())
+
+        _release_single_instance(handle, lock_path)
+
+        self.assertFalse(lock_path.exists(), "退出后锁文件必须被删除")
+
+    def test_stale_lock_from_dead_process_is_reusable(self) -> None:
+        from dws_dm_agent.service import (
+            _acquire_single_instance,
+            _release_single_instance,
+        )
+
+        directory = self._workdir()
+        lock_path = directory / "agent.lock"
+        # 模拟上一次没清理干净的残留：文件里是已经不存在的 pid。
+        lock_path.write_text("999999", encoding="utf-8")
+
+        handle = _acquire_single_instance(directory)
+        try:
+            self.assertTrue(lock_path.exists())
+        finally:
+            _release_single_instance(handle, lock_path)
+        self.assertFalse(lock_path.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
