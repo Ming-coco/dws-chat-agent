@@ -575,6 +575,76 @@ class ParseWorklogDocTests(unittest.TestCase):
         self.assertEqual(W.trim_content("短内容。", base_cfg()), "短内容。")
 
 
+class CommitAuthorTests(unittest.TestCase):
+    """工时只算自己的提交，别人的提交不能算进来。"""
+
+    def test_my_commit_matches_by_name(self):
+        self.assertTrue(W.is_my_commit(["hangyi"], "hangyi", "a@b.com"))
+
+    def test_my_commit_matches_by_email(self):
+        self.assertTrue(W.is_my_commit(["hangyi@yscredit.com"], "someone", "hangyi@yscredit.com"))
+
+    def test_someone_else_is_not_mine(self):
+        self.assertFalse(W.is_my_commit(["hangyi"], "jiangchenghao", "jch@yscredit.com"))
+
+    def test_match_is_case_insensitive(self):
+        self.assertTrue(W.is_my_commit(["HangYi"], "hangyi", ""))
+
+    def test_configured_authors_win_over_the_repo_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            cfg = base_cfg(git_authors=["hangyi"])
+            with patch.object(W, "git_identity", return_value=["someone@else.com"]):
+                self.assertEqual(W.author_filters(cfg, repo), ["hangyi"])
+
+    def test_repo_identity_is_used_when_nothing_is_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            with patch.object(W, "git_identity", return_value=["me@corp.com", "me"]):
+                self.assertEqual(W.author_filters(base_cfg(), repo), ["me@corp.com", "me"])
+
+    def test_falls_back_to_the_known_author_as_a_last_resort(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            with patch.object(W, "git_identity", return_value=[]):
+                self.assertEqual(W.author_filters(base_cfg(), repo), [W.DEFAULT_GIT_AUTHOR])
+
+    def test_git_activity_drops_other_peoples_commits(self):
+        repo = Path("repo")
+        log = "\n".join([
+            "09:00\x1fhangyi\x1fhangyi@yscredit.com\x1ffix(db): 修复 PostgreSQL 方言兼容问题",
+            "10:00\x1fjiangchenghao\x1fjch@yscredit.com\x1f能跑",
+        ])
+        with patch.object(W, "run", side_effect=lambda cmd, cwd, **kw: log if "log" in cmd else ""):
+            got = W.git_activity(repo, datetime(2026, 11, 10), ["hangyi"])
+        self.assertEqual(got["commits"], 1)
+        self.assertEqual(got["subjects"], ["fix(db): 修复 PostgreSQL 方言兼容问题"])
+        self.assertEqual(got["others"], ["jiangchenghao:能跑"])
+
+    def test_git_activity_without_a_filter_keeps_everything(self):
+        repo = Path("repo")
+        log = "\n".join([
+            "09:00\x1fhangyi\x1fhangyi@yscredit.com\x1f修复方言",
+            "10:00\x1fjiangchenghao\x1fjch@yscredit.com\x1f能跑",
+        ])
+        with patch.object(W, "run", side_effect=lambda cmd, cwd, **kw: log if "log" in cmd else ""):
+            got = W.git_activity(repo, datetime(2026, 11, 10))
+        self.assertEqual(got["commits"], 2)
+
+    def test_author_is_read_from_the_repository_config(self):
+        repo = Path("repo")
+
+        def fake(cmd, cwd, **kw):
+            if cmd[1:3] == ["config", "--local"] and cmd[3] == "user.email":
+                return "hangyi@yscredit.com\n"
+            if cmd[1:3] == ["config", "--local"] and cmd[3] == "user.name":
+                return "hangyi\n"
+            return ""
+
+        with patch.object(W, "run", side_effect=fake):
+            self.assertEqual(W.git_identity(repo), ["hangyi@yscredit.com", "hangyi"])
+
+
 class DiscoveryTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

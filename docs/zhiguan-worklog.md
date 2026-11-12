@@ -130,12 +130,22 @@ python -m dws_dm_agent.tools.zhiguan_worklog fill --notify-test
 
 写入工时的依据只有两种，都要求能说清「做了什么」：
 
-1. **当天的 git 提交**——按仓库分组，直接取提交主题。`Merge branch`、`index on …`、`On dev: …`、`能跑`、`WIP` 这类没有信息量的主题会被丢掉。
+1. **当天的 git 提交**——**只算你自己提交的**，别人的提交一律不算。按仓库分组，直接取提交主题。`Merge branch`、`index on …`、`On dev: …`、`能跑`、`WIP` 这类没有信息量的主题会被丢掉。
 2. **手写日志**——`工作日志\` 下的 markdown。
 
 只有文件 mtime 变了、但没有任何提交和手写日志的目录（切分支、批量解压、跑工具脚本都会这样），**不写进工时**，只在邮件里点名提示「只有文件改动、没有提交记录」。写「改了 34 个文件」既不能说明你做了什么，也没法用来考核，不如空着让你手动补。
 
 `.idea`、`.acl-recovery`、`.pg-audit`、`node_modules`、`target`、`dist` 这类目录和 `*.class`、`*.log` 这类文件不计入文件数。
+
+### 只看自己的提交
+
+工时算的是「你做了什么」，所以 `git log` 会按作者过滤，别人的提交不进内容、也不进工作量统计。
+
+- `config.json` 的 `git_authors` 决定哪些作者算你，匹配 `user.name <user.email>` 里的任意子串，大小写不敏感。默认 `["hangyi"]`。
+- 没配 `git_authors` 时，退回读该仓库自己的 `user.email` / `user.name`；再取不到才用 `hangyi`。
+- 被过滤掉的别人的提交会在 `cron.log` 里记一条 `[author] … 有 N 条别人的提交，不算进我的工时`，方便你核对是不是漏算了。
+
+换机器或换了 git 身份时，记得把新名字加进 `git_authors`。
 
 ## 手动运行
 

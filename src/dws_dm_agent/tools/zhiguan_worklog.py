@@ -265,28 +265,71 @@ def git_repos(root: Path, max_depth: int = 3):
     return repos
 
 
-def git_activity(repo: Path, day: datetime) -> dict:
+def git_identity(repo: Path) -> list:
+    """这个仓库里配置的 git 身份；取不到就返回空表。"""
+    seen, out = set(), []
+    for key in ("user.email", "user.name"):
+        for scope in (["--local"], ["--global"]):
+            value = run(["git", "config"] + scope + [key], repo).strip()
+            if value and value.lower() not in seen:
+                seen.add(value.lower())
+                out.append(value)
+    return out
+
+
+DEFAULT_GIT_AUTHOR = "hangyi"
+
+
+def author_filters(cfg: dict, repo: Path) -> list:
+    """哪些作者算「我」的提交。
+
+    优先用 config.git_authors；没配就用仓库自己的 user.email / user.name；
+    都取不到时才退回 DEFAULT_GIT_AUTHOR。别人的提交一律不算我的工时。
+    """
+    configured = [str(x) for x in (cfg.get("git_authors") or []) if str(x).strip()]
+    if configured:
+        return configured
+    return git_identity(repo) or [DEFAULT_GIT_AUTHOR]
+
+
+def is_my_commit(authors: list, name: str, email: str) -> bool:
+    hay = ("%s <%s>" % (name or "", email or "")).lower()
+    for pattern in authors:
+        token = str(pattern or "").strip().lower()
+        if token and token in hay:
+            return True
+    return False
+
+
+def git_activity(repo: Path, day: datetime, authors: list | None = None) -> dict:
     since = day.replace(hour=0, minute=0, second=0).isoformat()
     until = (day + timedelta(days=1)).replace(hour=0, minute=0, second=0).isoformat()
     out = run(
         ["git", "log", "--all", "--since=" + since, "--until=" + until,
-         "--pretty=format:%ad|%s", "--date=format:%H:%M"],
+         "--pretty=format:%ad%x1f%an%x1f%ae%x1f%s", "--date=format:%H:%M"],
         repo,
     )
     subjects, times = [], []
+    others = []
     for line in out.splitlines():
         line = line.strip()
         if not line:
             continue
-        stamp, _, subject = line.partition("|")
-        subject = subject.strip()
+        parts = line.split("\x1f")
+        if len(parts) < 4:
+            continue
+        stamp, name, email, subject = parts[0], parts[1], parts[2], parts[3].strip()
+        if authors and not is_my_commit(authors, name, email):
+            if subject and not subject.startswith("Merged notes"):
+                others.append("%s:%s" % (name, subject))
+            continue
         times.append(stamp)
         if subject and not subject.startswith("Merged notes"):
             subjects.append(subject)
     status = run(["git", "status", "--porcelain"], repo)
     dirty = len([l for l in status.splitlines() if l.strip()])
     return {"repo": repo.name, "commits": len(times), "subjects": subjects, "first": (times[-1] if times else None),
-            "last": (times[0] if times else None), "dirty": dirty, "times": times}
+            "last": (times[0] if times else None), "dirty": dirty, "times": times, "others": others}
 
 
 # 这些目录/文件是工具自己产生的副产物，算进「今天改了 N 个文件」只会让日志变得没法看
@@ -596,7 +639,11 @@ def collect_day(cfg: dict, day: datetime, eligible: list | None = None, notes: l
         if not root.exists():
             continue
         repos = git_repos(root, max_depth=3)
-        git_bits = [git_activity(r, day) for r in repos]
+        git_bits = [git_activity(r, day, author_filters(cfg, r)) for r in repos]
+        others = [o for g in git_bits for o in g.get("others") or []]
+        if others:
+            log("[author] %s 有 %d 条别人的提交，不算进我的工时：%s"
+                % (root.name, len(others), "；".join(others[:3]) + ("…" if len(others) > 3 else "")))
         # 只有“当天有提交”的仓库才算当天工作；长期存在的 dirty 工作树不算
         git_bits = [g for g in git_bits if g["commits"]]
         files = file_activity(root, day, patterns, depth)
