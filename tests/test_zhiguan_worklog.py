@@ -37,6 +37,8 @@ def base_cfg(**overrides) -> dict:
         "min_files_without_commits": 10,
         "on_unmapped": "skip",
         "calendar": {"enabled": True, "skip_on_leave": True},
+        # 测试一律不真的去读钉钉聊天，需要时显式打开
+        "chat": {"enabled": False},
         "mappings": [SHENZHEN, ZHAOYIN],
     }
     cfg.update(overrides)
@@ -643,6 +645,98 @@ class CommitAuthorTests(unittest.TestCase):
 
         with patch.object(W, "run", side_effect=fake):
             self.assertEqual(W.git_identity(repo), ["hangyi@yscredit.com", "hangyi"])
+
+
+class ChatSourceTests(unittest.TestCase):
+    """钉钉聊天也能作为工作痕迹，但只写做了什么，不写是谁。"""
+
+    def payload(self, messages: list) -> dict:
+        by_conv = {}
+        for m in messages:
+            by_conv.setdefault(m.get("conversationTitle"), []).append(m)
+        return {"result": {"conversationMessagesList": [
+            {"messages": items} for items in by_conv.values()
+        ]}}
+
+    def msg(self, text, sender="行弈-吴铭威", conv="深圳租赁-技术开发群", at="10:00:00", single=False):
+        return {"text": text, "content": text, "sender": sender, "conversationTitle": conv,
+                "createTime": "2026-11-11 " + at, "singleChat": single, "sendType": "user"}
+
+    def test_other_peoples_messages_are_ignored(self):
+        payload = self.payload([
+            self.msg("API_ZD_URL 生产配置是多少", sender="守仁-吴文斌"),
+            self.msg("检查 API_ZD_URL 生产配置并更新"),
+        ])
+        with patch.object(W, "_run_dws", return_value=payload):
+            got = W.chat_activity(date(2026, 11, 11), base_cfg(chat={"enabled": True, "me": ["行弈-吴铭威"]}))
+        self.assertEqual(len(got), 1)
+        self.assertIn("API_ZD_URL", got[0]["text"])
+
+    def test_robot_messages_are_ignored(self):
+        bot = dict(self.msg("流水线构建失败"), sendType="robot")
+        with patch.object(W, "_run_dws", return_value=self.payload([bot])):
+            got = W.chat_activity(date(2026, 11, 11), base_cfg(chat={"enabled": True, "me": ["行弈-吴铭威"]}))
+        self.assertEqual(got, [])
+
+    def test_short_acknowledgements_are_dropped(self):
+        payload = self.payload([
+            self.msg("好的"), self.msg("是的"), self.msg("收到，我看下"),
+            self.msg("把 figure-engine 的 JDK17 升级好了"),
+        ])
+        with patch.object(W, "_run_dws", return_value=payload):
+            got = W.chat_activity(date(2026, 11, 11), base_cfg(chat={"enabled": True, "me": ["行弈-吴铭威"]}))
+        self.assertEqual(len(got), 1)
+        self.assertIn("JDK17", got[0]["text"])
+
+    def test_image_and_link_noise_is_stripped(self):
+        text = "[图片消息](mediaId=@lQLPJw_KjWRPFlnNAW) https://x.example.com/a API_ZD_URL 要改"
+        cleaned = W.clean_chat_text(text)
+        self.assertNotIn("mediaId", cleaned)
+        self.assertNotIn("https", cleaned)
+        self.assertIn("API_ZD_URL", cleaned)
+
+    def test_media_ids_do_not_leak_into_the_summary(self):
+        payload = self.payload([self.msg("[文件消息](mediaId=$iwEcAqNwbmcDAQTRBGkF) long_text_F0A79DE5.txt")])
+        with patch.object(W, "_run_dws", return_value=payload):
+            got = W.chat_activity(date(2026, 11, 11), base_cfg(chat={"enabled": True, "me": ["行弈-吴铭威"]}))
+        for m in got:
+            self.assertNotIn("iwEcAq", m["text"])
+            self.assertNotIn("lQLPJ", m["text"])
+
+    def test_summary_names_no_people(self):
+        items = [
+            {"time": "10:00", "conversation": "邓南平", "single": True,
+             "text": "招银测试账号可以用", "project": "", "group": ""},
+            {"time": "11:00", "conversation": "深圳租赁-技术开发群", "single": False,
+             "text": "API_ZD_URL 生产配置要更新", "project": "深圳租赁", "group": "深圳租赁-技术开发群"},
+        ]
+        text = W.summarize_chat(items)
+        self.assertNotIn("邓南平", text)
+        self.assertIn("深圳租赁", text)
+
+    def test_summary_falls_back_to_the_group_when_no_technical_words(self):
+        items = [{"time": "10:00", "conversation": "重庆-切库小群", "single": False,
+                  "text": "那我更新到他们环境就好了吧", "project": "", "group": "重庆-切库小群"}]
+        text = W.summarize_chat(items)
+        self.assertTrue(text == "" or "重庆" in text or "讨论" in text)
+
+    def test_chat_read_failure_never_breaks_the_run(self):
+        with patch.object(W, "_run_dws", return_value=None):
+            self.assertEqual(W.chat_activity(date(2026, 11, 11), base_cfg(chat={"enabled": True})), [])
+
+    def test_disabled_chat_does_not_call_dws(self):
+        with patch.object(W, "_run_dws") as run:
+            self.assertEqual(W.chat_activity(date(2026, 11, 11), base_cfg()), [])
+            run.assert_not_called()
+
+    def test_group_title_maps_to_a_project(self):
+        cfg = base_cfg(chat={"enabled": True, "me": ["行弈-吴铭威"]})
+        cfg["mappings"] = [dict(SHENZHEN, keywords=["客户 B", "技术开发群"])]
+        with patch.object(W, "_run_dws", return_value=self.payload([
+            self.msg("中登数据接口的地址要确认", conv="客户 B-技术开发群"),
+        ])):
+            got = W.chat_activity(date(2026, 11, 11), cfg)
+        self.assertEqual(got[0]["project"], SHENZHEN["name"])
 
 
 class DiscoveryTests(unittest.TestCase):

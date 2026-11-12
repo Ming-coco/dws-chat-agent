@@ -496,6 +496,246 @@ def match_mapping_by_title(title: str, cfg: dict):
     return None
 
 
+# --------------------------------------------------------------------------- chat
+
+# 这些是「收到」「可以」之类的应声，写进工时没有任何信息量
+ACK_WORDS = {
+    "好的", "好", "是", "是的", "对", "对的", "可以", "行", "嗯", "恩", "ok", "OK", "收到",
+    "没问题", "知道了", "明白", "了解了", "也行", "应该的", "谢谢", "感谢", "稍等", "在看",
+    "我看下", "我看看", "稍后", "对的对的", "是的呢", "好嘞", "好滴", "已处理", "处理了",
+}
+MEDIA_MARK = re.compile(r"\[(?:图片|视频|文件|表情|语音)消息\]\([^)]*\)", re.IGNORECASE)
+MEDIA_ID = re.compile(r"media[_-]?id\s*=\s*\S+|@?lQLP[A-Za-z0-9_-]{10,}|\$iwEcA[A-Za-z0-9_-]+", re.IGNORECASE)
+MD_LINK = re.compile(r"\[([^\]]*)\]\((?:https?|ftp)[^)]*\)")
+BARE_URL = re.compile(r"https?://\S+")
+AT_MENTION = re.compile(r"@(?:[^\s@]+)")
+
+
+def clean_chat_text(text: str, max_len: int = 60) -> str:
+    """把一条聊天消息压成一句能写进工时的话。"""
+    s = str(text or "")
+    s = MEDIA_MARK.sub(" ", s)
+    s = MEDIA_ID.sub(" ", s)
+    s = MD_LINK.sub(r"\1", s)
+    s = BARE_URL.sub(" ", s)
+    s = AT_MENTION.sub(" ", s)
+    s = s.replace("$$", "$").replace("`", "")
+    s = re.sub(r"\s+", " ", s).strip(" ，,。、:：;；")
+    if len(s) > max_len:
+        s = s[:max_len].rstrip("，,、 ") + "…"
+    return s
+
+
+def useful_chat_message(text: str, min_len: int = 8) -> bool:
+    """够不够格进工时：太短、纯应声、纯链接/图片都不算。"""
+    s = clean_chat_text(text, max_len=10_000)
+    if len(s) < min_len:
+        return False
+    if s.strip().lower() in ACK_WORDS:
+        return False
+    # 只剩标点或单个词的，也没有信息量
+    return bool(re.search(r"[\u4e00-\u9fa5a-zA-Z]", s))
+
+
+def chat_activity(day: date, cfg: dict) -> list:
+    """读当天钉钉聊天里**我发的**消息，作为工作痕迹。
+
+    dws 不可用、没登录、没有聊天记录都只是返回空表，绝不影响填工时。
+    """
+    chat_cfg = cfg.get("chat") or {}
+    if chat_cfg.get("enabled", True) is False:
+        return []
+    payload = _run_dws([
+        "chat", "message", "list-all",
+        "--start", "%s 00:00:00" % day.isoformat(),
+        "--end", "%s 23:59:59" % day.isoformat(),
+        "--page-all", "--no-reactions", "--format", "json",
+    ], timeout=180)
+    if not payload:
+        log("[chat] %s 没读到聊天记录（dws 不可用或无返回）" % day)
+        return []
+
+    raw = []
+    for holder in (payload, payload.get("result") or {}, payload.get("data") or {}):
+        if isinstance(holder, dict) and isinstance(holder.get("conversationMessagesList"), list):
+            raw = holder["conversationMessagesList"]
+            break
+
+    me = [str(x) for x in (chat_cfg.get("me") or []) if str(x).strip()]
+    skip_titles = [str(x) for x in (chat_cfg.get("ignore_conversations") or []) if str(x).strip()]
+    min_len = int(chat_cfg.get("min_chars", 8))
+    per_conv = int(chat_cfg.get("max_messages_per_conversation", 2))
+
+    messages = []
+    for conv in raw:
+        title = str((conv.get("messages") or [{}])[0].get("conversationTitle") or "").strip()
+        if any(t and t in title for t in skip_titles):
+            continue
+        for msg in conv.get("messages") or []:
+            sender = str(msg.get("sender") or "").strip()
+            if msg.get("sendType") == "robot":
+                continue
+            if me and not any(m in sender for m in me):
+                continue
+            text = msg.get("text") or msg.get("content") or ""
+            if not useful_chat_message(text, min_len):
+                continue
+            messages.append({
+                "time": str(msg.get("createTime") or "")[11:16],
+                "conversation": str(msg.get("conversationTitle") or "").strip(),
+                "single": bool(msg.get("singleChat")),
+                "text": clean_chat_text(text),
+                "project": match_mapping_by_title(str(msg.get("conversationTitle") or ""), cfg) or "",
+                "group": "" if msg.get("singleChat") else str(msg.get("conversationTitle") or "").strip(),
+            })
+
+    # 同一个会话只留最后几条，按时间排
+    by_conv = defaultdict(list)
+    for m in messages:
+        by_conv[m["conversation"]].append(m)
+    picked = []
+    for title, items in by_conv.items():
+        items.sort(key=lambda x: x["time"])
+        picked.extend(items[-per_conv:])
+    picked.sort(key=lambda x: x["time"])
+    log("[chat] %s 我发了 %d 条有用消息，分布在 %d 个会话" % (day, len(picked), len(by_conv)))
+    return picked
+
+
+TECH_TOKEN = re.compile(
+    r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+"           # API_ZD_URL 这类常量
+    r"|[a-zA-Z]+(?:[A-Z][a-z0-9]+)+"          # figureEngine 这类驼峰
+    r"|\b[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\b"    # a.b 这类配置键/域名
+    r"|/[a-zA-Z0-9_./-]{6,}"                  # 接口路径
+)
+
+# 这些开头的口气词会让人看不懂在说什么，去掉更清楚
+FILLER_PREFIX = re.compile(r"^(?:哦对|哦|对|嗯|那|那个|所以|然后|还有|另外|其实|就是|先|我|我们)[，,、\s]*")
+
+# 这些开头的消息是闲聊或寒暄，进不了「你在做什么」的叙述
+CHITCHAT = re.compile(
+    r"^(?:好像是|应该是|可能是|不知道|不清楚|哈|哈哈|谢谢|感谢|辛苦了|麻烦你|请问|你看|"
+    r"怎么说|为什么|是不是|有没有|能不能|行不行|对不对)"
+)
+
+
+def best_line(msgs: list) -> str:
+    """挑一条最能说明自己在做什么的消息。"""
+    scored = []
+    for m in msgs:
+        text = m["text"]
+        if CHITCHAT.match(FILLER_PREFIX.sub("", text)):
+            continue
+        # 有技术词、句子完整、不过长的，最像「在做的事」
+        score = 0.0
+        if TECH_TOKEN.search(text):
+            score += 3
+        if 12 <= len(text) <= 60:
+            score += 2
+        score += min(len(text), 80) / 40.0
+        scored.append((score, text))
+    if not scored:
+        return ""
+    scored.sort(key=lambda x: -x[0])
+    return FILLER_PREFIX.sub("", scored[0][1]).strip("，,。、 ")[:48]
+
+
+def chat_topics(items: list, limit: int = 4) -> list:
+    """从几条消息里挑出最有辨识度的技术词，用来概括「在聊什么」。"""
+    counts, order = {}, []
+    for m in items:
+        for token in TECH_TOKEN.findall(m["text"]):
+            token = token.strip("/")
+            if len(token) < 5 or not re.search(r"[A-Za-z]", token):
+                continue
+            key = token.lower()
+            if key not in counts:
+                counts[key] = 0
+                order.append(token)
+            counts[key] += 1
+    order.sort(key=lambda t: -counts[t.lower()])
+    return order[:limit]
+
+
+# 这些词后面跟的往往是「在做什么」，用来给技术词配动词
+ACTION_HINTS = [
+    (re.compile(r"升级|jdk|版本"), "升级"),
+    (re.compile(r"配置|API_|URL|\.env|switch|开关"), "配置确认"),
+    (re.compile(r"报错|异常|失败|崩|crash|error|Exception"), "排查报错"),
+    (re.compile(r"排查|定位|看看|查下|查一下|原因"), "排查"),
+    (re.compile(r"部署|发版|上线|重启|release|deploy"), "部署"),
+    (re.compile(r"迁移|切库|换库|pg|postgres|mysql", re.IGNORECASE), "数据迁移"),
+    (re.compile(r"需求|口径|口径|方案|确认下"), "需求对齐"),
+    (re.compile(r"数据|跑批|落库|表|字段"), "数据处理"),
+]
+
+
+def chat_verb(text: str) -> str:
+    for pattern, verb in ACTION_HINTS:
+        if pattern.search(text):
+            return verb
+    return "讨论"
+
+
+JUNK_TOKEN = re.compile(r"^(?:long_text|blob|tmp|temp|unnamed|image|img)", re.IGNORECASE)
+
+
+def good_topic(token: str) -> bool:
+    """这个技术词适合写进工时吗：哈希、临时文件名、纯编号都排除。"""
+    if not token or len(token) < 5 or len(token) > 22:
+        return False
+    if JUNK_TOKEN.match(token):
+        return False
+    # 大小写混杂且没有分隔符的短串，基本都是 id / 文件名片段
+    if re.search(r"[0-9]", token) and not re.search(r"[_./-]", token):
+        return False
+    # 连续的十六进制/随机串
+    if re.search(r"[A-F0-9]{5,}", token):
+        return False
+    if not re.search(r"[A-Za-z]", token):
+        return False
+    # 要有分隔符，或者一段像样的词（连续 3 个小写字母以上），
+    # 否则像 PwkYGx 这种随机大小写串就不是正经标识符
+    if re.search(r"[_./-]", token):
+        return True
+    return bool(re.search(r"[a-z]{3,}|[A-Z]{3,}", token))
+
+
+def summarize_chat(items: list, max_items: int = 4, max_len: int = 200) -> str:
+    """把当天聊过的事压成一句「沟通与协助」。
+
+    只写聊了什么、在哪个项目上，不写是谁——工时是给自己看的，
+    人名和聊天原话都没有信息量，还会把真正的内容挤掉。
+    """
+    if not items:
+        return ""
+
+    topics, seen = [], set()
+    projects = []
+    for m in sorted(items, key=lambda x: x["time"]):
+        project = m.get("project") or ""
+        if project and project not in projects:
+            projects.append(project)
+        for t in chat_topics([m], limit=3):
+            if not good_topic(t) or t.lower() in seen:
+                continue
+            seen.add(t.lower())
+            topics.append(t)
+
+    if not topics and not projects:
+        return ""
+
+    parts = []
+    if projects:
+        parts.append("在 %s" % "、".join(projects[:2]))
+    if topics:
+        parts.append("跟进 %s 相关问题" % "、".join(topics[:max_items]))
+    else:
+        parts.append("跟进需求与问题")
+    text = "沟通与协助：" + "，".join(parts) + "。"
+    return text[:max_len]
+
+
 PLATFORM_DIRS = {
     ".git", "node_modules", ".venv", "__pycache__", "dist", "build", "target",
     ".idea", ".vscode", "logs", "log", "state", "tmp", ".dsh-work", ".dsh-tmp",
@@ -1149,9 +1389,26 @@ def fill_day(client: McpClient, cfg: dict, day: date, dry_run: bool = False, for
             "detail": "钉钉日历显示当天请假：%s" % "、".join(e["title"] for e in leave),
         }
     meetings = [e for e in events if not e["is_leave"] and not e["all_day"] and e["hours"] > 0]
+    chats = chat_activity(day, cfg)
 
     touched_only = []
     evidence = collect_day(cfg, day_dt, eligible_list, touched_only)
+    fallback = cfg.get("fallback_target") or {}
+    if not evidence and chats and fallback.get("targetId"):
+        # 一整天只有聊天记录（协助排查、答疑这类），也要能出一份工时
+        target = {"name": fallback.get("name") or "兜底项目",
+                  "targetType": fallback.get("targetType") or "PRODUCT",
+                  "targetId": fallback.get("targetId"), "fallback": True}
+        note = summarize_chat(chats, max_items=int(
+            (cfg.get("chat") or {}).get("max_items", 3)))
+        evidence = {target["name"]: {
+            "mapping": target, "git": [], "commits": 0,
+            "files": {"files": 0, "samples": []},
+            "docs": [{"topic": "沟通协助", "mainline": "", "headlines": [], "points": [],
+                      "content": note}],
+            "dirs": [],
+        }}
+        log("[chat] 当天只有聊天记录，按「沟通协助」写到 %s" % target["name"])
     if not evidence:
         result = {"date": day.isoformat(), "status": "skipped_no_activity"}
         if touched_only:
@@ -1175,7 +1432,6 @@ def fill_day(client: McpClient, cfg: dict, day: date, dry_run: bool = False, for
     if skipped:
         log("[skip] %s 配置为不单独记工时，工时并入当天主项目" % "、".join(skipped))
 
-    fallback = cfg.get("fallback_target") or {}
     fallback_name = None
     if unmapped and not active and fallback.get("targetId"):
         # 当天只有「没匹配上项目」的目录在动：不空着，整体挂到兜底项目，邮件里点名
@@ -1272,6 +1528,39 @@ def fill_day(client: McpClient, cfg: dict, day: date, dry_run: bool = False, for
                 : int(cfg.get("max_content_len", 1800))
             ]
             log("[calendar] %s 写入 %s" % ("；".join(loose_notes), biggest["targetId"]))
+
+    # 聊天：同样只写进内容、不新增条目、不动工时分配。
+    # 会话标题能按关键词挂到项目的就写进那个项目，挂不上的写进当天最重的项目。
+    if chats:
+        notes_by_project = defaultdict(list)
+        unassigned = []
+        for item in chats:
+            owner_name = match_mapping_by_title(item["conversation"], cfg)
+            line = "%s %s" % (item["time"], item["text"])
+            if owner_name and owner_name in owner:
+                notes_by_project[owner_name].append(line)
+            else:
+                unassigned.append(item)
+
+        for name, lines in notes_by_project.items():
+            target = owner[name]
+            gists = [best_line([{"text": t}]) for t in lines]
+            said = "；".join(dict.fromkeys(g for g in gists if g))
+            if said:
+                target["content"] = ("%s 沟通协助：%s。" % (target["content"], said))[
+                    : int(cfg.get("max_content_len", 1800))
+                ]
+                log("[chat] %d 条沟通写入 %s" % (len(lines), target["targetId"]))
+
+        if unassigned:
+            biggest = max(entries, key=lambda e: e["hours"] or 0)
+            note = summarize_chat(unassigned, max_items=int(
+                (cfg.get("chat") or {}).get("max_items", 3)))
+            if note:
+                biggest["content"] = ("%s %s" % (biggest["content"], note))[
+                    : int(cfg.get("max_content_len", 1800))
+                ]
+                log("[chat] 剩余 %d 条沟通写入 %s" % (len(unassigned), biggest["targetId"]))
 
     total = round(sum(e["hours"] or 0 for e in entries), 2)
     result = {
