@@ -6,8 +6,8 @@
 
 1. 先看**钉钉日历**当天：整天或半天以上的「请假」直接跳过不填；有会议的按标题关键词挂到对应项目，写进该项目的日志内容里（挂不上的写进当天工时最多的项目），**不新增条目、不改变工时分配**。
 2. **动态枚举** `D:\workspace` 下的一级子目录，挑出当天真有活动的那些——目录会不断增加，清单不写死（见下面「目录与归属」）。
-3. 读每个目录当天的**手写工作日志**（`工作日志\YYYY-MM-DD-周X.md` 或 `YYYY-MM-DD_周X_工作日志.md`）。日志里如果有一个 `## 工时内容`（或「智管内容」「填写内容」）小节，就**原样**用它当工时正文——想精确控制提交上去的文字，写这一节即可；没有这一节才退回「主题 / 当日主线 / 推进内容 / 要点」自动摘要。
-4. 既没有手写日志、也没有工时段落时，退化为 `git log` 当天提交 + 文件修改时间统计。
+3. 读每个目录当天的**手写工作日志**（`工作日志\YYYY-MM-DD-周X.md` 或 `YYYY-MM-DD_周X_工作日志.md`）。日志里如果有一个 `## 工时内容`（或「智管内容」「填写内容」）小节，就**原样**用它当工时正文——想精确控制提交上去的文字，写这一节即可；没有这一节才退回自动摘要。
+4. 自动摘要**按仓库分组**列出当天的提交主题，例如 `zhike-cust-engine-cyl：[cyl] ChainNode 五个 mapper 迁移到 PostgreSQL。`。只有整天一个提交都没有、只剩文件改动时，才会退化成「改了 N 个文件」。
 5. 按各项目当天的工作量把 7.5 小时分配下去（步长 0.5h）。
 6. 调智管 MCP 的 `save_worklog_draft` 存成草稿，并把 `reviewUrl` 写进 `zhiguan_state\fill-log.jsonl`。
 7. 用 `dws mail message send` 把「日期 / 各项工时 / 合计 / 确认链接」发到你的钉钉邮箱。
@@ -105,9 +105,11 @@ python -m dws_dm_agent.tools.zhiguan_worklog fill --notify-test
 | `D:\workspace\客户 A` | 某信创改造项目（XXXX-00000000-000） |
 | `D:\workspace\尽调项目` | 某租赁公司智能尽调（售前）（XXXX-00000000-000） |
 | `D:\workspace\区域产业链通用`（及 `区域产业链sql更新`、`区域产业链交接信息`、`产业链数据加工`） | 某营销与风控数智化平台（CODE-0000-02，产品） |
-| `D:\workspace\标准部署版本` | 技术产品架构V2.0（CODE-0000-03，产品） |
+| `D:\workspace\标准部署版本`、`D:\workspace\zhike标准产品版` | 技术产品架构V2.0（CODE-0000-03，产品） |
 | `D:\workspace\dws-chat-agent` | 不单独记（工时并入当天主项目） |
 | `D:\workspace\agent-radar` | 不单独记 |
+
+两个目录共用同一个 `targetId` 时，工时和内容会合并成一条，不会重复占两个条目。
 
 相关配置：
 
@@ -119,9 +121,21 @@ python -m dws_dm_agent.tools.zhiguan_worklog fill --notify-test
 
 - `discovery.ignore` 里的目录永远不单独记（名字归一化后比较）。
 - `match_min_chars` 是自动匹配要求的最短公共片段，调大更保守。
-- `max_worklog_headlines`（默认 5）、`max_worklog_points`（默认 3）、`max_worklog_point_len`（默认 90）控制自动摘要的篇幅；写了 `## 工时内容` 就不受这几个值影响。
+- `max_repos_in_content`（默认 3）与 `max_subjects_per_repo`（默认 4）控制「列几个仓库、每个仓库列几条提交」。
+- `max_worklog_headlines`（默认 5）、`max_worklog_points`（默认 3）、`max_worklog_point_len`（默认 90）控制手写日志摘要的篇幅；写了 `## 工时内容` 就不受这几个值影响。
 - 新增项目：在 `mappings` 里加一条，`targetType` 取 `PROJECT` / `PRODUCT`，`targetId` 用填写对象 id；不想单独记就写 `SKIP`。
 - `targetType` 写 `DAILY`（日常工作）不会被使用——本项目约定所有工时都挂真实项目/产品。
+
+## 什么算「当天工作」
+
+写入工时的依据只有两种，都要求能说清「做了什么」：
+
+1. **当天的 git 提交**——按仓库分组，直接取提交主题。`Merge branch`、`index on …`、`On dev: …`、`能跑`、`WIP` 这类没有信息量的主题会被丢掉。
+2. **手写日志**——`工作日志\` 下的 markdown。
+
+只有文件 mtime 变了、但没有任何提交和手写日志的目录（切分支、批量解压、跑工具脚本都会这样），**不写进工时**，只在邮件里点名提示「只有文件改动、没有提交记录」。写「改了 34 个文件」既不能说明你做了什么，也没法用来考核，不如空着让你手动补。
+
+`.idea`、`.acl-recovery`、`.pg-audit`、`node_modules`、`target`、`dist` 这类目录和 `*.class`、`*.log` 这类文件不计入文件数。
 
 ## 手动运行
 

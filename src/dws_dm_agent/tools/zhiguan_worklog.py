@@ -289,11 +289,20 @@ def git_activity(repo: Path, day: datetime) -> dict:
             "last": (times[0] if times else None), "dirty": dirty, "times": times}
 
 
+# 这些目录/文件是工具自己产生的副产物，算进「今天改了 N 个文件」只会让日志变得没法看
+DEFAULT_NOISE = [
+    r"\\\.[^\\]+\\",          # 任意以点开头的目录：.idea / .acl-recovery / .pg-audit / .git 等
+    r"\\node_modules\\", r"\\__pycache__\\", r"\\dist\\", r"\\build\\", r"\\target\\",
+    r"\\tmp\\",
+    r"\.class$", r"\.pyc$", r"\.log$", r"\.tmp$",
+]
+
+
 def file_activity(root: Path, day: datetime, patterns, max_depth: int) -> dict:
     """Count files modified that day, and remember a few representative paths."""
     start = day.replace(hour=0, minute=0, second=0)
     end = start + timedelta(days=1)
-    ex = [re.compile(p) for p in patterns]
+    ex = [re.compile(p) for p in list(DEFAULT_NOISE) + list(patterns)]
     count = 0
     samples = []
     root = Path(root)
@@ -555,7 +564,7 @@ def auto_match(name: str, eligible: list, cfg: dict):
     }
 
 
-def collect_day(cfg: dict, day: datetime, eligible: list | None = None) -> dict:
+def collect_day(cfg: dict, day: datetime, eligible: list | None = None, notes: list | None = None) -> dict:
     """Gather per-project activity evidence for one calendar day.
 
     目录来源是动态的：先算 config.mappings 里显式配置的目录（它们的 targetId 是人工确认过的），
@@ -582,6 +591,7 @@ def collect_day(cfg: dict, day: datetime, eligible: list | None = None) -> dict:
         sources.append((root.name, mapping, root))
 
     evidence = {}
+    touched_only = []
     for name, mapping, root in sources:
         if not root.exists():
             continue
@@ -596,10 +606,11 @@ def collect_day(cfg: dict, day: datetime, eligible: list | None = None) -> dict:
             max_point_len=int(cfg.get("max_worklog_point_len", 90)),
         ) for p in find_worklog_docs(root, day)]
         docs = [d for d in docs if d]
-        # 噪声过滤：只有零星文件改动、既没提交也没手写日志的目录不算“今天在做这个”
-        if not git_bits and not docs and files["files"] < min_files:
-            continue
-        if not git_bits and files["files"] == 0 and not docs:
+        # 噪音过滤：既没有提交、也没有手写日志，只剩一堆 mtime 被刷新的文件
+        # （切分支、批量解压、跑工具都会这样）。这种痕迹说不清做了什么，不写进工时。
+        if not git_bits and not docs:
+            if files["files"] >= min_files:
+                touched_only.append("%s（%d 个文件）" % ((mapping or {}).get("name") or name, files["files"]))
             continue
 
         key = (mapping or {}).get("name") or name
@@ -624,6 +635,8 @@ def collect_day(cfg: dict, day: datetime, eligible: list | None = None) -> dict:
                 acc["mapping"] = mapping
         else:
             evidence[key] = bit
+    if notes is not None:
+        notes.extend(touched_only)
     return evidence
 
 
@@ -648,13 +661,39 @@ def match_mapping_for_dir(dirname: str, cfg: dict):
 
 
 SKIP_SUBJECT = re.compile(r"^(merge|Merged notes|Revert|chore: release)", re.IGNORECASE)
+# 这些是提交时随手写的占位话，或者 git stash 自己生成的行，写进工时没有任何信息量
+JUNK_SUBJECT = re.compile(
+    r"^(on\s+\S+\s*:|index on\s|wip$|tmp$|临时|测试一下|能跑|改一下|小改|无$)",
+    re.IGNORECASE,
+)
+JUNK_WORDS = {"能跑", "好了", "提交", "更新", "修改", "改动", "保存", "test", "tmp", "wip", "update", "fix"}
 
 
 def clean_subject(s: str) -> str:
     s = re.sub(r"^[\U0001F300-\U0001FAFF\u2600-\u27BF]+\s*", "", s)
-    s = re.sub(r"^(feat|fix|docs|chore|ci|refactor|perf|test|style)\s*\(\s*([^)]*)\s*\)\s*[:：]\s*", r"[\2] ", s)
-    s = re.sub(r"^(feat|fix|docs|chore|ci|refactor|perf|test|style)\s*[:：]\s*", "", s)
+    s = re.sub(
+        r"^(feat|fix|docs|chore|ci|refactor|perf|test|style|build|deps|revert|hotfix|release)"
+        r"\s*\(\s*([^)]*)\s*\)\s*[:：]\s*",
+        r"[\2] ", s, flags=re.IGNORECASE,
+    )
+    s = re.sub(
+        r"^(feat|fix|docs|chore|ci|refactor|perf|test|style|build|deps|revert|hotfix|release)"
+        r"\s*[:：]\s*",
+        "", s, flags=re.IGNORECASE,
+    )
     return s.strip()
+
+
+def useful_subject(s: str) -> bool:
+    """这条提交主题值不值得写进工时：太短、纯占位、git stash 产物都扔掉。"""
+    text = clean_subject(s)
+    if len(text) < 4:
+        return False
+    if JUNK_SUBJECT.match(text):
+        return False
+    if text.strip().lower() in JUNK_WORDS:
+        return False
+    return True
 
 
 def find_worklog_docs(root: Path, day: datetime, max_depth: int = 3):
@@ -764,6 +803,14 @@ def parse_worklog_doc(path: Path, max_len: int = 1200, max_points: int = 3,
             "content": content, "chars": len(text)}
 
 
+def _short_path(name: str) -> str:
+    """文件路径只留两级，`fk-bi-zyzl\\src\\main\\resources\\a.xml` → `fk-bi-zyzl\\…\\a.xml`。"""
+    parts = re.split(r"[\\/]+", str(name))
+    if len(parts) <= 3:
+        return str(name)
+    return "%s\\…\\%s" % (parts[0], parts[-1])
+
+
 def trim_content(text: str, cfg: dict) -> str:
     """按时长上限截断，并且一定在句末断开，不留半截句子。"""
     text = re.sub(r"\s+", " ", text).strip()
@@ -784,6 +831,8 @@ def summarize(mapping_name: str, ev: dict, cfg: dict) -> str:
     limit = int(cfg.get("max_commit_subjects", 6))
     max_heads = int(cfg.get("max_worklog_headlines", 5))
     max_points = int(cfg.get("max_worklog_points", 3))
+    repo_limit = int(cfg.get("max_repos_in_content", 3))
+    per_repo_limit = int(cfg.get("max_subjects_per_repo", 4))
     parts = []
     for doc in ev.get("docs") or []:
         hand = (doc.get("content") or "").strip()
@@ -808,34 +857,42 @@ def summarize(mapping_name: str, ev: dict, cfg: dict) -> str:
             max_len = int(cfg.get("max_content_len", 1800))
             return text[:max_len]
 
+    # 按仓库分组写，别把所有仓库的提交混成一句「在 A、B、C 上推进：…」
+    per_repo = []
     seen = set()
-    subjects = []
-    for g in ev["git"]:
+    for g in sorted(ev["git"], key=lambda g: -g["commits"]):
+        picked = []
         for s in g["subjects"]:
-            if SKIP_SUBJECT.match(s):
+            if SKIP_SUBJECT.match(s) or not useful_subject(s):
                 continue
             c = clean_subject(s)
             key = c.lower()
-            if not c or key in seen:
+            if key in seen:
                 continue
             seen.add(key)
-            subjects.append(c)
-            if len(subjects) >= limit:
+            picked.append(c)
+            if len(picked) >= per_repo_limit:
                 break
-        if len(subjects) >= limit:
+        if picked:
+            per_repo.append((g["repo"], picked))
+        if len(per_repo) >= repo_limit:
             break
 
-    repo_names = [g["repo"] for g in ev["git"] if g["commits"]]
-    if subjects:
-        scope = "、".join(repo_names[:3])
-        head = "在 %s 上推进：%s" % (scope, "；".join(subjects[:limit])) if scope else "推进：%s" % "；".join(subjects[:limit])
-        parts.append(head + "。")
-    elif repo_names:
-        parts.append("处理 %s 的代码调整与联调验证。" % "、".join(repo_names[:3]))
+    if per_repo:
+        chunks = []
+        for repo, picked in per_repo:
+            chunks.append("%s：%s。" % (repo, "；".join(picked)))
+        parts.append("".join(chunks))
+    elif [g for g in ev["git"] if g["commits"]]:
+        names = [g["repo"] for g in ev["git"] if g["commits"]]
+        parts.append("在 %s 上提交了代码改动。" % "、".join(names[:3]))
+    elif any(g for g in ev["git"]):
+        parts.append("在 %s 上做了本地调整。" % "、".join(g["repo"] for g in ev["git"][:3]))
 
-    if ev["files"]["files"]:
-        shown = "、".join(name for _, name in ev["files"]["samples"][:3])
-        parts.append("同时完成 %d 个文件的修改与整理（如 %s）。" % (ev["files"]["files"], shown))
+    # 只有完全读不到提交时，才用文件清单兜底；有提交就别再报「改了 30 个文件」这种废话
+    if not per_repo and ev["files"]["files"]:
+        shown = "、".join(_short_path(name) for _, name in ev["files"]["samples"][:3])
+        parts.append("改动集中在 %s 等 %d 个文件。" % (shown, ev["files"]["files"]))
 
     text = " ".join(parts) if parts else "处理 %s 相关日常事务与沟通。" % mapping_name
     max_len = int(cfg.get("max_content_len", 1800))
@@ -1046,9 +1103,15 @@ def fill_day(client: McpClient, cfg: dict, day: date, dry_run: bool = False, for
         }
     meetings = [e for e in events if not e["is_leave"] and not e["all_day"] and e["hours"] > 0]
 
-    evidence = collect_day(cfg, day_dt, eligible_list)
+    touched_only = []
+    evidence = collect_day(cfg, day_dt, eligible_list, touched_only)
     if not evidence:
-        return {"date": day.isoformat(), "status": "skipped_no_activity"}
+        result = {"date": day.isoformat(), "status": "skipped_no_activity"}
+        if touched_only:
+            result["status"] = "skipped_no_commits"
+            result["touched_only"] = touched_only
+            log("[skip] %s 只有文件改动、没有提交记录和手写日志，说不清做了什么，不写进工时" % "、".join(touched_only))
+        return result
 
     # 配置为 SKIP 的目录（内部工具、调研归档）不参与工时分配；
     # 新目录里既没配映射、也没自动匹配上的，同样不占条目，但要报给用户。
@@ -1211,6 +1274,7 @@ STATUS_TEXT = {
     "skipped_on_leave": "请假，跳过",
     "skipped_no_content": "没有可填内容，跳过",
     "skipped_no_activity": "当天没有工作痕迹，跳过",
+    "skipped_no_commits": "只有文件改动、没有提交记录，跳过（请手动补）",
     "skipped_already_filled": "已有记录，跳过",
 }
 
@@ -1286,6 +1350,11 @@ def build_notification(results: list, cfg: dict):
                     "以下目录有工作痕迹、但没匹配到项目，工时已并入上面的主项目，请确认归属：%s"
                     % "、".join(row["unmapped"])
                 )
+        if row.get("touched_only"):
+            blocks.append(
+                "以下目录只有文件改动、没有提交记录，说不清做了什么，没写进工时；如果当天确实在忙这些，请手动补：%s"
+                % "、".join(row["touched_only"])
+            )
         if row.get("reviewUrl"):
             blocks.append("确认后提交：%s" % row["reviewUrl"])
         if row.get("detail"):

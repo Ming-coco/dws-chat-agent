@@ -367,6 +367,112 @@ class FillDayTests(unittest.TestCase):
         self.assertAlmostEqual(result["totalHours"], 7.5, places=2)
 
 
+class ContentQualityTests(unittest.TestCase):
+    """工时正文要写清楚「做了什么」，不能是「改了 30 个文件」这种废话。"""
+
+    def ev(self, repos: dict, files=0, samples=None) -> dict:
+        return {
+            "mapping": SHENZHEN,
+            "git": [{"repo": r, "commits": len(s), "subjects": s} for r, s in repos.items()],
+            "commits": sum(len(s) for s in repos.values()),
+            "files": {"files": files, "samples": [(("09:00", p) if isinstance(p, str) else p) for p in (samples or [])]},
+            "docs": [],
+        }
+
+    def test_commits_are_grouped_by_repository(self):
+        text = W.summarize("深圳租赁", self.ev({
+            "zhike-cust-engine-cyl": ["[cyl] ChainNode 五个 mapper 迁移到 PostgreSQL"],
+            "zhike-cust-engine-ls": ["[db] 修复 PostgreSQL 方言兼容问题"],
+        }), base_cfg())
+        self.assertIn("zhike-cust-engine-cyl：[cyl] ChainNode 五个 mapper 迁移到 PostgreSQL。", text)
+        self.assertIn("zhike-cust-engine-ls：[db] 修复 PostgreSQL 方言兼容问题。", text)
+
+    def test_file_count_is_not_mentioned_when_there_are_commits(self):
+        text = W.summarize("深圳租赁", self.ev(
+            {"repo-a": ["[db] 修复 PostgreSQL 方言兼容问题"]}, files=37,
+            samples=["repo-a\\a.txt", "repo-a\\b.txt"],
+        ), base_cfg())
+        self.assertNotIn("37", text)
+        self.assertNotIn("个文件", text)
+
+    def test_file_count_is_used_only_when_nothing_was_committed(self):
+        text = W.summarize("深圳租赁", self.ev({}, files=37,
+                                              samples=["fk-bi-zyzl\\src\\main\\resources\\a.xml"]),
+                           base_cfg())
+        self.assertIn("37 个文件", text)
+
+    def test_junk_commit_subjects_are_skipped(self):
+        text = W.summarize("深圳租赁", self.ev({"repo-a": [
+            "能跑", "韩哥你", "On dev: user-local-application.yml",
+            "index on dev: c7af254", "Merge branch 'x' into 'dev'",
+            "[db] 修复 PostgreSQL 方言兼容问题",
+        ]}), base_cfg())
+        for junk in ("能跑", "韩哥你", "On dev:", "index on", "Merge"):
+            self.assertNotIn(junk, text)
+        self.assertIn("PostgreSQL 方言兼容", text)
+
+    def test_conventional_prefixes_are_stripped(self):
+        text = W.summarize("深圳租赁", self.ev({"repo-a": [
+            "build(docker): 补充 docker-entrypoint.sh",
+        ]}), base_cfg())
+        self.assertIn("[docker] 补充 docker-entrypoint.sh", text)
+        self.assertNotIn("build(", text)
+
+    def test_repositories_are_capped(self):
+        repos = {"repo-%d" % i: ["[db] 修复第 %d 处方言问题" % i] for i in range(6)}
+        text = W.summarize("深圳租赁", self.ev(repos), base_cfg(max_repos_in_content=2))
+        self.assertIn("repo-0", text)
+        self.assertNotIn("repo-3", text)
+
+    def test_deep_paths_are_shortened(self):
+        self.assertEqual(
+            W._short_path(r"fk-bi-zyzl\src\main\resources\application.yml"),
+            r"fk-bi-zyzl\…\application.yml",
+        )
+        self.assertEqual(W._short_path("pom.xml"), "pom.xml")
+
+    def test_tool_artifacts_do_not_count_as_work_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            day = datetime(2026, 11, 10)
+            stamp = day.replace(hour=10).timestamp()
+            for rel in (".acl-recovery/backup.json", ".pg-audit/audit.ps1", "src/main/A.java"):
+                fp = root / rel
+                fp.parent.mkdir(parents=True, exist_ok=True)
+                fp.write_text("x", encoding="utf-8")
+                import os
+                os.utime(fp, (stamp, stamp))
+            found = W.file_activity(root, day, [], 4)
+            self.assertEqual(found["files"], 1)
+
+
+class UncommittedDayTests(unittest.TestCase):
+    """只有 mtime 变化、没有提交的目录，不该被写成「改了 34 个文件」的工时条目。"""
+
+    def test_day_with_only_file_changes_is_reported_as_no_commits(self):
+        client = FakeClient(Path("."), eligible_targets())
+        touched = {"mapping": ZHAOYIN, "git": [], "commits": 0,
+                   "files": {"files": 34, "samples": []}, "docs": [], "dirs": ["招银"]}
+        with patch.object(W, "calendar_events", return_value=[]), \
+                patch.object(W, "collect_day", return_value={}), \
+                patch.object(W, "collect_day", side_effect=lambda c, d, e=None, notes=None: (
+                    notes.extend(["招银金租（34 个文件）"]) or {})):
+            result = W.fill_day(client, base_cfg(), date(2026, 11, 9), dry_run=True)
+        self.assertEqual(result["status"], "skipped_no_commits")
+        self.assertIn("招银金租（34 个文件）", result["touched_only"])
+
+    def test_collect_day_notes_directories_without_commits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "项目甲").mkdir()
+            cfg = base_cfg(workspace_root=str(root), mappings=[], discovery={"enabled": True})
+            notes = []
+            with patch.object(W, "file_activity", return_value={"files": 30, "samples": []}):
+                got = W.collect_day(cfg, datetime(2026, 11, 9), [], notes)
+            self.assertEqual(got, {})
+            self.assertEqual(notes, ["项目甲（30 个文件）"])
+
+
 class ParseWorklogDocTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
