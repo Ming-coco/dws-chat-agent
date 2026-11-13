@@ -61,6 +61,7 @@ from .config import (
 )
 from .dashboard import AgentConfigStore, DashboardServer
 from .dws import DwsClient, _find_dws_error_code
+from .reply_guard import reply_problem
 from . import sandbox
 
 
@@ -1936,6 +1937,41 @@ class AgentService:
                     (item.message_id for item in batch), "error", result.error[:200]
                 )
                 return
+
+            # 投递前先看这段正文是不是「发给联系人的话」。模型偶尔把思考
+            # 过程当正文交出来（实测整篇英文 Let me grep…，或只有一句
+            # I'll read the issue first. 就结束），那不能发出去。
+            problem = reply_problem(result.reply)
+            if problem:
+                LOG.warning(
+                    "rejected reply contact=%s reason=%s chars=%d",
+                    batch[0].contact.alias,
+                    problem,
+                    len(result.reply),
+                )
+                if attempt < max_replans - 1:
+                    # 当作「这一轮没交出最终答复」重跑一次：把原因写进
+                    # prior_attempt，让模型知道上一轮哪里不对。
+                    self._record_agent_result(
+                        batch, result, status="invalid_reply"
+                    )
+                    result.reply = None
+                    result.error = f"invalid_reply: {problem}"
+                    prior_attempt = (
+                        "上一轮交出的正文不是发给联系人的答复"
+                        f"（判定：{problem}），可能混入了思考过程或没写完。"
+                        "请重新给出完整、面向对方的中文回复。"
+                    )
+                    await asyncio.sleep(self.settings.quiet_window)
+                    continue
+                # 重算次数用尽：不能把无效正文发出去，也不能静默。
+                # 换一句如实的兜底，并把原因留在审计里。
+                result.reply = "这次没整理出可用的答复，麻烦稍后再问我一次。"
+                result.error = f"invalid_reply: {problem}"
+                LOG.warning(
+                    "invalid reply replaced with fallback contact=%s",
+                    batch[0].contact.alias,
+                )
 
             self._set_runtime(batch, "freshness", attempt=attempt + 1)
             # 回复路径不在决策点建卡：最终新鲜度检查在投递派发时进行，

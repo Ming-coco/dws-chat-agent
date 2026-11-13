@@ -3928,6 +3928,56 @@ class DeliveryCardRowTests(unittest.TestCase):
             store.close()
 
 
+class ReplyGuardTests(unittest.TestCase):
+    """模型把思考过程当正文交出来时，投递前必须拦住。
+
+    两例都来自 state/audit.sqlite3 里 runs.handled 的真实内容。
+    """
+
+    def test_english_narration_is_rejected(self) -> None:
+        from dws_dm_agent.reply_guard import reply_problem
+
+        text = (
+            "No 链主 in those. Where is 链主 handled? In PanoramaServiceImpl "
+            "(keyEntDistribution with tag=lz_ent). Let me grep PanoramaServiceImpl.java "
+            "for lz_ent / 链主."
+        )
+        self.assertEqual(reply_problem(text), "english_narration")
+
+    def test_half_sentence_opener_is_rejected(self) -> None:
+        from dws_dm_agent.reply_guard import reply_problem
+
+        self.assertEqual(reply_problem("I'll read the issue first."), "english_narration")
+
+    def test_normal_chinese_reply_passes(self) -> None:
+        from dws_dm_agent.reply_guard import reply_problem
+
+        text = (
+            "CQNSHCYDN-1522 的标题是：【标签筛选】链主企业没有数据。"
+            "类型是故障，状态处理中，经办人于一-余意。"
+        )
+        self.assertEqual(reply_problem(text), "")
+
+    def test_chinese_with_code_terms_passes(self) -> None:
+        from dws_dm_agent.reply_guard import reply_problem
+
+        text = (
+            "我先查了 PanoramaServiceImpl，tag 用的是 lz_ent，"
+            "这里判断依据是链主字段为空，所以筛选没结果。"
+        )
+        self.assertEqual(reply_problem(text), "")
+
+    def test_short_acknowledgement_passes(self) -> None:
+        from dws_dm_agent.reply_guard import reply_problem
+
+        self.assertEqual(reply_problem("收到。"), "")
+
+    def test_empty_reply_is_reported(self) -> None:
+        from dws_dm_agent.reply_guard import reply_problem
+
+        self.assertEqual(reply_problem("   "), "empty")
+
+
 class DashboardPortConfigTests(unittest.TestCase):
     """面板端口必须来自配置，不能写死在代码里。
 
