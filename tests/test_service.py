@@ -3977,6 +3977,29 @@ class ReplyGuardTests(unittest.TestCase):
 
         self.assertEqual(reply_problem("   "), "empty")
 
+    def test_speculation_without_evidence_is_rejected(self) -> None:
+        from dws_dm_agent.reply_guard import reply_problem
+
+        # 通篇猜测，没有任何链接、单号、文件或行号可核对。
+        text = "这个应该是数据源没配好，可能是权限问题，估计改一下配置就好了。"
+        self.assertEqual(reply_problem(text), "speculation")
+
+    def test_hedge_with_evidence_passes(self) -> None:
+        from dws_dm_agent.reply_guard import reply_problem
+
+        # 有证据锚点：模型只是在提示可能性，不是拿猜测当结论。
+        text = (
+            "可能是缓存没刷新。我在 ChainInfoServiceImpl.java 第 128 行看到"
+            "取值前没有强刷，建议先清一次缓存再看。"
+        )
+        self.assertEqual(reply_problem(text), "")
+
+    def test_statement_without_hedge_passes(self) -> None:
+        from dws_dm_agent.reply_guard import reply_problem
+
+        text = "构建失败的原因是非空校验没过，字段 ent_name 传了 null。"
+        self.assertEqual(reply_problem(text), "")
+
 
 class DashboardPortConfigTests(unittest.TestCase):
     """面板端口必须来自配置，不能写死在代码里。

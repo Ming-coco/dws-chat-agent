@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Mapping
 
@@ -31,12 +32,39 @@ SUPPLEMENT_PROMPT_VARIABLES = frozenset(
     }
 )
 
+# 缺失时可以安全渲染成空串的变量：它们承载的是「补充说明」而不是事实。
+# 缺一句群聊提醒会让措辞差一点，但不该让整轮回复直接失败——10-28 那天就是
+# 因为 group_reminder 没传进渲染，连续 4 次「处理过程中发生异常，未完成回复」。
+SOFT_MISSING_VARIABLES = frozenset(
+    {
+        "group_reminder",
+        "console_reminder",
+        "prior_attempt",
+        "projects_json",
+        "recent_context_json",
+        "active_tasks_json",
+    }
+)
+
 
 def render_prompt(template: str, variables: Mapping[str, Any]) -> str:
-    missing = sorted(set(_PLACEHOLDER.findall(template)) - set(variables))
+    """渲染模板。
+
+    缺失的变量分两类处理：
+      - SOFT_MISSING_VARIABLES 里的，渲染成空串（调用方会记一条 warning）；
+      - 其余照旧抛错，因为它们缺失意味着上下文本身没准备好，静默继续会
+        让模型在缺事实的情况下作答。
+    """
+    present = set(_PLACEHOLDER.findall(template))
+    missing = sorted(present - set(variables))
     if missing:
-        raise ValueError(f"missing prompt variables: {', '.join(missing)}")
-    return _PLACEHOLDER.sub(lambda match: str(variables[match.group(1)]), template)
+        hard = [name for name in missing if name not in SOFT_MISSING_VARIABLES]
+        if hard:
+            raise ValueError(f"missing prompt variables: {', '.join(hard)}")
+        logging.getLogger(__name__).warning(
+            "prompt rendered with empty soft variables: %s", ", ".join(missing)
+        )
+    return _PLACEHOLDER.sub(lambda match: str(variables.get(match.group(1), "")), template)
 
 
 def validate_template_variables(template: str, allowed: frozenset[str]) -> None:

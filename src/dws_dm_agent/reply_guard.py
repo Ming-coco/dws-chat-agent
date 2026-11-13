@@ -37,6 +37,19 @@ _ENGLISH_TAIL_RE = re.compile(
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _LATIN_WORD_RE = re.compile(r"[A-Za-z]{2,}")
 
+# 把推测当结论的措辞。中文里「应该是」「可能是」太常见，单独出现不足为凭，
+# 所以只在「通篇没有一个可核对的证据锚点」时才判为推测。
+_HEDGE_RE = re.compile(
+    r"(?:应该|可能|大概|估计|似乎|好像|八成|多半|我猜|猜是|想必|说不定)"
+)
+
+# 证据锚点：出现任意一个，说明正文至少挂在一个可追查的事实上。
+_EVIDENCE_RE = re.compile(
+    r"(?:https?://|CQNSHCYDN-\d+|[A-Z][A-Z0-9_]{1,15}-\d{1,7}|"
+    r"[A-Za-z_][A-Za-z0-9_]*\.(?:py|ts|js|java|go|json|md|sql|tsx|vue)\b|"
+    r"`[^`]+`|第\s*\d+\s*行|process/\d+|\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2})"
+)
+
 # 判为无效的最低中文字符占比。面向中文同事的回复里，代码、路径、英文术语
 # 都很常见，所以门槛定得低——真正的英文独白占比通常在 5% 以下。
 MIN_CJK_RATIO = 0.15
@@ -80,6 +93,22 @@ def looks_truncated(text: str) -> bool:
     return bool(_ENGLISH_TAIL_RE.search(body))
 
 
+def looks_like_speculation(text: str) -> bool:
+    """正文是否在拿推测当结论，且通篇没有可核对的证据锚点。
+
+    只靠「应该/可能」判断会误伤正常措辞（「可能是缓存问题，我查一下」）。
+    所以要求两个条件同时成立：出现推测措辞，且正文里没有任何证据锚点
+    （链接、单号、文件路径、行号、代码片段、带时间的引用）。有锚点说明
+    它至少挂在某个可追查的事实上，交给对方判断即可。
+    """
+    body = (text or "").strip()
+    if len(body) < MIN_CHECK_CHARS:
+        return False
+    if not _HEDGE_RE.search(body):
+        return False
+    return not _EVIDENCE_RE.search(body)
+
+
 def reply_problem(text: str) -> str:
     """返回无效原因；正文可用时返回空串。
 
@@ -92,4 +121,6 @@ def reply_problem(text: str) -> str:
         return "english_narration"
     if looks_truncated(body):
         return "truncated"
+    if looks_like_speculation(body):
+        return "speculation"
     return ""

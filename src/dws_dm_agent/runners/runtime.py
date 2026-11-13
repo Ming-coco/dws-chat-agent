@@ -757,9 +757,39 @@ class AgentSession:
             and not self._escalated
             and not self._silent
         ):
-            self.error = "agent_result_missing"
+            # 光写一个 agent_result_missing 事后完全查不出原因：审计里只有这
+            # 一句，不知道进程是正常结束还是被掐断、有没有输出、退出码多少。
+            # 把现场带进错误串，下次再出现就能直接定位。
+            self.error = self._describe_missing_result()
         self._complete.set()
         self._signal_update()
+
+    def _describe_missing_result(self) -> str:
+        """拼出「为什么没有终稿」的现场描述，供审计排障使用。"""
+        parts = ["agent_result_missing"]
+        if self._stream_text:
+            parts.append(f"stream_chars={len(self._stream_text)}")
+        else:
+            parts.append("stream_chars=0")
+        if self.prepared.result_path.is_file():
+            try:
+                size = self.prepared.result_path.stat().st_size
+            except OSError:
+                size = -1
+            parts.append(f"result_bytes={size}")
+        else:
+            parts.append("result_bytes=none")
+        stderr_path = self.prepared.stderr_path
+        if stderr_path.is_file():
+            try:
+                tail = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                tail = ""
+            parts.append(f"stderr_bytes={len(tail)}")
+            if tail:
+                # 只留尾部：外部进程的 stderr 通常最后几行才是真正原因。
+                parts.append("stderr_tail=" + tail[-200:].replace("\n", " "))
+        return " ".join(parts)
 
     def _fail(self, error: str) -> None:
         self.error = error
