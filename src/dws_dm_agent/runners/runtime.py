@@ -784,6 +784,7 @@ class AgentRuntime:
         supplement_strategy: str,
         supplement_prompt_path: Path,
         auto_messages: Mapping[str, Any],
+        shell_path_prepend: Sequence[Path] = (),
     ) -> None:
         self.name = name
         self._stages = dict(stages)
@@ -793,6 +794,10 @@ class AgentRuntime:
         self.supplement_strategy = supplement_strategy
         self._supplement_prompt_path = supplement_prompt_path
         self._auto_messages = dict(auto_messages)
+        # 子进程 PATH 前置目录，见 _environment。Windows 上 C:\Windows\system32
+        # 里的 bash.exe 是 WSL 启动器，WSL 没装时所有命令都会失败；把 Git 的
+        # bin 前置即可让 pi 的 bash 工具用上真实的 shell。
+        self._shell_path_prepend = tuple(shell_path_prepend)
         self.progress_enabled = bool(auto_messages.get("progress_enabled", True))
         self.max_progress_updates = int(auto_messages.get("max_progress_updates", 60))
 
@@ -976,6 +981,7 @@ class AgentRuntime:
             supplement_strategy,
             supplement_prompt_path,
             auto_messages,
+            _shell_path_prepend(raw, config_dir),
         )
 
     def render(self, stage_name: str, variables: Mapping[str, Any]) -> str:
@@ -1244,6 +1250,7 @@ class AgentRuntime:
         self, profile: AgentProfile, session_home: Path | None = None
     ) -> dict[str, str]:
         environment = {**os.environ, **profile.environment, "PYTHONUNBUFFERED": "1"}
+        self._prepend_shell_path(environment)
         if profile.protocol != "codex-app-server":
             return environment
         home_value: Any = session_home or profile.options.get("isolated_home")
@@ -1269,6 +1276,61 @@ class AgentRuntime:
             auth_target.symlink_to(auth_source)
         environment["CODEX_HOME"] = str(home.resolve())
         return environment
+
+    def _prepend_shell_path(self, environment: dict[str, str]) -> None:
+        """把 shell.path_prepend 里的目录放到 PATH 最前面（幂等）。
+
+        agent 的 bash 工具靠 PATH 找 bash，Windows 上默认命中的是 WSL 启动器。
+        已存在的条目不再重复插入，避免子进程继承后又叠加一层。
+        """
+        if not self._shell_path_prepend:
+            return
+        current = environment.get("PATH") or environment.get("Path") or ""
+        parts = [str(path) for path in self._shell_path_prepend]
+        existing = current.split(os.pathsep) if current else []
+        merged = parts + [
+            item
+            for item in existing
+            if item and os.path.normcase(item) not in {os.path.normcase(p) for p in parts}
+        ]
+        environment["PATH"] = os.pathsep.join(merged)
+        # Windows 上 PATH 是大小写不敏感的；同时写 Path 会让子进程看到两份。
+        environment.pop("Path", None)
+
+
+def _shell_path_prepend(raw: Mapping[str, Any], config_dir: Path) -> tuple[Path, ...]:
+    """读取 `shell.path_prepend`：要前置到子进程 PATH 的目录。
+
+    存在的意义是 Windows：`C:\\Windows\\system32\\bash.exe` 是 WSL 启动器，
+    没装 WSL 时 pi 的 bash 工具每条命令都返回 "WSL 没有安装"。把 Git 自带的
+    `Git\\bin`（bash）和 `Git\\usr\\bin`（sed/awk/grep 等）前置即可绕开。
+    目录由部署方在 config.json 里给出，代码不写死任何本机路径；相对路径按
+    配置文件所在目录解析。
+    """
+    shell = raw.get("shell")
+    if shell is None:
+        return ()
+    if not isinstance(shell, Mapping):
+        raise ValueError("shell must be an object")
+    values = shell.get("path_prepend")
+    if values is None:
+        return ()
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, list):
+        raise ValueError("shell.path_prepend must be an array of paths")
+    resolved: list[Path] = []
+    for entry in values:
+        if not isinstance(entry, str) or not entry.strip():
+            raise ValueError("shell.path_prepend entries must be non-empty strings")
+        path = Path(entry.strip()).expanduser()
+        path = path.resolve() if path.is_absolute() else (config_dir / path).resolve()
+        if not path.is_dir():
+            logging.getLogger(__name__).warning(
+                "shell.path_prepend directory does not exist: %s", path
+            )
+        resolved.append(path)
+    return tuple(resolved)
 
 
 def _resolve_path(base: Path, value: Any) -> Path:
