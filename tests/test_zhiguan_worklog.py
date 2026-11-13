@@ -613,10 +613,10 @@ class CommitAuthorTests(unittest.TestCase):
 
     def test_git_activity_drops_other_peoples_commits(self):
         repo = Path("repo")
-        log = "\n".join([
-            "09:00\x1fhangyi\x1fhangyi@yscredit.com\x1ffix(db): 修复 PostgreSQL 方言兼容问题",
-            "10:00\x1fjiangchenghao\x1fjch@yscredit.com\x1f能跑",
-        ])
+        log = (
+            "09:00\x1fhangyi\x1fhangyi@yscredit.com\x1ffix(db): 修复 PostgreSQL 方言兼容问题\x1f\x1e"
+            "10:00\x1fjiangchenghao\x1fjch@yscredit.com\x1f能跑\x1f\x1e"
+        )
         with patch.object(W, "run", side_effect=lambda cmd, cwd, **kw: log if "log" in cmd else ""):
             got = W.git_activity(repo, datetime(2026, 11, 10), ["hangyi"])
         self.assertEqual(got["commits"], 1)
@@ -625,10 +625,10 @@ class CommitAuthorTests(unittest.TestCase):
 
     def test_git_activity_without_a_filter_keeps_everything(self):
         repo = Path("repo")
-        log = "\n".join([
-            "09:00\x1fhangyi\x1fhangyi@yscredit.com\x1f修复方言",
-            "10:00\x1fjiangchenghao\x1fjch@yscredit.com\x1f能跑",
-        ])
+        log = (
+            "09:00\x1fhangyi\x1fhangyi@yscredit.com\x1f修复方言\x1f\x1e"
+            "10:00\x1fjiangchenghao\x1fjch@yscredit.com\x1f能跑\x1f\x1e"
+        )
         with patch.object(W, "run", side_effect=lambda cmd, cwd, **kw: log if "log" in cmd else ""):
             got = W.git_activity(repo, datetime(2026, 11, 10))
         self.assertEqual(got["commits"], 2)
@@ -737,6 +737,58 @@ class ChatSourceTests(unittest.TestCase):
         ])):
             got = W.chat_activity(date(2026, 11, 11), cfg)
         self.assertEqual(got[0]["project"], SHENZHEN["name"])
+
+
+class CommitHighlightTests(unittest.TestCase):
+    """「跑批性能优化」要说清优化了什么、提升多少，不能只罗列。"""
+
+    BODY = (
+        "批量写：\n"
+        "- 压测：10000 行 392.7s -> 9.1s（43x），SQL 条数 10000 -> 20。\n\n"
+        "addEid：\n"
+        "- 4 条 select max() 由每页重跑改为整批取一次快照\n"
+        "  （1096 次 -> 4 次，1566ms -> 523ms）。\n"
+    )
+
+    def test_quantified_results_survive(self):
+        got = W.commit_highlights(self.BODY)
+        joined = " ".join(got)
+        self.assertIn("392.7s", joined)
+        self.assertIn("9.1s", joined)
+
+    def test_trailing_measurement_line_is_kept(self):
+        """数字单独折到下一行时，也要跟上一条并起来。"""
+        got = W.commit_highlights("addEid：\n- 逐客户 findEid 改为每页一次\n  （12214 次 -> 245 次）。\n")
+        self.assertTrue(any("12214" in h for h in got))
+
+    def test_section_heading_is_attached(self):
+        self.assertTrue(any(h.startswith("批量写：") for h in W.commit_highlights(self.BODY)))
+
+    def test_lines_without_numbers_are_dropped(self):
+        got = W.commit_highlights("批量写：\n- 新增 insertIntoTableBatch，拼 multi-values\n")
+        self.assertEqual(got, [])
+
+    def test_arrow_is_normalised(self):
+        self.assertTrue(all("->" not in h for h in W.commit_highlights(self.BODY)))
+
+    def test_highlight_count_is_capped(self):
+        self.assertLessEqual(len(W.commit_highlights(self.BODY, limit=1)), 1)
+
+    def test_summary_puts_the_gain_next_to_what_was_done(self):
+        ev = {"mapping": {}, "git": [{"repo": "mr-injection", "commits": 1, "subjects": [],
+                                      "details": [{"subject": "perf(fk-data): DataBIMonitorService 跑批性能优化",
+                                                   "body": self.BODY}]}],
+              "files": {"files": 0, "samples": []}, "docs": [], "commits": 1}
+        text = W.summarize("招银金租", ev, base_cfg())
+        self.assertIn("跑批性能优化", text)
+        self.assertIn("392.7s", text)
+        self.assertNotIn("\n", text)
+
+    def test_summary_without_a_body_still_reads_cleanly(self):
+        ev = {"mapping": {}, "git": [{"repo": "r", "commits": 1, "subjects": [],
+                                      "details": [{"subject": "fix(db): 修复方言兼容", "body": ""}]}],
+              "files": {"files": 0, "samples": []}, "docs": [], "commits": 1}
+        self.assertIn("修复方言兼容", W.summarize("招银金租", ev, base_cfg()))
 
 
 class DiscoveryTests(unittest.TestCase):

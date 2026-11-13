@@ -304,31 +304,35 @@ def is_my_commit(authors: list, name: str, email: str) -> bool:
 def git_activity(repo: Path, day: datetime, authors: list | None = None) -> dict:
     since = day.replace(hour=0, minute=0, second=0).isoformat()
     until = (day + timedelta(days=1)).replace(hour=0, minute=0, second=0).isoformat()
+    # 正文里常常写着「为什么改」「提升了多少」，只取标题会把最有用的信息丢掉
     out = run(
         ["git", "log", "--all", "--since=" + since, "--until=" + until,
-         "--pretty=format:%ad%x1f%an%x1f%ae%x1f%s", "--date=format:%H:%M"],
+         "--pretty=format:%ad%x1f%an%x1f%ae%x1f%s%x1f%b%x1e", "--date=format:%H:%M"],
         repo,
     )
-    subjects, times = [], []
+    commits, times = [], []
     others = []
-    for line in out.splitlines():
-        line = line.strip()
-        if not line:
+    for chunk in out.split("\x1e"):
+        chunk = chunk.strip("\n")
+        if not chunk.strip():
             continue
-        parts = line.split("\x1f")
+        parts = chunk.split("\x1f")
         if len(parts) < 4:
             continue
         stamp, name, email, subject = parts[0], parts[1], parts[2], parts[3].strip()
+        body = parts[4] if len(parts) > 4 else ""
         if authors and not is_my_commit(authors, name, email):
             if subject and not subject.startswith("Merged notes"):
                 others.append("%s:%s" % (name, subject))
             continue
         times.append(stamp)
         if subject and not subject.startswith("Merged notes"):
-            subjects.append(subject)
+            commits.append({"subject": subject, "body": body})
     status = run(["git", "status", "--porcelain"], repo)
     dirty = len([l for l in status.splitlines() if l.strip()])
-    return {"repo": repo.name, "commits": len(times), "subjects": subjects, "first": (times[-1] if times else None),
+    return {"repo": repo.name, "commits": len(times),
+            "subjects": [c["subject"] for c in commits], "details": commits,
+            "first": (times[-1] if times else None),
             "last": (times[0] if times else None), "dirty": dirty, "times": times, "others": others}
 
 
@@ -983,6 +987,61 @@ def useful_subject(s: str) -> bool:
     return True
 
 
+# 带「改之前 -> 改之后」「提升 43 倍」「少了 80%」这类结论的行，才算说得清成效
+GAIN_HINT = re.compile(
+    r"->|→|=>|倍|提升|降低|减少|下降|优化到|缩短|\d+(?:\.\d+)?\s*(?:%|ms|s|秒|分钟|小时|次|行|条)"
+)
+
+
+def commit_highlights(body: str, limit: int = 2, max_len: int = 90) -> list:
+    """从提交正文里挑出「做了什么、提升多少」。
+
+    提交标题一般只说「优化了跑批」，正文才写清楚改了哪几处、压测从多少降到多少。
+    这里把「小标题 + 带数字的成效」配对成一句，避免变成纯罗列。
+    """
+    out = []
+    section = ""
+    # 先把折行的正文拼回整句：markdown 里一行常常只写半句，
+    # 数字和结论往往在续行上，逐行判断会把「提升多少」丢掉
+    items = []
+    for raw in (body or "").splitlines():
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+        if line.strip().endswith(("：", ":")) and len(line.strip()) <= 24:
+            items.append(("section", line.strip()))
+            continue
+        if re.match(r"^\s*[-*•]\s+", line) or not items or items[-1][0] == "section":
+            items.append(("line", line.strip()))
+        else:
+            kind, prev = items[-1]
+            items[-1] = (kind, prev + line.strip())
+
+    for kind, text in items:
+        if kind == "section":
+            section = text.rstrip("：:").lstrip("-*• ").strip()
+            continue
+        text = text.lstrip("-*• ").strip()
+        if len(text) < 8 or not re.search(r"\d", text):
+            continue
+        if not GAIN_HINT.search(text):
+            continue
+        text = re.sub(r"\s+", " ", text)
+        text = text.replace("->", "→").replace("=>", "→")
+        # 「压测：10000 行…」这种，小标题说的就是这件事，不要再套一层
+        text = re.sub(r"^[^：:]{1,24}[：:]\s*", "", text)
+        text = re.sub(r"[（(]\s*[)）]", "", text).strip("，,、；;。 ")
+        if section and section not in text:
+            text = "%s：%s" % (section, text)
+        if len(text) > max_len:
+            text = text[:max_len].rstrip("，,、；;。 ") + "…"
+        if text not in out:
+            out.append(text)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def find_worklog_docs(root: Path, day: datetime, max_depth: int = 3):
     """Locate the hand-written daily log markdown for `day` under one project root."""
     root = Path(root)
@@ -1120,6 +1179,7 @@ def summarize(mapping_name: str, ev: dict, cfg: dict) -> str:
     max_points = int(cfg.get("max_worklog_points", 3))
     repo_limit = int(cfg.get("max_repos_in_content", 3))
     per_repo_limit = int(cfg.get("max_subjects_per_repo", 4))
+    highlight_limit = int(cfg.get("max_highlights_per_commit", 2))
     parts = []
     for doc in ev.get("docs") or []:
         hand = (doc.get("content") or "").strip()
@@ -1149,7 +1209,9 @@ def summarize(mapping_name: str, ev: dict, cfg: dict) -> str:
     seen = set()
     for g in sorted(ev["git"], key=lambda g: -g["commits"]):
         picked = []
-        for s in g["subjects"]:
+        details = g.get("details") or [{"subject": s, "body": ""} for s in g["subjects"]]
+        for item in details:
+            s = item["subject"]
             if SKIP_SUBJECT.match(s) or not useful_subject(s):
                 continue
             c = clean_subject(s)
@@ -1157,7 +1219,9 @@ def summarize(mapping_name: str, ev: dict, cfg: dict) -> str:
             if key in seen:
                 continue
             seen.add(key)
-            picked.append(c)
+            # 标题说的是「做了什么」，正文里的压测/计数才是「提升多少」
+            highlights = commit_highlights(item.get("body") or "", limit=highlight_limit)
+            picked.append({"text": c, "highlights": highlights})
             if len(picked) >= per_repo_limit:
                 break
         if picked:
@@ -1168,7 +1232,14 @@ def summarize(mapping_name: str, ev: dict, cfg: dict) -> str:
     if per_repo:
         chunks = []
         for repo, picked in per_repo:
-            chunks.append("%s：%s。" % (repo, "；".join(picked)))
+            lines = []
+            for item in picked:
+                if item["highlights"]:
+                    # 有成效的单独成段：「做了什么（提升多少）」
+                    lines.append("%s（%s）" % (item["text"], "；".join(item["highlights"])))
+                else:
+                    lines.append(item["text"])
+            chunks.append("%s：%s。" % (repo, "；".join(lines)))
         parts.append("".join(chunks))
     elif [g for g in ev["git"] if g["commits"]]:
         names = [g["repo"] for g in ev["git"] if g["commits"]]
