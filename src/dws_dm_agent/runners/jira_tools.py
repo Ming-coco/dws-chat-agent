@@ -19,11 +19,12 @@ import json
 import os
 import re
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 DEFAULT_BASE_URL = "https://issue.hsjdata.com"
 DEFAULT_TIMEOUT = 30.0
@@ -31,6 +32,24 @@ DEFAULT_MAX_COMMENTS = 10
 MAX_MAX_COMMENTS = 50
 MAX_DESCRIPTION_CHARS = 6000
 MAX_COMMENT_CHARS = 1500
+# 单次最多带回的截图数量与单张体积上限：工具结果会整段进模型上下文，
+# 不设上限会把 billing 撑爆，也让 pi 的 RPC 帧变得很大。
+MAX_IMAGES = 4
+MAX_IMAGE_BYTES = 4 * 1024 * 1024
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+_IMAGE_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
+# Jira 在内网（issue.hsjdata.com → 10.x）。Windows 上 urllib 会读注册表里的
+# 系统代理，而 ProxyOverride 的 `10.*` 通配 Python 不认，于是内网请求被硬
+# 塞进本地代理，表现为 TLS 握手被对端直接断开（SSL: UNEXPECTED_EOF）。
+# 这里显式禁掉代理，只直连。
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 # 从 .env 兜底读取的键。服务只用 .env 解析 config.json 的 ${...}，
 # 不会把它灌进子进程环境，所以这里自己读一次。
@@ -244,7 +263,7 @@ def _request_json(url: str, token: str, timeout: float) -> Any:
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _OPENER.open(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8", "replace"))
     except urllib.error.HTTPError as error:
         detail = ""
@@ -415,8 +434,101 @@ def render_issue(issue: Mapping[str, Any], max_comments: int) -> str:
     return "\n".join(lines)
 
 
-def fetch_issue(key: str, max_comments: int) -> str:
-    """按单号读取并渲染；失败抛 JiraError。"""
+def _safe_name(value: str) -> str:
+    """把单号变成可用作目录名的片段（只留字母数字和短横线）。"""
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", value or "").strip("_")
+    return cleaned[:60] or "issue"
+
+
+def _sniff_image_type(data: bytes) -> tuple[str, str]:
+    """按文件头判断图片真实类型，返回 (suffix, mime)。
+
+    Jira 的附件扩展名经常不可信：实测 .png 里装的其实是 JPEG。把错的
+    mimeType 交给模型会让图片解码失败，所以一律以文件头为准。
+    """
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png", "image/png"
+    if data[:2] == b"\xff\xd8":
+        return ".jpg", "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif", "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp", "image/webp"
+    return "", ""
+
+
+def _download_attachment(
+    url: str, token: str, timeout: float, target: Path
+) -> tuple[Path, str] | None:
+    """下载一个附件，返回 (落盘路径, mimeType)；失败返回 None。
+
+    Jira 的附件 content 地址同样认 Bearer，但部分实例会校验
+    X-Atlassian-Token。两个头一起带上，避免为了一个头再打一次请求。
+    """
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "*/*",
+            "X-Atlassian-Token": "no-check",
+            "User-Agent": "dws-chat-agent/jira-tools",
+        },
+    )
+    try:
+        with _OPENER.open(request, timeout=timeout) as response:
+            data = response.read(MAX_IMAGE_BYTES + 1)
+    except Exception:  # noqa: BLE001 - 附件下载失败不该让整次读单失败
+        return None
+    if not data or len(data) > MAX_IMAGE_BYTES:
+        return None
+    suffix, mime = _sniff_image_type(data)
+    if not suffix:
+        return None
+    actual = target.with_suffix(suffix)
+    actual.parent.mkdir(parents=True, exist_ok=True)
+    actual.write_bytes(data)
+    return actual, mime
+
+
+def _save_issue_images(
+    attachments: Sequence[Mapping[str, Any]],
+    token: str,
+    timeout: float,
+    key: str,
+) -> list[tuple[Path, str]]:
+    """把单据里的图片附件下载到本地，返回 (路径, mimeType) 列表。
+
+    只取图片、只取前 MAX_IMAGES 张。Jira 的截图是排查的主要信息源，
+    只把文件名交给模型等于把最关键的那部分信息丢掉。
+    """
+    saved: list[tuple[Path, str]] = []
+    out_dir = Path(tempfile.gettempdir()) / "dws-jira-images" / _safe_name(key)
+    for item in attachments:
+        if len(saved) >= MAX_IMAGES:
+            break
+        mime = str(item.get("mimeType") or "").lower()
+        filename = str(item.get("filename") or "")
+        suffix = Path(filename).suffix.lower()
+        if not mime.startswith("image/") and suffix not in IMAGE_SUFFIXES:
+            continue
+        size = item.get("size")
+        if isinstance(size, int) and size > MAX_IMAGE_BYTES:
+            continue
+        url = str(item.get("content") or "")
+        if not url:
+            continue
+        downloaded = _download_attachment(url, token, timeout, out_dir / f"{len(saved) + 1}")
+        if downloaded:
+            saved.append(downloaded)
+    return saved
+
+
+def fetch_issue(key: str, max_comments: int) -> tuple[str, list[tuple[Path, str]]]:
+    """按单号读取并渲染；失败抛 JiraError。
+
+    返回 (文本, [(图片路径, mimeType)])。图片由 pi_jira.ts 作为
+    ImageContent 放进工具结果，模型因此能直接看到截图。
+    """
     token = _setting("JIRA_PAT")
     if not token:
         raise JiraError(
@@ -434,7 +546,19 @@ def fetch_issue(key: str, max_comments: int) -> str:
     payload = _request_json(url, token, timeout)
     if not isinstance(payload, Mapping):
         raise JiraError("Jira 返回的单据结构异常")
-    return render_issue(payload, max_comments)
+
+    attachments = []
+    fields = payload.get("fields")
+    if isinstance(fields, Mapping):
+        raw = fields.get("attachment")
+        if isinstance(raw, list):
+            attachments = [item for item in raw if isinstance(item, Mapping)]
+
+    images = _save_issue_images(attachments, token, timeout, key)
+    text = render_issue(payload, max_comments)
+    if images:
+        text = f"{text}\n截图：{len(images)} 张已附在本工具结果中。"
+    return text, images
 
 
 def _parse_args(raw: Any) -> tuple[str, int]:
@@ -461,7 +585,14 @@ def handle(request: Any) -> dict[str, Any]:
         return {"ok": False, "error": f"不支持的工具：{name}"}
     try:
         key, max_comments = _parse_args(request.get("args"))
-        return {"ok": True, "key": key, "text": fetch_issue(key, max_comments)}
+        text, images = fetch_issue(key, max_comments)
+        result: dict[str, Any] = {"ok": True, "key": key, "text": text}
+        if images:
+            # pi_jira.ts 读这个字段，把图片作为 ImageContent 放进工具结果。
+            result["images"] = [
+                {"path": str(path), "mimeType": mime} for path, mime in images
+            ]
+        return result
     except JiraError as error:
         return {"ok": False, "error": str(error)}
 

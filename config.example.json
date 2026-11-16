@@ -52,6 +52,9 @@
   },
   "workspace_root": "${DWS_CHAT_AGENT_WORKSPACE_ROOT}",
   "worktree_root": "${DWS_CHAT_AGENT_WORKTREE_ROOT}",
+  "shell": {
+    "path_prepend": []
+  },
   "state_dir": "state",
   "task_memory": {
     "inactive_days": 2

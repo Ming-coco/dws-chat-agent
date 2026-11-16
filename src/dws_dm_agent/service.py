@@ -61,6 +61,8 @@ from .config import (
 )
 from .dashboard import AgentConfigStore, DashboardServer
 from .dws import DwsClient, _find_dws_error_code
+from .reply_guard import reply_problem
+from .mentions import mention_prefix, strip_bare_mentions
 from . import sandbox
 
 
@@ -1937,6 +1939,41 @@ class AgentService:
                 )
                 return
 
+            # 投递前先看这段正文是不是「发给联系人的话」。模型偶尔把思考
+            # 过程当正文交出来（实测整篇英文 Let me grep…，或只有一句
+            # I'll read the issue first. 就结束），那不能发出去。
+            problem = reply_problem(result.reply)
+            if problem:
+                LOG.warning(
+                    "rejected reply contact=%s reason=%s chars=%d",
+                    batch[0].contact.alias,
+                    problem,
+                    len(result.reply),
+                )
+                if attempt < max_replans - 1:
+                    # 当作「这一轮没交出最终答复」重跑一次：把原因写进
+                    # prior_attempt，让模型知道上一轮哪里不对。
+                    self._record_agent_result(
+                        batch, result, status="invalid_reply"
+                    )
+                    result.reply = None
+                    result.error = f"invalid_reply: {problem}"
+                    prior_attempt = (
+                        "上一轮交出的正文不是发给联系人的答复"
+                        f"（判定：{problem}），可能混入了思考过程或没写完。"
+                        "请重新给出完整、面向对方的中文回复。"
+                    )
+                    await asyncio.sleep(self.settings.quiet_window)
+                    continue
+                # 重算次数用尽：不能把无效正文发出去，也不能静默。
+                # 换一句如实的兜底，并把原因留在审计里。
+                result.reply = "这次没整理出可用的答复，麻烦稍后再问我一次。"
+                result.error = f"invalid_reply: {problem}"
+                LOG.warning(
+                    "invalid reply replaced with fallback contact=%s",
+                    batch[0].contact.alias,
+                )
+
             self._set_runtime(batch, "freshness", attempt=attempt + 1)
             # 回复路径不在决策点建卡：最终新鲜度检查在投递派发时进行，
             # 卡片只能在检查通过后创建（见 _dispatch_due_delivery），否则
@@ -3079,6 +3116,26 @@ class AgentService:
                 return True
 
             content = str(row["payload_text"])
+            # 投递时才知道要不要 @：投递行里存了「对方是否 @ 了我」时记下的
+            # 提问者 id。有 id 就真的 @ 回去（占位符 + 参数），没有就不 @。
+            mention_id = ""
+            with suppress(IndexError, KeyError, TypeError):
+                mention_id = str(row["mention_open_id"] or "")
+            mention_label = ""
+            with suppress(IndexError, KeyError, TypeError):
+                mention_label = str(row["mention_name"] or "")
+            # 模型手写的「@某人」不会通知任何人，留着只会让对方以为收到了
+            # 提醒。真正需要 @ 的人由下面的前缀插入。
+            content = strip_bare_mentions(content)
+            if mention_id:
+                prefix = mention_prefix(mention_id, mention_label)
+                if prefix and not content.startswith(prefix):
+                    content = prefix + content
+                LOG.info(
+                    "reply will mention sender contact=%s target=%s",
+                    contact.alias,
+                    sanitize_text(mention_label or mention_id, 40),
+                )
             message_id = ""
             card_flow_status: int | None = None
             card_biz_id = str(row["card_biz_id"] or "")
@@ -3106,12 +3163,20 @@ class AgentService:
                         sanitize_text(str(exc), 300),
                     )
                     message_id, _ = await self.dws.send(
-                        contact, content, send_uuid, retry_network=True
+                        contact,
+                        content,
+                        send_uuid,
+                        retry_network=True,
+                        at_open_dingtalk_ids=[mention_id] if mention_id else (),
                     )
                     card_flow_status = 5
             else:
                 message_id, _ = await self.dws.send(
-                    contact, content, send_uuid, retry_network=True
+                    contact,
+                    content,
+                    send_uuid,
+                    retry_network=True,
+                    at_open_dingtalk_ids=[mention_id] if mention_id else (),
                 )
             self.store.mark_delivery_sent(
                 send_uuid,

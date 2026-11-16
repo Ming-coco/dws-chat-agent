@@ -10,16 +10,49 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 
 /** 单次 issue 读取的兜底超时（毫秒）；Jira 慢时不要拖住整轮。 */
 const JIRA_TOOL_TIMEOUT_MS = 45_000;
+/** 工具结果里最多带回的截图数量，和后端 jira_tools.py 的上限保持一致。 */
+const MAX_RESULT_IMAGES = 4;
 
 function textResult(value: unknown) {
 	return {
 		content: [{ type: "text" as const, text: JSON.stringify(value) }],
 		details: {},
 	};
+}
+
+type ResultImage = { path?: string; mimeType?: string };
+
+/**
+ * 把后端给出的本地图片读成 pi 的 ImageContent。
+ *
+ * pi 的 ToolResultMessage.content 支持 (TextContent | ImageContent)[]，
+ * 截图因此可以直接进模型上下文，不需要把路径写进正文让模型自己去读文件。
+ * 任何一张读失败都只跳过这张，不能让整次工具调用失败。
+ */
+async function readResultImages(images: unknown) {
+	const payloads: { type: "image"; data: string; mimeType: string }[] = [];
+	if (!Array.isArray(images)) {
+		return payloads;
+	}
+	for (const entry of images.slice(0, MAX_RESULT_IMAGES) as ResultImage[]) {
+		const path = typeof entry?.path === "string" ? entry.path : "";
+		const mimeType = typeof entry?.mimeType === "string" ? entry.mimeType : "";
+		if (!path || !mimeType) {
+			continue;
+		}
+		try {
+			const data = await readFile(path);
+			payloads.push({ type: "image", data: data.toString("base64"), mimeType });
+		} catch {
+			// 读不到就跳过；正文里已经说明了有几张截图。
+		}
+	}
+	return payloads;
 }
 
 async function callJiraTool(request: unknown) {
@@ -92,7 +125,20 @@ const jiraIssue = defineTool({
 			tool: "jira_issue",
 			args: params,
 		});
-		return textResult(result);
+		const images = await readResultImages(
+			(result as { images?: unknown })?.images,
+		);
+		if (images.length === 0) {
+			return textResult(result);
+		}
+		// 正文照旧是那段 JSON；图片作为独立内容块跟在后面，模型两者都能看到。
+		return {
+			content: [
+				{ type: "text" as const, text: JSON.stringify(result) },
+				...images,
+			],
+			details: {},
+		};
 	},
 });
 
