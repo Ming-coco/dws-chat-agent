@@ -62,6 +62,7 @@ from .config import (
 from .dashboard import AgentConfigStore, DashboardServer
 from .dws import DwsClient, _find_dws_error_code
 from .reply_guard import reply_problem
+from .mentions import mention_prefix, strip_bare_mentions
 from . import sandbox
 
 
@@ -3115,6 +3116,26 @@ class AgentService:
                 return True
 
             content = str(row["payload_text"])
+            # 投递时才知道要不要 @：投递行里存了「对方是否 @ 了我」时记下的
+            # 提问者 id。有 id 就真的 @ 回去（占位符 + 参数），没有就不 @。
+            mention_id = ""
+            with suppress(IndexError, KeyError, TypeError):
+                mention_id = str(row["mention_open_id"] or "")
+            mention_label = ""
+            with suppress(IndexError, KeyError, TypeError):
+                mention_label = str(row["mention_name"] or "")
+            # 模型手写的「@某人」不会通知任何人，留着只会让对方以为收到了
+            # 提醒。真正需要 @ 的人由下面的前缀插入。
+            content = strip_bare_mentions(content)
+            if mention_id:
+                prefix = mention_prefix(mention_id, mention_label)
+                if prefix and not content.startswith(prefix):
+                    content = prefix + content
+                LOG.info(
+                    "reply will mention sender contact=%s target=%s",
+                    contact.alias,
+                    sanitize_text(mention_label or mention_id, 40),
+                )
             message_id = ""
             card_flow_status: int | None = None
             card_biz_id = str(row["card_biz_id"] or "")
@@ -3142,12 +3163,20 @@ class AgentService:
                         sanitize_text(str(exc), 300),
                     )
                     message_id, _ = await self.dws.send(
-                        contact, content, send_uuid, retry_network=True
+                        contact,
+                        content,
+                        send_uuid,
+                        retry_network=True,
+                        at_open_dingtalk_ids=[mention_id] if mention_id else (),
                     )
                     card_flow_status = 5
             else:
                 message_id, _ = await self.dws.send(
-                    contact, content, send_uuid, retry_network=True
+                    contact,
+                    content,
+                    send_uuid,
+                    retry_network=True,
+                    at_open_dingtalk_ids=[mention_id] if mention_id else (),
                 )
             self.store.mark_delivery_sent(
                 send_uuid,

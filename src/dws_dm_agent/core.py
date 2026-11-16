@@ -91,6 +91,9 @@ class IncomingEvent:
     # 群聊里 contact 是整个群，真正的发言人在这里；单聊留空表示就是 contact 本人。
     sender_open_dingtalk_id: str = ""
     sender_name: str = ""
+    # 这条消息是否 @ 到了本人。回复时据此决定要不要 @ 回去；控制台轮询的
+    # 历史消息不经过 @ 判断，保持默认 False。
+    mentions_self: bool = False
 
     @property
     def sender_label(self) -> str:
@@ -318,6 +321,7 @@ def parse_dws_event(
         or (contact.conversation_id if contact.is_group else f"dm:{contact.identity}")
     )
     content = _extract_content(_deep_value(payload, {"content", "text", "messageContent"}))
+    mentions_me = False
     if contact.is_group:
         # 一个订阅覆盖所有群，先按会话 id 归到登记的群，再按发言人筛选。
         if conversation_id != contact.conversation_id:
@@ -355,6 +359,9 @@ def parse_dws_event(
         created_at=parse_local_datetime(created_raw, timezone),
         sender_open_dingtalk_id=sender_id,
         sender_name=sender_name,
+        # 记下「这条是 @ 到我的」。回复时据此决定要不要 @ 回去：只 @ 我的人
+        # 才收到通知，普通提问不硬 @，避免在群里刷屏。
+        mentions_self=mentions_me,
     )
 
 
@@ -525,6 +532,11 @@ class AuditStore:
                 "last_error": "last_error TEXT NOT NULL DEFAULT ''",
                 "event_ids_json": "event_ids_json TEXT NOT NULL DEFAULT '[]'",
                 "source_received_at": "source_received_at TEXT NOT NULL DEFAULT ''",
+                # 投递时要 @ 的人。投递行是异步派发的，此时手里只有这一行，
+                # 拿不到原事件，所以把「提问者 id 与显示名」随行存下来。
+                # 只有「对方 @ 了我」时才写，普通提问保持空串。
+                "mention_open_id": "mention_open_id TEXT NOT NULL DEFAULT ''",
+                "mention_name": "mention_name TEXT NOT NULL DEFAULT ''",
             },
         }
         for table, columns in migrations.items():
@@ -640,6 +652,15 @@ class AuditStore:
         card_biz_id: str = "",
     ) -> None:
         now = datetime.now(source_event.created_at.tzinfo)
+        # 只有「对方 @ 了我」才回 @ 对方；控制台群和普通提问都不 @，
+        # 避免每条回复都红字提醒，反而像机器人在刷存在感。
+        mention_id = ""
+        mention_name = ""
+        if source_event.mentions_self and not getattr(
+            source_event.contact, "console", False
+        ):
+            mention_id = source_event.sender_open_dingtalk_id
+            mention_name = source_event.sender_name
         self.connection.execute("BEGIN IMMEDIATE")
         self.connection.execute(
             """
@@ -648,9 +669,9 @@ class AuditStore:
                 sent_at, content_sha256, session_id, card_biz_id,
                 card_flow_status, payload_text, delivery_status,
                 attempt_count, next_attempt_at, last_error, event_ids_json,
-                source_received_at
+                source_received_at, mention_open_id, mention_name
             ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, NULL, ?, 'pending',
-                      0, '', '', ?, ?)
+                      0, '', '', ?, ?, ?, ?)
             """,
             (
                 send_uuid,
@@ -663,6 +684,8 @@ class AuditStore:
                 content,
                 json.dumps(list(event_ids), ensure_ascii=False),
                 source_event.created_at.isoformat(),
+                mention_id,
+                mention_name,
             ),
         )
         self.connection.executemany(
