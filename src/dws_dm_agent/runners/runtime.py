@@ -1121,6 +1121,17 @@ class AgentRuntime:
                 # 通用名字，后续新增的内置能力都用它，避免每加一个能力
                 # 就要在部署目录里多配一个环境变量。
                 environment["DWS_AGENT_ENV_FILE"] = str(env_file)
+        if protocol == "pi-rpc" and stage.profile.options.get("e2e") is not False:
+            # 页面体检后端只传脚本路径与解释器。被测系统的地址、账号、密码
+            # 走环境变量（E2E_BASE_URL / E2E_USER / E2E_PASS），由部署方在
+            # .env 里填，不进配置、不进提示词。
+            environment["DWS_E2E_PYTHON"] = sys.executable
+            environment["DWS_E2E_SCRIPT"] = str(
+                Path(__file__).with_name("e2e_tools.py").resolve()
+            )
+            env_file = (self._config_dir / ".env").resolve()
+            if env_file.is_file():
+                environment["DWS_E2E_ENV_FILE"] = str(env_file)
         if protocol == "pi-rpc" and stage.profile.options.get("gitlab") is not False:
             # 与 jira 同样的约定：脚本路径经环境变量传，令牌由后端自己从
             # 进程环境或部署目录的 .env 读取，绝不进命令行参数或提示词。
