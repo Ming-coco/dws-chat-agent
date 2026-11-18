@@ -27,6 +27,12 @@ ZHAOYIN = {
 }
 
 
+FALLBACK = {
+    "name": "技术产品架构V2.0",
+    "targetType": "PRODUCT",
+    "targetId": "77ba332d-b8bc-31b2-a030-55cd52016963",
+}
+
 def base_cfg(**overrides) -> dict:
     cfg = {
         "default_daily_hours": 7.5,
@@ -87,7 +93,10 @@ def eligible_targets(extra: list | None = None) -> list:
         {"targetType": m["targetType"], "id": m["targetId"], "name": m["name"]}
         for m in (SHENZHEN, ZHAOYIN)
     ]
-    return items + list(extra or [])
+    for m in extra or []:
+        items.append({"targetType": m["targetType"],
+                      "id": m.get("id") or m.get("targetId"), "name": m.get("name")})
+    return items
 
 
 class HolidayTableTests(unittest.TestCase):
@@ -407,9 +416,10 @@ class ContentQualityTests(unittest.TestCase):
         text = W.summarize("深圳租赁", self.ev({"repo-a": [
             "能跑", "韩哥你", "On dev: user-local-application.yml",
             "index on dev: c7af254", "Merge branch 'x' into 'dev'",
+            "untracked files on feat/x: 1b3bf6ed1",
             "[db] 修复 PostgreSQL 方言兼容问题",
         ]}), base_cfg())
-        for junk in ("能跑", "韩哥你", "On dev:", "index on", "Merge"):
+        for junk in ("能跑", "韩哥你", "On dev:", "index on", "Merge", "untracked files on"):
             self.assertNotIn(junk, text)
         self.assertIn("PostgreSQL 方言兼容", text)
 
@@ -472,7 +482,8 @@ class UncommittedDayTests(unittest.TestCase):
             with patch.object(W, "file_activity", return_value={"files": 30, "samples": []}):
                 got = W.collect_day(cfg, datetime(2026, 11, 9), [], notes)
             self.assertEqual(got, {})
-            self.assertEqual(notes, ["项目甲（30 个文件）"])
+            # 没匹配到项目的新目录要标出来，否则「动态发现」等于白做
+            self.assertEqual(notes, ["新目录 项目甲（30 个文件）"])
 
 
 class ParseWorklogDocTests(unittest.TestCase):
@@ -791,6 +802,79 @@ class CommitHighlightTests(unittest.TestCase):
         self.assertIn("修复方言兼容", W.summarize("招银金租", ev, base_cfg()))
 
 
+class MeetingAndSideNoteTests(unittest.TestCase):
+    """开会和升级内部工具也是一天的活，不能因为「没提交代码」就整天跳过。"""
+
+    def meeting(self, title="周例会", hours=1.0, room="千岛湖"):
+        return {"title": title, "start": "2026-11-16T16:00:00+08:00",
+                "end": "2026-11-16T17:00:00+08:00", "hours": hours,
+                "all_day": False, "is_leave": False, "room": room, "attendees": 9, "organizer": ""}
+
+    def test_meeting_is_summarised_with_time_and_room(self):
+        text = W.summarize_meetings([self.meeting()])
+        self.assertIn("周例会", text)
+        self.assertIn("16:00–17:00", text)
+        self.assertIn("千岛湖", text)
+
+    def test_meetings_are_capped(self):
+        many = [self.meeting("会%d" % i, hours=1.0 - i * 0.1) for i in range(6)]
+        text = W.summarize_meetings(many, max_items=2)
+        self.assertLessEqual(text.count("（"), 2)
+
+    def test_skip_directory_commits_become_a_short_note(self):
+        ev = {"内部工具": {
+            "mapping": {"name": "内部工具", "targetType": "SKIP"},
+            "commits": 3,
+            "git": [{"repo": "dws", "commits": 3, "others": [],
+                     "subjects": [], "details": [
+                         {"subject": "feat(mentions): mention the sender back", "body": ""},
+                         {"subject": "fix(chat): 群消息解析", "body": ""},
+                         {"subject": "Merge branch 'x'", "body": ""},
+                     ]}],
+        }}
+        notes = W.skipped_notes(ev, base_cfg())
+        self.assertEqual(len(notes), 1)
+        self.assertIn("内部工具", notes[0])
+        self.assertIn("mention the sender back", notes[0])
+        self.assertNotIn("Merge", notes[0])
+
+    def test_skip_directory_without_commits_adds_nothing(self):
+        ev = {"内部工具": {"mapping": {"name": "内部工具", "targetType": "SKIP"},
+                           "commits": 0, "git": []}}
+        self.assertEqual(W.skipped_notes(ev, base_cfg()), [])
+
+    def test_day_with_only_a_meeting_still_produces_a_draft(self):
+        client = FakeClient(Path("."), eligible_targets(extra=[FALLBACK]))
+        cfg = base_cfg(fallback_target={"name": "兜底产品", "targetType": "PRODUCT",
+                                        "targetId": FALLBACK["targetId"]},
+                       mappings=[])
+        side = {"mapping": {"name": "内部工具", "targetType": "SKIP"}, "commits": 0, "git": []}
+        with patch.object(W, "calendar_events", return_value=[self.meeting()]), \
+                patch.object(W, "chat_activity", return_value=[]), \
+                patch.object(W, "collect_day", return_value={"内部工具": side}):
+            result = W.fill_day(client, cfg, date(2026, 11, 16), dry_run=True)
+        self.assertEqual(result["status"], "dry_run")
+        self.assertIn("周例会", result["entries"][0]["content"])
+        self.assertEqual(result["totalHours"], 7.5)
+
+    def test_meeting_and_chat_both_land_in_a_normal_day(self):
+        client = FakeClient(Path("."), eligible_targets())
+        ev = {"客户 B": {"mapping": SHENZHEN, "git": [], "commits": 1,
+                         "files": {"files": 0, "samples": []},
+                         "docs": [{"topic": "做了一件事", "mainline": "", "headlines": [],
+                                   "points": [], "content": "做了一件事。"}], "dirs": []}}
+        chats = [{"time": "10:00", "conversation": "客户 B-群", "single": False,
+                  "text": "API_ZD_URL 要改", "project": SHENZHEN["name"], "group": "客户 B-群"}]
+        with patch.object(W, "calendar_events", return_value=[self.meeting("客户 B 评审")]), \
+                patch.object(W, "chat_activity", return_value=chats), \
+                patch.object(W, "collect_day", return_value=ev):
+            result = W.fill_day(client, base_cfg(), date(2026, 11, 16), dry_run=True)
+        content = result["entries"][0]["content"]
+        self.assertIn("做了一件事", content)
+        self.assertIn("参会", content)
+        self.assertIn("沟通与协助", content)
+
+
 class DiscoveryTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -853,13 +937,6 @@ class DiscoveryTests(unittest.TestCase):
             {"targetType": "PROJECT", "id": "b", "customerName": "客户 A金融租赁有限公司"},
         ]
         self.assertEqual(W.auto_match("客户 A", items, base_cfg())["targetId"], "b")
-
-
-FALLBACK = {
-    "name": "技术产品架构V2.0",
-    "targetType": "PRODUCT",
-    "targetId": "77ba332d-b8bc-31b2-a030-55cd52016963",
-}
 
 
 class UnmappedDirectoryTests(unittest.TestCase):

@@ -1,0 +1,49 @@
+{
+  "name": "${E2E_NAME}",
+  "baseUrl": "${E2E_BASE_URL}",
+
+  "browser": {
+    "headless": true,
+    "viewport": { "width": 1600, "height": 1000 }
+  },
+
+  "login": {
+    "url": "/login",
+    "username": "${E2E_USER}",
+    "password": "${E2E_PASS}",
+    "successUrlNotContains": "/login"
+  },
+
+  "discover": {
+    "mode": "auto",
+    "maxDepth": 2,
+    "excludeNames": ["展开", "收起", "折叠"]
+  },
+
+  "detect": {
+    "consoleErrors": true,
+    "pageErrors": true,
+    "httpStatusMin": 400,
+    "apiKeyword": "/api/",
+    "minVisibleElements": 5,
+    "minBodyText": 20,
+    "pageTimeoutMs": 30000,
+    "settleMs": 2500
+  },
+
+  "ignore": {
+    "consolePatterns": [
+      "favicon",
+      "ResizeObserver loop",
+      "hm.baidu.com",
+      "Google Analytics"
+    ],
+    "apiPatterns": []
+  },
+
+  "logs": {
+    "enabled": false,
+    "via": "none",
+    "containerMap": {}
+  }
+}
