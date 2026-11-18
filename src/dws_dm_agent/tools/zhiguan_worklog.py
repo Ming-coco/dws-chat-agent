@@ -901,7 +901,10 @@ def collect_day(cfg: dict, day: datetime, eligible: list | None = None, notes: l
         # （切分支、批量解压、跑工具都会这样）。这种痕迹说不清做了什么，不写进工时。
         if not git_bits and not docs:
             if files["files"] >= min_files:
-                touched_only.append("%s（%d 个文件）" % ((mapping or {}).get("name") or name, files["files"]))
+                label = (mapping or {}).get("name") or name
+                # 没匹配到项目的新目录要单独标出来：这是「动态发现」最该让人知道的情况
+                mark = "新目录 " if mapping is None else ""
+                touched_only.append("%s%s（%d 个文件）" % (mark, label, files["files"]))
             continue
 
         key = (mapping or {}).get("name") or name
@@ -952,9 +955,12 @@ def match_mapping_for_dir(dirname: str, cfg: dict):
 
 
 SKIP_SUBJECT = re.compile(r"^(merge|Merged notes|Revert|chore: release)", re.IGNORECASE)
-# 这些是提交时随手写的占位话，或者 git stash 自己生成的行，写进工时没有任何信息量
+# 这些是提交时随手写的占位话，或者 git stash 自己生成的行，写进工时没有任何信息量。
+# stash 会伪装成提交：`On dev: 标题`、`index on dev: abc123 标题`、
+# `untracked files on dev: abc123 标题`，三种都要挡掉。
 JUNK_SUBJECT = re.compile(
-    r"^(on\s+\S+\s*:|index on\s|wip$|tmp$|临时|测试一下|能跑|改一下|小改|无$)",
+    r"^((on|index on|untracked files? on|wip on)\s+\S+\s*:"
+    r"|wip$|tmp$|临时|测试一下|能跑|改一下|小改|无$)",
     re.IGNORECASE,
 )
 JUNK_WORDS = {"能跑", "好了", "提交", "更新", "修改", "改动", "保存", "test", "tmp", "wip", "update", "fix"}
@@ -1171,6 +1177,55 @@ def trim_content(text: str, cfg: dict) -> str:
     if cut >= limit // 3:
         return head[: cut + 1]
     return head.rstrip("，,、；;:： ") + "。"
+
+
+def summarize_meetings(meetings: list, max_items: int = 3, max_len: int = 160) -> str:
+    """把当天的会议压成一句。会议是「参会」，不占用代码工作量的说法。"""
+    if not meetings:
+        return ""
+    picked = sorted(meetings, key=lambda e: -e["hours"])[:max_items]
+    items = []
+    for e in picked:
+        start = (e.get("start") or "")[11:16]
+        end = (e.get("end") or "")[11:16]
+        span = "%s–%s" % (start, end) if start and end else ""
+        tail = "，".join(x for x in (span, "%g 小时" % e["hours"] if e.get("hours") else "",
+                                     e.get("room") or "") if x)
+        items.append("%s（%s）" % (e["title"], tail) if tail else e["title"])
+    return ("参会：%s。" % "；".join(items))[:max_len]
+
+
+def skipped_notes(evidence: dict, cfg: dict) -> list:
+    """SKIP 目录（内部工具等）当天真正提交了什么，压缩成一两句话。
+
+    这些不占工时条目，但升级工具、写脚本也是活，丢掉就变成「今天没干活」。
+    篇幅要压住：每个目录最多两句，避免喧宾夺主。
+    """
+    notes = []
+    for name, ev in (evidence or {}).items():
+        m = ev.get("mapping") or {}
+        if m.get("targetType") != "SKIP":
+            continue
+        if not ev.get("commits"):
+            continue
+        subjects, seen = [], set()
+        for g in ev["git"]:
+            for item in (g.get("details") or [{"subject": s, "body": ""} for s in g["subjects"]]):
+                s = item["subject"]
+                if SKIP_SUBJECT.match(s) or not useful_subject(s):
+                    continue
+                c = clean_subject(s)
+                if c.lower() in seen:
+                    continue
+                seen.add(c.lower())
+                subjects.append(c)
+                if len(subjects) >= 2:
+                    break
+            if len(subjects) >= 2:
+                break
+        if subjects:
+            notes.append("%s：%s。" % (name, "；".join(subjects)))
+    return notes
 
 
 def summarize(mapping_name: str, ev: dict, cfg: dict) -> str:
@@ -1465,21 +1520,35 @@ def fill_day(client: McpClient, cfg: dict, day: date, dry_run: bool = False, for
     touched_only = []
     evidence = collect_day(cfg, day_dt, eligible_list, touched_only)
     fallback = cfg.get("fallback_target") or {}
-    if not evidence and chats and fallback.get("targetId"):
-        # 一整天只有聊天记录（协助排查、答疑这类），也要能出一份工时
+
+    # 配置为 SKIP 的目录（内部工具、调研归档）不单独占工时条目，但它们的提交不能凭空消失：
+    # 内部工具升级这一类也是干活，压缩成一小段并入当天的内容里。
+    side_notes = skipped_notes(evidence, cfg)
+
+    if not evidence and (chats or meetings or side_notes):
+        # 一整天没有代码提交，但开了会、做了协助、或者升级了内部工具，同样是一天的活
         target = {"name": fallback.get("name") or "兜底项目",
                   "targetType": fallback.get("targetType") or "PRODUCT",
                   "targetId": fallback.get("targetId"), "fallback": True}
-        note = summarize_chat(chats, max_items=int(
-            (cfg.get("chat") or {}).get("max_items", 3)))
-        evidence = {target["name"]: {
-            "mapping": target, "git": [], "commits": 0,
-            "files": {"files": 0, "samples": []},
-            "docs": [{"topic": "沟通协助", "mainline": "", "headlines": [], "points": [],
-                      "content": note}],
-            "dirs": [],
-        }}
-        log("[chat] 当天只有聊天记录，按「沟通协助」写到 %s" % target["name"])
+        brief = []
+        if meetings:
+            brief.append(summarize_meetings(meetings))
+        if chats:
+            brief.append(summarize_chat(chats, max_items=int(
+                (cfg.get("chat") or {}).get("max_items", 3))))
+        brief.extend(side_notes)
+        note = " ".join(b for b in brief if b)
+        if note:
+            evidence = {target["name"]: {
+                "mapping": target if target.get("targetId") else None,
+                "git": [], "commits": 0,
+                "files": {"files": 0, "samples": []},
+                "docs": [{"topic": "", "mainline": "", "headlines": [], "points": [],
+                          "content": note}],
+                "dirs": [],
+            }}
+            log("[fallback] 当天没有代码提交，按会议/协助/工具升级写到 %s" % target["name"])
+            side_notes = []
     if not evidence:
         result = {"date": day.isoformat(), "status": "skipped_no_activity"}
         if touched_only:
@@ -1515,6 +1584,34 @@ def fill_day(client: McpClient, cfg: dict, day: date, dry_run: bool = False, for
         log("[unmapped] %s 没有对应项目，整体挂到兜底项目 %s" % ("、".join(unmapped), fallback_name))
     elif unmapped:
         log("[unmapped] %s 有工作痕迹但没有对应项目，工时并入当天主项目" % "、".join(unmapped))
+
+    if not active and fallback.get("targetId") and (meetings or chats or side_notes):
+        # 只有 SKIP 目录在动（改了内部工具），外加开过会/协助过人：
+        # 这也是一天的活，按兜底项目出一条，内容就是会议 + 协助 + 工具升级
+        fallback_name = fallback.get("name") or "兜底项目"
+        brief = []
+        if meetings:
+            brief.append(summarize_meetings(meetings))
+        if chats:
+            brief.append(summarize_chat(chats, max_items=int(
+                (cfg.get("chat") or {}).get("max_items", 3))))
+        brief.extend(side_notes)
+        note = " ".join(b for b in brief if b)
+        if note:
+            active = {fallback_name: {
+                "mapping": {"name": fallback_name,
+                            "targetType": fallback.get("targetType") or "PRODUCT",
+                            "targetId": fallback.get("targetId"), "fallback": True},
+                "git": [], "commits": 0,
+                "files": {"files": 0, "samples": []},
+                "docs": [{"topic": "", "mainline": "", "headlines": [], "points": [],
+                          "content": note}],
+                "dirs": [],
+            }}
+            side_notes = []
+            meetings = []
+            chats = []
+            log("[fallback] 当天只有工具升级/会议/协助，写到 %s" % fallback_name)
 
     if not active:
         return {
@@ -1618,7 +1715,7 @@ def fill_day(client: McpClient, cfg: dict, day: date, dry_run: bool = False, for
             gists = [best_line([{"text": t}]) for t in lines]
             said = "；".join(dict.fromkeys(g for g in gists if g))
             if said:
-                target["content"] = ("%s 沟通协助：%s。" % (target["content"], said))[
+                target["content"] = ("%s 沟通与协助：%s。" % (target["content"], said))[
                     : int(cfg.get("max_content_len", 1800))
                 ]
                 log("[chat] %d 条沟通写入 %s" % (len(lines), target["targetId"]))
@@ -1632,6 +1729,14 @@ def fill_day(client: McpClient, cfg: dict, day: date, dry_run: bool = False, for
                     : int(cfg.get("max_content_len", 1800))
                 ]
                 log("[chat] 剩余 %d 条沟通写入 %s" % (len(unassigned), biggest["targetId"]))
+
+    # 内部工具等 SKIP 目录的提交：压成一小段挂在最重的那条上，不额外占条目
+    if side_notes:
+        biggest = max(entries, key=lambda e: e["hours"] or 0)
+        biggest["content"] = ("%s %s" % (biggest["content"], " ".join(side_notes)))[
+            : int(cfg.get("max_content_len", 1800))
+        ]
+        log("[skip] %s 写入 %s" % ("；".join(side_notes), biggest["targetId"]))
 
     total = round(sum(e["hours"] or 0 for e in entries), 2)
     result = {
