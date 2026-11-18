@@ -17,7 +17,7 @@ from .browser import BrowserSession, PageSignal, SignalCollector
 from .config import E2EConfig
 from .detect import FAIL, PASS, WARN, Verdict, judge
 from .discover import MenuNode
-from .loading import wait_until_ready
+from .loading import wait_out_empty_state, wait_until_ready
 
 
 @dataclass
@@ -137,8 +137,21 @@ def visit(
     ready_state = wait_until_ready(page, config.detect.settle_ms)
 
     signal = collector.snapshot(url)
+    # 只有「遮罩一直不消失」才当加载异常；「稳定后又刷新」页面内容已经
+    # 渲染过一次，不算问题，最多在详情里提一句。
     signal.load_timeout = load_timeout or ready_state == "loading_stuck"
     signal.still_loading = ready_state == "loading_stuck"
+    signal.settled_then_loading = ready_state == "settled_then_loading"
+
+    # 停在空状态时再观察一下：遮罩消失只说明上一轮加载结束，
+    # 不等于数据已经到位。等到了就重新采样，避免把"还没来"当成"没有"。
+    if _looks_empty(signal) and not signal.still_loading:
+        if wait_out_empty_state(page):
+            ready_state = wait_until_ready(page, config.detect.settle_ms)
+            signal = collector.snapshot(url)
+            signal.load_timeout = load_timeout or ready_state == "loading_stuck"
+            signal.still_loading = ready_state == "loading_stuck"
+            signal.settled_then_loading = ready_state == "settled_then_loading"
 
     if shot_dir is not None:
         screenshot = shot_dir / f"{_safe_name(name)}.png"
@@ -159,6 +172,11 @@ def visit(
         verdict=verdict,
         duration_ms=int((time.time() - started) * 1000),
     )
+
+
+def _looks_empty(signal: PageSignal) -> bool:
+    """页面是否停在"看起来没数据"的状态。"""
+    return signal.empty_hint or (signal.has_table and signal.table_rows == 0)
 
 
 def _maybe_fetch_logs(config: E2EConfig, url: str) -> str:
