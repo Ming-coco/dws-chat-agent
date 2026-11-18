@@ -1,6 +1,6 @@
 """单元测试：完整路径拼接。
 
-真实数据来自江门 UAT 的菜单接口，路径规则来自实测（哪些能打开、哪些 404）。
+真实数据来自实测环境 的菜单接口，路径规则来自实测（哪些能打开、哪些 404）。
 """
 
 import sys
@@ -13,7 +13,7 @@ from e2e_runner.discover import _build_nodes, _join_path
 
 def test_join_path() -> int:
     cases = [
-        # 江门实测：一级 url + 叶子 url
+        # 实测：一级 url + 叶子 url
         ("/mine", "/collections/index", "/mine/collections/index", "关注企业"),
         ("/mine", "/watch-list", "/mine/watch-list", "监控企业"),
         ("/mine", "/myList/index", "/mine/myList/index", "关注名单"),

@@ -6,13 +6,13 @@
 ## 用法
 
 ```bash
-export E2E_BASE_URL=http://10.1.3.84:8080    # 被测系统地址
+export E2E_BASE_URL=https://webapp.example.com    # 被测系统地址
 export E2E_USER=xxx                          # 账号
 export E2E_PASS=xxx                          # 密码
 
-python -m e2e_runner discover --config jiangmen-uat   # 发现菜单
-python -m e2e_runner run      --config jiangmen-uat   # 跑体检
-python -m e2e_runner run      --config jiangmen-uat --json   # 给 agent 用
+python -m e2e_runner discover --config example-webapp   # 发现菜单
+python -m e2e_runner run      --config example-webapp   # 跑体检
+python -m e2e_runner run      --config example-webapp --json   # 给 agent 用
 ```
 
 退出码：`0` 通过 / `1` 有失败 / `2` 配置错误 / `3` 登录失败 / `4` 发现失败 / `5` 需人工确认
@@ -41,7 +41,7 @@ python -m e2e_runner run      --config jiangmen-uat --json   # 给 agent 用
 自动从登录后的所有 XHR 响应里找「像菜单」的 JSON：有名称字段、有路径
 字段、有层级。找到多个候选时按「带路径的节点数」打分挑最像的。
 
-实测江门 UAT 一次就找到了 `getUserPermission`，10 个一级菜单、31 个带路径节点。
+实测实测环境 一次就找到了 `getUserPermission`，10 个一级菜单、31 个带路径节点。
 
 ## 路径拼接的坑
 
@@ -74,7 +74,7 @@ this.$router.push(menu.href + this.activeMenu.submenu)
 
 ## 表格行数不能只看框架类名
 
-Element 用 `.el-table__row`，Ant 用 `.ant-table-row`，但有的系统（江门）
+Element 用 `.el-table__row`，Ant 用 `.ant-table-row`，但有的系统（实测遇到）
 `tr` 直接挂在 `table` 下没有 tbody，两个类名都匹配不到。
 
 退回到数「所有含 td 的非表头 tr」。
@@ -101,7 +101,7 @@ src/e2e_runner/
 ├── logs.py       远程抓容器日志（待接入）
 └── report.py     报告输出
 configs/
-└── jiangmen-uat.json
+└── example-webapp.json
 ```
 
 ## 与 agent 的关系

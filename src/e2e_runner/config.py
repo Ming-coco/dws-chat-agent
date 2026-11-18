@@ -214,13 +214,29 @@ def load_config(path: Path) -> E2EConfig:
 
 
 def find_browser() -> str:
-    """找本机已安装的浏览器，避免下载 300MB 的 Chromium。"""
+    """找本机已安装的浏览器。
+
+    不硬编码单一路径：不同机器装的浏览器不一样（Edge / Chrome / 绿色版 /
+    32 位装在不同目录）。按常见位置依次探测，找到第一个可用的。
+
+    配置里显式指定 browser.executablePath 时不会走到这里。
+    """
     candidates = [
+        # Edge
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        # Chrome
         os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        # Chromium
+        os.path.expandvars(r"%LOCALAPPDATA%\Chromium\Application\chrome.exe"),
     ]
+    # 环境变量优先，便于在 CI 或不同机器上覆盖
+    override = os.environ.get("E2E_BROWSER_PATH", "").strip()
+    if override:
+        candidates.insert(0, override)
+
     for candidate in candidates:
         if candidate and Path(candidate).is_file():
             return candidate

@@ -1,8 +1,8 @@
 """命令行入口。
 
-  python -m e2e_runner discover --config jiangmen-uat        # 发现菜单
-  python -m e2e_runner run      --config jiangmen-uat        # 跑体检
-  python -m e2e_runner run      --config jiangmen-uat --json # 输出 JSON 给 agent 用
+  python -m e2e_runner discover --config example-webapp        # 发现菜单
+  python -m e2e_runner run      --config example-webapp        # 跑体检
+  python -m e2e_runner run      --config example-webapp --json # 输出 JSON 给 agent 用
 
 退出码：0 通过 / 1 有失败 / 2 配置错误 / 3 登录失败 / 4 菜单发现失败
 """

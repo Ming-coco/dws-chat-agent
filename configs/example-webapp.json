@@ -1,9 +1,8 @@
 {
-  "name": "江门对公客户画像平台",
+  "name": "${E2E_NAME}",
   "baseUrl": "${E2E_BASE_URL}",
 
   "browser": {
-    "executablePath": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
     "headless": true,
     "viewport": { "width": 1600, "height": 1000 }
   },
@@ -39,11 +38,7 @@
       "hm.baidu.com",
       "Google Analytics"
     ],
-    "apiPatterns": [
-      "/pageFileExportRecord",
-      "/getEntCollectionStatus",
-      "/getMessageCount"
-    ]
+    "apiPatterns": []
   },
 
   "logs": {

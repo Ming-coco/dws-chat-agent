@@ -275,7 +275,7 @@ def _first_str(item: dict, keys: tuple[str, ...]) -> str:
 def _join_path(parent: str, child: str) -> str:
     """拼出可访问的完整路径。
 
-    实测结论（江门 UAT 验证）：完整路径 = 一级菜单 url + 叶子菜单 url。
+    实测结论（实测环境 验证）：完整路径 = 一级菜单 url + 叶子菜单 url。
     中间的层级不参与拼接——因为前端是这么拼的：
 
         this.$router.push(menu.href + this.activeMenu.submenu)

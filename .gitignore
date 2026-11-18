@@ -241,3 +241,9 @@ tmp*/
 # local agent scratch dirs
 .dsh-tmp-inspect/
 .dsh-session-repair-*/
+
+# E2E 真实系统配置不进仓库：只有 example-webapp.json 是示例
+configs/*.json
+!configs/example-webapp.json
+# E2E 运行产物
+configs/*.menus.json
