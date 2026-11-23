@@ -42,8 +42,8 @@ def main() -> int:
     args = request.get("args") or {}
 
     try:
-        if tool == "e2e_list_configs":
-            _emit(_list_configs())
+        if tool in ("e2e_projects", "e2e_list_configs"):
+            _emit(_list_projects())
         elif tool == "e2e_discover":
             _emit(_discover(args))
         elif tool == "e2e_run":
@@ -60,65 +60,73 @@ def _emit(payload: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
-def _list_configs() -> dict[str, Any]:
-    """列出可用的测试配置。
+def _project_store():
+    """项目配置存储。state 目录由服务通过环境变量告知。"""
+    state_dir = os.environ.get("DWS_STATE_DIR", "").strip()
+    if not state_dir:
+        return None
+    sys.path.insert(0, str(SRC))
+    from dws_dm_agent.project_config import ProjectStore
 
-    真实配置被 gitignore，所以这里读的是本机实际存在的文件，
-    不硬编码任何系统名。
+    return ProjectStore(Path(state_dir) / "projects")
+
+
+def _list_projects() -> dict[str, Any]:
+    """列出配好了前端地址的项目。
+
+    只列有前端地址的：没有地址就没法测，列出来只会让人白点一次。
     """
-    configs = []
-    if CONFIG_DIR.is_dir():
-        for path in sorted(CONFIG_DIR.glob("*.json")):
-            if path.name.startswith("example-"):
-                continue
-            name = _read_config_name(path)
-            configs.append({"id": path.stem, "name": name or path.stem})
+    store = _project_store()
+    if store is None:
+        return {"error": "服务没有提供 state 目录，无法读取项目配置"}
+
+    projects: list[dict[str, Any]] = []
+    for name in store.list_configured():
+        try:
+            config = store.load(name)
+        except Exception:  # noqa: BLE001
+            continue
+        if not config.frontend:
+            continue
+        projects.append(
+            {
+                "project": name,
+                "frontend": config.frontend,
+                "loginUser": config.login_user,
+                "note": config.note,
+            }
+        )
+
     return {
-        "configs": configs,
+        "projects": projects,
         "hint": (
-            "用 id 调 e2e_run。没有列出任何配置时，说明本机还没建真实配置；"
-            "照 configs/example-webapp.json 的格式建一份，值用环境变量引用。"
+            "用 project 字段调 e2e_run。列表为空说明还没有项目配好前端地址，"
+            "需要到「设置 → 项目配置」里填写。"
         ),
     }
 
 
-def _read_config_name(path: Path) -> str:
-    """读配置里的显示名，顺便展开 ${VAR}。
-
-    配置里 name 常写成 ${E2E_NAME}，直接读会漏出变量名，
-    对使用者没有任何意义。
-    """
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-        raw = str(data.get("name") or "")
-    except Exception:  # noqa: BLE001
-        return ""
-
-    if not raw:
-        return ""
-
-    def replace(match: "re.Match[str]") -> str:
-        return os.environ.get(match.group(1), "") or ""
-
-    import re
-
-    expanded = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", replace, raw).strip()
-    return expanded
-
-
 def _discover(args: dict[str, Any]) -> dict[str, Any]:
     """发现菜单。返回结构化的候选与结论，便于 agent 决定是否需要问人。"""
-    config_id = str(args.get("config") or "").strip()
-    if not config_id:
-        return {"error": "config is required"}
+    project = str(args.get("project") or "").strip()
+    if not project:
+        return _missing_project()
 
-    payload = _invoke(["discover", "--config", config_id, "--json"])
+    resolved = _resolve_project(project)
+    if isinstance(resolved, dict):
+        return resolved
+
+    config, environment = resolved
+    payload = _invoke(
+        ["discover", "--config", str(config), "--json"], environment=environment
+    )
     # CLI 正常输出里也有 error 键（空串），只判断键存在会让转换永远走不到
     if payload.get("error"):
         return payload
 
     status = str(payload.get("status") or "")
     result: dict[str, Any] = {
+        "project": project,
         "status": status,
         "message": payload.get("message", ""),
         "menuCount": payload.get("menuCount", 0),
@@ -150,9 +158,9 @@ def _run(args: dict[str, Any]) -> dict[str, Any]:
     mode 只接受 smoke。full 会填表单、点查询，可能触发导出或写数据，
     必须由人明确要求后从命令行跑，不走 agent 自动触发。
     """
-    config_id = str(args.get("config") or "").strip()
-    if not config_id:
-        return {"error": "config is required"}
+    project = str(args.get("project") or "").strip()
+    if not project:
+        return _missing_project()
 
     mode = str(args.get("mode") or "smoke").strip()
     if mode != "smoke":
@@ -164,15 +172,21 @@ def _run(args: dict[str, Any]) -> dict[str, Any]:
             ),
         }
 
-    command = ["run", "--config", config_id, "--json"]
+    resolved = _resolve_project(project)
+    if isinstance(resolved, dict):
+        return resolved
+
+    config, environment = resolved
+    command = ["run", "--config", str(config), "--json"]
     only = str(args.get("only") or "").strip()
     if only:
         command.extend(["--only", only])
 
-    payload = _invoke(command)
+    payload = _invoke(command, environment=environment)
     # 注意：CLI 正常输出里也有 "error" 键（值通常是空串），
     # 不能只判断键存在，否则转换逻辑永远走不到。
     if payload.get("error"):
+        payload.setdefault("project", project)
         return payload
 
     summary = payload.get("summary") or {}
@@ -195,6 +209,7 @@ def _run(args: dict[str, Any]) -> dict[str, Any]:
     ]
 
     return {
+        "project": project,
         "overall": payload.get("overall", ""),
         "menuSource": payload.get("menuSource", ""),
         "durationMs": payload.get("durationMs", 0),
@@ -208,6 +223,117 @@ def _run(args: dict[str, Any]) -> dict[str, Any]:
             "回复时只讲结论和问题页，不要逐页罗列通过的页面。"
         ),
     }
+
+
+def _missing_project() -> dict[str, Any]:
+    """没给项目时，把配好的项目列出来让 agent 问一句。"""
+    listing = _list_projects()
+    projects = [item["project"] for item in listing.get("projects") or []]
+    if not projects:
+        return {
+            "error": "还没有项目配置",
+            "hint": (
+                "需要先在「设置 → 项目配置」里填前端地址和登录账号，"
+                "然后再来跑测试。"
+            ),
+        }
+    if len(projects) == 1:
+        return {
+            "error": "missing project",
+            "hint": f"直接传 project=\"{projects[0]}\" 重试即可。",
+            "available": projects,
+        }
+    return {
+        "error": "missing project",
+        "hint": "有多个项目可测，需要问清楚测哪一个，然后带 project 参数重试。",
+        "available": projects,
+    }
+
+
+def _resolve_project(project: str) -> tuple[Path, dict[str, str]] | dict[str, Any]:
+    """把项目名解析成一份临时 e2e 配置 + 运行环境变量。
+
+    返回 (配置文件路径, 环境变量) 表示成功；返回 dict 表示失败，
+    内容直接回给模型。
+    """
+    store = _project_store()
+    if store is None:
+        return {"error": "服务没有提供 state 目录，无法读取项目配置"}
+
+    if not store.exists(project):
+        listing = _list_projects()
+        return {
+            "error": f"项目 {project} 还没有配置",
+            "hint": "到「设置 → 项目配置」里选这个项目填好前端地址和登录账号。",
+            "configured": [
+                item["project"] for item in listing.get("projects") or []
+            ],
+        }
+
+    config = store.load(project)
+    if not config.frontend:
+        return {
+            "error": f"项目 {project} 没填前端地址",
+            "hint": "前端地址是必填项，去「设置 → 项目配置」补上。",
+        }
+
+    if not config.login_user or not config.login_password:
+        return {
+            "error": f"项目 {project} 缺少登录账号或密码",
+            "hint": "页面测试需要登录，去「设置 → 项目配置」补上登录账号和密码。",
+        }
+
+    # 生成一份临时配置给 e2e_runner 用。账号密码走环境变量，
+    # 不落盘——配置文件里只写 ${VAR} 引用。
+    runtime_dir = ROOT / "build" / "e2e-runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    config_path = runtime_dir / f"project-{_safe_name(project)}.json"
+
+    payload = {
+        "name": project,
+        "baseUrl": "${E2E_BASE_URL}",
+        "browser": {"headless": True, "viewport": {"width": 1600, "height": 1000}},
+        "login": {
+            "username": "${E2E_USER}",
+            "password": "${E2E_PASS}",
+            "successUrlNotContains": "/login",
+        },
+        "discover": {"mode": "auto", "maxDepth": 2},
+        "detect": {
+            "consoleErrors": True,
+            "pageErrors": True,
+            "httpStatusMin": 400,
+            "apiKeyword": "/api/",
+            "minVisibleElements": 5,
+            "minBodyText": 20,
+            "pageTimeoutMs": 30000,
+            "settleMs": 2500,
+        },
+        "ignore": {
+            "consolePatterns": ["favicon", "ResizeObserver loop", "hm.baidu.com"],
+            "apiPatterns": [],
+        },
+        "logs": {"enabled": False},
+    }
+    config_path.write_text(
+        __import__("json").dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    environment = {
+        "E2E_BASE_URL": config.frontend,
+        "E2E_USER": config.login_user,
+        "E2E_PASS": config.login_password,
+    }
+    return config_path, environment
+
+
+def _safe_name(name: str) -> str:
+    """项目名转成可做文件名的形式。"""
+    keep = "".join(
+        char if (char.isalnum() or char in "-_") else "_" for char in name
+    )
+    return keep.strip("_") or "project"
 
 
 def _flatten_menu_names(nodes: list[dict[str, Any]], prefix: str = "") -> list[str]:
@@ -241,13 +367,20 @@ def _flatten_menu_names(nodes: list[dict[str, Any]], prefix: str = "") -> list[s
     return names
 
 
-def _invoke(command: list[str]) -> dict[str, Any]:
-    """调用 e2e_runner CLI，解析它输出的 JSON。"""
-    environment = dict(os.environ)
-    environment["PYTHONPATH"] = str(SRC)
-    environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    environment["PYTHONIOENCODING"] = "utf-8"
-    environment.update(_env_file_values())
+def _invoke(
+    command: list[str], environment: dict[str, str] | None = None
+) -> dict[str, Any]:
+    """调用 e2e_runner CLI，解析它输出的 JSON。
+
+    environment 里带着被测系统的地址和账号，由调用方从项目配置里取。
+    不再读全局 .env：一台机器上会有多套系统，全局变量只能容一套。
+    """
+    merged = dict(os.environ)
+    merged["PYTHONPATH"] = str(SRC)
+    merged["PYTHONDONTWRITEBYTECODE"] = "1"
+    merged["PYTHONIOENCODING"] = "utf-8"
+    if environment:
+        merged.update(environment)
 
     try:
         completed = subprocess.run(
@@ -257,7 +390,7 @@ def _invoke(command: list[str]) -> dict[str, Any]:
             encoding="utf-8",
             errors="replace",
             timeout=TIMEOUT_SECONDS,
-            env=environment,
+            env=merged,
             cwd=str(ROOT),
         )
     except subprocess.TimeoutExpired:
@@ -287,41 +420,8 @@ def _invoke(command: list[str]) -> dict[str, Any]:
         }
 
 
-def _env_file_values() -> dict[str, str]:
-    """从部署目录的 .env 读被测系统的配置。
-
-    服务不会把 .env 灌进 os.environ，所以这里自己读一次。
-    只取 E2E_ 开头的键，不碰别的。
-    """
-    path = os.environ.get("DWS_E2E_ENV_FILE", "").strip()
-    if not path:
-        return {}
-    env_path = Path(path)
-    if not env_path.is_file():
-        return {}
-
-    values: dict[str, str] = {}
-    try:
-        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            text = line.strip()
-            if not text or text.startswith("#") or "=" not in text:
-                continue
-            key, value = text.split("=", 1)
-            key = key.strip()
-            if key.startswith("E2E_"):
-                values[key] = value.strip()
-    except OSError:
-        return {}
-    return values
-
-
 def _missing_env_hint(stderr: str) -> str:
-    """启动失败的常见原因是环境变量没填，给一句可操作的话。"""
-    if "E2E_BASE_URL" in stderr or "E2E_USER" in stderr or "E2E_PASS" in stderr:
-        return (
-            "调用方需要 E2E_BASE_URL / E2E_USER / E2E_PASS。"
-            "在部署目录的 .env 里补上即可，不用重启服务。"
-        )
+    """启动失败的常见原因给一句可操作的话。"""
     if "playwright" in stderr.lower():
         return "缺少 playwright，需要执行 pip install playwright"
     return ""

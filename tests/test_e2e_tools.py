@@ -1,145 +1,220 @@
-"""e2e 工具的 agent 桥接测试。
+"""E2E 桥接层的测试。
 
-重点覆盖踩过的坑：
-  - 结果转换不能被「error 键存在但为空」短路掉
-  - 只回问题页，不回全部页面
-  - full 模式必须拒绝
+改造后的语义：工具参数是「项目名」，地址和账号从 state/projects/<项目>.json 读。
+覆盖点：
+  - 项目列表只返回配了前端地址的
+  - 缺 project 时把可选项目列出来
+  - 项目没配过时明确报错，不猜
+  - full 模式一律拒绝
+  - CLI 输出被抽成问题页列表，通过的页面只留名字
 """
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import sys
 import unittest
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
 
 from dws_dm_agent.runners import e2e_tools
+from dws_dm_agent.project_config import ProjectConfig, ProjectStore, ServerConfig
 
 
-class RunPayloadShapeTests(unittest.TestCase):
-    """_run 的输出形状。用假 CLI 输出驱动，不真的开浏览器。"""
-
+class ProjectBridgeTests(unittest.TestCase):
     def setUp(self) -> None:
-        self._original = e2e_tools._invoke
+        self.root = ROOT / "build" / "test-tmp" / (
+            f"e2e-bridge-{os.getpid()}-{id(self)}"
+        )
+        if self.root.exists():
+            shutil.rmtree(self.root, ignore_errors=True)
+        self.store = ProjectStore(self.root / "projects")
+        self._env = mock.patch.dict(
+            os.environ, {"DWS_STATE_DIR": str(self.root)}, clear=False
+        )
+        self._env.start()
 
     def tearDown(self) -> None:
-        e2e_tools._invoke = self._original  # type: ignore[assignment]
+        self._env.stop()
+        shutil.rmtree(self.root, ignore_errors=True)
 
-    def _fake(self, payload: dict) -> None:
-        e2e_tools._invoke = lambda command: payload  # type: ignore[assignment]
-
-    def test_converts_cli_output_into_problem_list(self) -> None:
-        # CLI 正常输出里 error 是空串。曾经的 bug：用 `"error" in payload`
-        # 判断失败，导致转换逻辑永远走不到，把完整 pages 直接透给模型。
-        self._fake(
-            {
-                "overall": "WARN",
-                "error": "",
-                "durationMs": 96000,
-                "menuSource": "https://x/api/menu",
-                "summary": {"total": 3, "passed": 2, "warned": 1, "failed": 0},
-                "pages": [
-                    {"name": "A", "level": "PASS", "reason": "正常", "layer": "", "details": []},
-                    {"name": "B", "level": "PASS", "reason": "正常", "layer": "", "details": []},
-                    {
-                        "name": "C",
-                        "level": "WARN",
-                        "reason": "页面显示空数据",
-                        "layer": "unknown",
-                        "details": ["d1", "d2", "d3"],
-                    },
-                ],
-            }
+    def _configure(self, name: str, frontend: str = "http://192.0.2.10:8090") -> None:
+        self.store.save(
+            ProjectConfig(
+                name=name,
+                frontend=frontend,
+                login_user="tester",
+                login_password="secret",
+                server=ServerConfig(host="192.0.2.10"),
+            )
         )
 
-        result = e2e_tools._run({"config": "demo"})
+    def test_lists_only_projects_with_frontend(self) -> None:
+        self._configure("项目甲")
+        # 没有前端地址的项目不该出现在测试列表里
+        self.store.save(ProjectConfig(name="只有服务器", server=ServerConfig(host="x")))
 
-        self.assertNotIn("pages", result)
-        self.assertEqual(result["overall"], "WARN")
-        self.assertEqual(len(result["problems"]), 1)
-        self.assertEqual(result["problems"][0]["page"], "C")
-        # details 只留前两条，避免把长错误灌给模型
-        self.assertEqual(result["problems"][0]["details"], ["d1", "d2"])
-        self.assertEqual(result["passedPages"], ["A", "B"])
+        result = e2e_tools._list_projects()
+        names = [item["project"] for item in result["projects"]]
+        self.assertEqual(names, ["项目甲"])
+        self.assertEqual(result["projects"][0]["frontend"], "http://192.0.2.10:8090")
 
-    def test_real_error_is_returned_as_is(self) -> None:
-        self._fake({"error": "登录失败: 账号密码不对"})
-        result = e2e_tools._run({"config": "demo"})
-        self.assertEqual(result["error"], "登录失败: 账号密码不对")
+    def test_empty_list_gives_actionable_hint(self) -> None:
+        result = e2e_tools._list_projects()
+        self.assertEqual(result["projects"], [])
+        self.assertIn("项目配置", result["hint"])
+
+    def test_missing_project_lists_candidates(self) -> None:
+        self._configure("项目甲")
+        self._configure("项目乙")
+        result = e2e_tools._missing_project()
+        self.assertEqual(result["error"], "missing project")
+        self.assertEqual(sorted(result["available"]), ["项目乙", "项目甲"])
+        # 多个项目时必须问，不能自作主张
+        self.assertIn("问清楚", result["hint"])
+
+    def test_single_project_hint_names_it(self) -> None:
+        self._configure("项目甲")
+        result = e2e_tools._missing_project()
+        self.assertIn("项目甲", result["hint"])
+
+    def test_no_projects_asks_for_configuration(self) -> None:
+        result = e2e_tools._missing_project()
+        self.assertIn("还没有项目配置", result["error"])
+
+    def test_unknown_project_is_reported(self) -> None:
+        self._configure("项目甲")
+        result = e2e_tools._resolve_project("随便一个")
+        self.assertIsInstance(result, dict)
+        self.assertIn("还没有配置", result["error"])
+        self.assertEqual(result["configured"], ["项目甲"])
+
+    def test_project_without_frontend_is_rejected(self) -> None:
+        self.store.save(ProjectConfig(name="空项目"))
+        result = e2e_tools._resolve_project("空项目")
+        self.assertIsInstance(result, dict)
+        self.assertIn("没填前端地址", result["error"])
+
+    def test_project_without_login_is_rejected(self) -> None:
+        self.store.save(ProjectConfig(name="无账号", frontend="http://x"))
+        result = e2e_tools._resolve_project("无账号")
+        self.assertIsInstance(result, dict)
+        self.assertIn("登录账号", result["error"])
+
+    def test_resolve_builds_config_and_env(self) -> None:
+        self._configure("项目甲")
+        resolved = e2e_tools._resolve_project("项目甲")
+        self.assertIsInstance(resolved, tuple)
+        config_path, environment = resolved
+
+        # 账号密码走环境变量，配置文件里只留变量名
+        text = config_path.read_text(encoding="utf-8")
+        self.assertIn("${E2E_USER}", text)
+        self.assertNotIn("secret", text)
+        self.assertEqual(environment["E2E_BASE_URL"], "http://192.0.2.10:8090")
+        self.assertEqual(environment["E2E_USER"], "tester")
+        self.assertEqual(environment["E2E_PASS"], "secret")
 
     def test_full_mode_is_refused(self) -> None:
-        # full 会填表单、点查询，可能产生业务数据，不能由 agent 自动触发
-        called = {"count": 0}
+        self._configure("项目甲")
+        result = e2e_tools._run({"project": "项目甲", "mode": "full"})
+        self.assertIn("only smoke", result["error"])
 
-        def never(command):  # noqa: ANN001
-            called["count"] += 1
-            return {}
-
-        e2e_tools._invoke = never  # type: ignore[assignment]
-        result = e2e_tools._run({"config": "demo", "mode": "full"})
-
-        self.assertIn("error", result)
-        self.assertIn("smoke", result["error"])
-        self.assertEqual(called["count"], 0, "拒绝时不应该真的去跑测试")
-
-    def test_missing_config_is_reported(self) -> None:
+    def test_run_without_project_does_not_start_browser(self) -> None:
+        self._configure("项目甲")
         result = e2e_tools._run({})
-        self.assertIn("config", result["error"])
+        self.assertEqual(result["error"], "missing project")
 
 
-class DiscoverPayloadShapeTests(unittest.TestCase):
+class RunPayloadTests(unittest.TestCase):
     def setUp(self) -> None:
-        self._original = e2e_tools._invoke
+        self.root = ROOT / "build" / "test-tmp" / (
+            f"e2e-run-{os.getpid()}-{id(self)}"
+        )
+        if self.root.exists():
+            shutil.rmtree(self.root, ignore_errors=True)
+        self.store = ProjectStore(self.root / "projects")
+        self.store.save(
+            ProjectConfig(
+                name="项目甲",
+                frontend="http://192.0.2.10:8090",
+                login_user="tester",
+                login_password="secret",
+            )
+        )
+        self._env = mock.patch.dict(
+            os.environ, {"DWS_STATE_DIR": str(self.root)}, clear=False
+        )
+        self._env.start()
 
     def tearDown(self) -> None:
-        e2e_tools._invoke = self._original  # type: ignore[assignment]
+        self._env.stop()
+        shutil.rmtree(self.root, ignore_errors=True)
 
-    def test_ok_result_lists_only_leaf_pages(self) -> None:
-        # 容器菜单（营销）不是页面，不该出现在可测页面列表里
-        e2e_tools._invoke = lambda command: {  # type: ignore[assignment]
-            "status": "ok",
-            "message": "ok",
-            "menuCount": 1,
-            "menus": [
-                {
-                    "name": "营销",
-                    "kind": "menu",
-                    "fullPath": "/mkt",
-                    "children": [
-                        {"name": "标签筛客", "kind": "menu", "fullPath": "/mkt/label", "children": []},
-                        {"name": "导出", "kind": "button", "fullPath": "", "children": []},
-                    ],
-                }
+    def test_problems_are_listed_and_passes_summarised(self) -> None:
+        cli_output = {
+            "overall": "FAIL",
+            "menuSource": "api",
+            "durationMs": 120000,
+            "error": "",
+            "summary": {"total": 3, "pass": 1, "warn": 1, "fail": 1},
+            "pages": [
+                {"name": "首页", "level": "PASS"},
+                {"name": "风控/预警", "level": "WARN", "layer": "data",
+                 "reason": "页面显示空数据", "details": ["a", "b", "c"]},
+                {"name": "外贸/查询", "level": "FAIL", "layer": "render",
+                 "reason": "渲染失败", "details": []},
             ],
         }
+        with mock.patch.object(e2e_tools, "_invoke", return_value=cli_output):
+            result = e2e_tools._run({"project": "项目甲"})
 
-        result = e2e_tools._discover({"config": "demo"})
+        self.assertEqual(result["project"], "项目甲")
+        self.assertEqual(result["overall"], "FAIL")
+        self.assertEqual(len(result["problems"]), 2)
+        self.assertEqual(result["problems"][0]["page"], "风控/预警")
+        # details 只留两条，避免把整页 DOM 塞给模型
+        self.assertEqual(len(result["problems"][0]["details"]), 2)
+        self.assertEqual(result["passedPages"], ["首页"])
 
-        self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["menus"], ["营销 / 标签筛客"])
-
-    def test_needs_confirmation_exposes_candidates(self) -> None:
-        e2e_tools._invoke = lambda command: {  # type: ignore[assignment]
-            "status": "needs_confirmation",
-            "message": "两个候选得分接近",
-            "menuCount": 0,
-            "suggested": 0,
-            "candidates": [
-                {"label": "api/a", "topCount": 10, "urlCount": 30, "sample": ["首页"]},
-                {"label": "api/b", "topCount": 8, "urlCount": 25, "sample": ["甲"]},
-            ],
+    def test_empty_string_error_is_not_treated_as_failure(self) -> None:
+        # CLI 正常输出里带 "error": ""，不能当成失败
+        cli_output = {
+            "overall": "PASS", "error": "", "summary": {}, "pages": [],
         }
+        with mock.patch.object(e2e_tools, "_invoke", return_value=cli_output):
+            result = e2e_tools._run({"project": "项目甲"})
+        self.assertEqual(result["overall"], "PASS")
 
-        result = e2e_tools._discover({"config": "demo"})
+    def test_real_error_is_passed_through(self) -> None:
+        with mock.patch.object(
+            e2e_tools, "_invoke", return_value={"error": "登录失败"}
+        ):
+            result = e2e_tools._run({"project": "项目甲"})
+        self.assertEqual(result["error"], "登录失败")
+        self.assertEqual(result["project"], "项目甲")
 
-        self.assertTrue(result["needsHuman"])
-        self.assertEqual(len(result["candidates"]), 2)
-        self.assertNotIn("menus", result)
 
-
-class ConfigListingTests(unittest.TestCase):
-    def test_example_config_is_not_listed(self) -> None:
-        # example-webapp.json 是模板，不是可测系统
-        result = e2e_tools._list_configs()
-        ids = [item["id"] for item in result["configs"]]
-        self.assertNotIn("example-webapp", ids)
+class MenuFlattenTests(unittest.TestCase):
+    def test_only_leaf_pages_are_listed(self) -> None:
+        nodes = [
+            {
+                "name": "营销",
+                "kind": "menu",
+                "fullPath": "/market",
+                "children": [
+                    {"name": "列表", "kind": "menu", "fullPath": "/market/list", "children": []},
+                ],
+            },
+        ]
+        names = e2e_tools._flatten_menu_names(nodes)
+        # 容器菜单不是页面，只列叶子
+        self.assertEqual(names, ["营销 / 列表"])
 
 
 if __name__ == "__main__":
