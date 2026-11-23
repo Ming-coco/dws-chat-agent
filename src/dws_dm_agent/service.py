@@ -61,7 +61,8 @@ from .config import (
 )
 from .dashboard import AgentConfigStore, DashboardServer
 from .dws import DwsClient, _find_dws_error_code
-from .reply_guard import reply_problem
+from .reply_guard import CONFIRM_REPLY, reply_problem
+from .project_config import ProjectStore
 from .mentions import mention_prefix, strip_bare_mentions
 from . import sandbox
 
@@ -401,7 +402,10 @@ class AgentService:
         if self.mode not in {"shadow", "live"}:
             raise ValueError("mode must be shadow or live")
         self.agent_runtime = AgentRuntime.from_config(
-            settings.raw, settings.config_path, settings.workspace_root
+            settings.raw,
+            settings.config_path,
+            settings.workspace_root,
+            state_dir=settings.state_dir,
         )
         self.open_dashboard = open_dashboard
         self.store = AuditStore(settings.state_dir / "audit.sqlite3")
@@ -477,6 +481,7 @@ class AgentService:
             contact_search=self._search_dingtalk_contacts,
             group_lister=self._list_dingtalk_groups,
             project_lister=self._list_projects,
+            project_store=ProjectStore(settings.state_dir / "projects"),
             sandbox_status=self._sandbox_status,
             sandbox_refresh=self._refresh_sandboxes,
             host=getattr(settings, "dashboard_host", "127.0.0.1"),
@@ -1137,7 +1142,10 @@ class AgentService:
         candidate["workflows"] = _resolve_env(raw.get("workflows", {}), env)
         candidate["dws"] = _resolve_env(raw.get("dws", {}), env)
         runtime = AgentRuntime.from_config(
-            candidate, self.settings.config_path, self.settings.workspace_root
+            candidate,
+            self.settings.config_path,
+            self.settings.workspace_root,
+            state_dir=self.settings.state_dir,
         )
         missing = [
             f"{name}: {binary}"
@@ -1943,6 +1951,17 @@ class AgentService:
             # 过程当正文交出来（实测整篇英文 Let me grep…，或只有一句
             # I'll read the issue first. 就结束），那不能发出去。
             problem = reply_problem(result.reply)
+            if problem == "asking_back":
+                # 向联系人索要权限、信息，或让他做决定。这类内容重算也没用——
+                # 那些决定属于小弈，不属于对方。直接换成固定话术，不重跑。
+                LOG.warning(
+                    "asking back replaced contact=%s chars=%d",
+                    batch[0].contact.alias,
+                    len(result.reply),
+                )
+                self._record_agent_result(batch, result, status="asking_back")
+                result.reply = CONFIRM_REPLY
+                problem = ""
             if problem:
                 LOG.warning(
                     "rejected reply contact=%s reason=%s chars=%d",
@@ -3232,7 +3251,10 @@ def _validate_configuration(settings: Settings) -> list[str]:
         errors.append("quiet window must be positive and cooldown must be non-negative")
     try:
         AgentRuntime.from_config(
-            settings.raw, settings.config_path, settings.workspace_root
+            settings.raw,
+            settings.config_path,
+            settings.workspace_root,
+            state_dir=settings.state_dir,
         )
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         errors.append(f"agent workflow is invalid: {exc}")
@@ -3289,7 +3311,10 @@ async def _doctor(settings: Settings) -> int:
     }
     if not errors:
         runtime = AgentRuntime.from_config(
-            settings.raw, settings.config_path, settings.workspace_root
+            settings.raw,
+            settings.config_path,
+            settings.workspace_root,
+            state_dir=settings.state_dir,
         )
         binaries.update(runtime.required_binaries())
     for binary_name, binary in binaries.items():

@@ -1,10 +1,10 @@
 /**
- * e2e_run / e2e_discover / e2e_list_configs 工具扩展。
+ * e2e_run / e2e_discover / e2e_projects 工具扩展。
  *
  * 用途：部署之后确认页面是否正常。
  *   - e2e_run       跑一轮页面体检：登录、遍历菜单、抓错、给结论
  *   - e2e_discover  发现系统有哪些页面（接入新系统或系统改版后用）
- *   - e2e_list_configs 列出本机可用的测试配置
+ *   - e2e_projects 列出配好了前端地址的项目
  *
  * 安全边界：只开放 smoke 模式（只打开页面，不填表单、不点提交）。
  * full 模式会填表单并触发查询，可能产生业务数据或触发导出，
@@ -59,14 +59,14 @@ async function callE2ETool(request: unknown) {
 	});
 }
 
-const CONFIG_PARAM = Type.String({
+const PROJECT_PARAM = Type.String({
 	description:
-		"配置 id，来自 e2e_list_configs 返回的 id，例如某个系统的测试环境配置名",
+		"项目名，来自 e2e_projects 返回的 project，对应「设置 → 项目配置」里的项目",
 });
 
-const e2eListConfigs = defineTool({
-	name: "e2e_list_configs",
-	label: "List E2E test configs",
+const e2eProjects = defineTool({
+	name: "e2e_projects",
+	label: "List projects ready for page testing",
 	description:
 		"List the page-testing configs available on this machine (id and display " +
 		"name). Call this first when asked to verify a deployed system: it tells " +
@@ -75,7 +75,7 @@ const e2eListConfigs = defineTool({
 		"so rather than inventing a system name.",
 	parameters: Type.Object({}, { additionalProperties: false }),
 	async execute(_toolCallId: string, _params: Record<string, unknown>) {
-		return textResult(await callE2ETool({ tool: "e2e_list_configs", args: {} }));
+		return textResult(await callE2ETool({ tool: "e2e_projects", args: {} }));
 	},
 });
 
@@ -91,7 +91,7 @@ const e2eDiscover = defineTool({
 		"Read-only: it opens pages but never submits anything.",
 	parameters: Type.Object(
 		{
-			config: CONFIG_PARAM,
+			project: PROJECT_PARAM,
 		},
 		{ additionalProperties: false },
 	),
@@ -115,7 +115,7 @@ const e2eRun = defineTool({
 		"report the verdict and the problems, do not list every passing page.",
 	parameters: Type.Object(
 		{
-			config: CONFIG_PARAM,
+			project: PROJECT_PARAM,
 			only: Type.Optional(
 				Type.String({
 					description:
@@ -131,7 +131,7 @@ const e2eRun = defineTool({
 });
 
 export default function (pi: ExtensionAPI) {
-	pi.registerTool(e2eListConfigs);
+	pi.registerTool(e2eProjects);
 	pi.registerTool(e2eDiscover);
 	pi.registerTool(e2eRun);
 }

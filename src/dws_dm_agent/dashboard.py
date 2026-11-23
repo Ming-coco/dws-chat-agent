@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -23,6 +24,9 @@ from .prompts import (
 from .runners.runtime import AgentRuntime, SUPPORTED_PROTOCOLS
 from . import sandbox
 
+
+
+LOG = logging.getLogger("dws-chat-agent")
 
 class ConfigBusyError(RuntimeError):
     pass
@@ -671,6 +675,7 @@ class DashboardServer:
         contact_search: Callable[[str], list[dict[str, Any]]] | None = None,
         group_lister: Callable[[], list[dict[str, Any]]] | None = None,
         project_lister: Callable[[], list[str]] | None = None,
+        project_store: Any = None,
         sandbox_status: Callable[[], dict[str, Any]] | None = None,
         sandbox_refresh: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
@@ -682,6 +687,7 @@ class DashboardServer:
         self.diamond_css = self.html.with_name("diamond-preview.css")
         self.diamond_favicon = self.html.with_name("diamond-favicon.svg")
         self.theme_js = self.html.with_name("theme.js")
+        self.projects_js = self.html.with_name("settings-projects.js")
         self.app_css = self.html.with_name("app.css")
         self.favicon = self.html.with_name("favicon.svg")
         self.contacts = dict(contacts)
@@ -692,6 +698,9 @@ class DashboardServer:
         self.contact_search = contact_search
         self.group_lister = group_lister
         self.project_lister = project_lister
+        # 项目配置（服务器、数据库连接信息）。没注入时接口不注册，
+        # 设置页里那块面板保持隐藏。
+        self.project_store = project_store
         self.sandbox_status = sandbox_status
         self.sandbox_refresh = sandbox_refresh
         self.server: LocalThreadingHTTPServer | None = None
@@ -726,6 +735,15 @@ class DashboardServer:
                         dashboard.diamond_favicon.read_bytes(),
                         "image/svg+xml",
                         cache_control="public, max-age=86400",
+                    )
+                    return
+                if path == "/settings-projects.js":
+                    if not dashboard.projects_js.is_file():
+                        self.send_error(404)
+                        return
+                    self._send(
+                        dashboard.projects_js.read_bytes(),
+                        "text/javascript; charset=utf-8",
                     )
                     return
                 if path == "/theme.js":
@@ -837,6 +855,40 @@ class DashboardServer:
                         return
                     self._send_json({"projects": projects})
                     return
+                if path == "/api/project-config" and dashboard.project_store is not None:
+                    from urllib.parse import parse_qs
+
+                    try:
+                        query = (
+                            parse_qs(self.path.split("?", 1)[1])
+                            if "?" in self.path
+                            else {}
+                        )
+                        name = (query.get("name") or [""])[0].strip()
+                        if not name:
+                            self._send_json(
+                                {"projects": dashboard.project_store.list_configured()}
+                            )
+                            return
+                        config = dashboard.project_store.load(name)
+                        payload = {
+                            "config": config.to_dict(mask_password=True),
+                            "saved": dashboard.project_store.exists(name),
+                        }
+                        self._send_json(payload)
+                    except Exception as exc:  # noqa: BLE001
+                        # 之前这里不捕获，异常会让连接直接断开、前端只看到
+                        # 「连接被意外关闭」，完全不知道发生了什么。
+                        import traceback
+
+                        LOG.exception("project-config failed: %s", exc)
+                        try:
+                            self._send_json(
+                                {"error": f"{type(exc).__name__}: {exc}"}, status=500
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                    return
                 if path == "/api/sandbox" and dashboard.sandbox_status is not None:
                     try:
                         report = dashboard.sandbox_status()
@@ -849,10 +901,15 @@ class DashboardServer:
 
             def do_POST(self) -> None:
                 path = self.path.split("?", 1)[0]
-                if dashboard.config_store is None or path not in {
-                    "/api/config",
-                    "/api/sandbox/rebuild",
-                }:
+                # 每个路径检查自己的依赖，不要共用一个总开关：
+                # 之前写成 config_store is None or path not in {...}，
+                # 没有 config_store 时连别的接口也一起 404 了。
+                allowed = {
+                    "/api/config": dashboard.config_store is not None,
+                    "/api/sandbox/rebuild": dashboard.sandbox_refresh is not None,
+                    "/api/project-config": dashboard.project_store is not None,
+                }
+                if not allowed.get(path, False):
                     self.send_error(404)
                     return
                 origin = self.headers.get("Origin")
@@ -873,6 +930,33 @@ class DashboardServer:
                         self._send_json({"error": f"重建沙盒失败：{exc}"}, status=500)
                         return
                     self._send_json(report)
+                    return
+                if path == "/api/project-config":
+                    if dashboard.project_store is None:
+                        self.send_error(404)
+                        return
+                    try:
+                        length = int(self.headers.get("Content-Length") or 0)
+                    except ValueError:
+                        length = 0
+                    if length <= 0 or length > 200_000:
+                        self._send_json({"error": "请求大小无效"}, status=413)
+                        return
+                    try:
+                        value = json.loads(self.rfile.read(length))
+                        if not isinstance(value, Mapping):
+                            raise ValueError("请求必须是 JSON object")
+                        from .project_config import ProjectConfig
+
+                        config = ProjectConfig.from_dict(dict(value))
+                        saved_path = dashboard.project_store.save(config)
+                    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                        self._send_json({"error": str(exc)}, status=400)
+                        return
+                    except Exception as exc:  # noqa: BLE001
+                        self._send_json({"error": f"保存失败：{exc}"}, status=500)
+                        return
+                    self._send_json({"saved": True, "file": saved_path.name})
                     return
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
