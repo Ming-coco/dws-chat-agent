@@ -815,6 +815,7 @@ class AgentRuntime:
         supplement_prompt_path: Path,
         auto_messages: Mapping[str, Any],
         shell_path_prepend: Sequence[Path] = (),
+        state_dir: Path | None = None,
     ) -> None:
         self.name = name
         self._stages = dict(stages)
@@ -828,6 +829,8 @@ class AgentRuntime:
         # 里的 bash.exe 是 WSL 启动器，WSL 没装时所有命令都会失败；把 Git 的
         # bin 前置即可让 pi 的 bash 工具用上真实的 shell。
         self._shell_path_prepend = tuple(shell_path_prepend)
+        # 项目配置（服务器、数据库、登录账号）所在目录，页面测试从这里取。
+        self._state_dir = Path(state_dir) if state_dir is not None else None
         self.progress_enabled = bool(auto_messages.get("progress_enabled", True))
         self.max_progress_updates = int(auto_messages.get("max_progress_updates", 60))
 
@@ -837,6 +840,7 @@ class AgentRuntime:
         raw: Mapping[str, Any],
         config_path: Path,
         workspace_root: Path,
+        state_dir: Path | None = None,
     ) -> AgentRuntime:
         profile_values = raw.get("agents")
         workflow_values = raw.get("workflows")
@@ -1012,6 +1016,7 @@ class AgentRuntime:
             supplement_prompt_path,
             auto_messages,
             _shell_path_prepend(raw, config_dir),
+            state_dir=state_dir,
         )
 
     def render(self, stage_name: str, variables: Mapping[str, Any]) -> str:
@@ -1121,6 +1126,21 @@ class AgentRuntime:
                 # 通用名字，后续新增的内置能力都用它，避免每加一个能力
                 # 就要在部署目录里多配一个环境变量。
                 environment["DWS_AGENT_ENV_FILE"] = str(env_file)
+        if protocol == "pi-rpc" and stage.profile.options.get("e2e") is not False:
+            # 页面体检后端只传脚本路径与解释器。被测系统的地址、账号、密码
+            # 走环境变量（E2E_BASE_URL / E2E_USER / E2E_PASS），由部署方在
+            # .env 里填，不进配置、不进提示词。
+            environment["DWS_E2E_PYTHON"] = sys.executable
+            environment["DWS_E2E_SCRIPT"] = str(
+                Path(__file__).with_name("e2e_tools.py").resolve()
+            )
+            # 页面测试的地址和账号按项目存：桥接从
+            # {state_dir}/projects/<项目名>.json 读，不再用全局 E2E_* 变量。
+            if self._state_dir is not None:
+                environment["DWS_STATE_DIR"] = str(self._state_dir)
+            env_file = (self._config_dir / ".env").resolve()
+            if env_file.is_file():
+                environment["DWS_E2E_ENV_FILE"] = str(env_file)
         if protocol == "pi-rpc" and stage.profile.options.get("gitlab") is not False:
             # 与 jira 同样的约定：脚本路径经环境变量传，令牌由后端自己从
             # 进程环境或部署目录的 .env 读取，绝不进命令行参数或提示词。

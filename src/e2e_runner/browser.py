@@ -49,6 +49,8 @@ class PageSignal:
     load_timeout: bool = False
     # 加载态一直没消失（加载中就被采样了）
     still_loading: bool = False
+    # 结构稳定后又出现加载遮罩（页面在刷新，内容已渲染过一次）
+    settled_then_loading: bool = False
     screenshot: str = ""
 
 

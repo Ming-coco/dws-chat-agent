@@ -43,11 +43,11 @@ def judge(signal: PageSignal, config: E2EConfig, backend_logs: str = "") -> Verd
     if signal.still_loading or signal.load_timeout:
         return Verdict(
             level=WARN,
-            reason="加载超时，页面可能还在加载",
+            reason="加载未完成，页面可能还在请求数据",
             layer="browser",
             details=[
-                "等待加载遮罩消失超过 20 秒",
-                "如果该页面响应确实很慢，可调大 detect.pageTimeoutMs",
+                "加载遮罩在等待时间内一直没有消失",
+                "如果该页面正常就很慢，可调大 detect.pageTimeoutMs",
             ],
         )
 

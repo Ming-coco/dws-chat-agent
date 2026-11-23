@@ -66,11 +66,13 @@ def wait_until_ready(page: Page, settle_ms: int, max_wait_ms: int = 20000) -> st
     """等页面真正加载完成。
 
     返回状态：
-      ready        正常就绪
-      loading_stuck 等待超时但仍有加载遮罩（说明加载没结束）
-      timeout      结构一直不稳定
+      ready                正常就绪
+      loading_stuck        遮罩一直在，等到超时都没消失
+      settled_then_loading 结构稳定后又出现遮罩（页面在刷新，不算失败）
+      timeout              结构一直不稳定
 
-    调用方据此判定：loading_stuck 要算异常，不能当"没数据"。
+    调用方据此判定：loading_stuck 要算异常，不能当"没数据"；
+    settled_then_loading 只是提醒，页面内容已经渲染过一次了。
     """
     deadline = time.time() + max_wait_ms / 1000
 
@@ -86,12 +88,12 @@ def wait_until_ready(page: Page, settle_ms: int, max_wait_ms: int = 20000) -> st
     if not loading_gone:
         return "loading_stuck"
 
-    # 2. 等结构稳定：连续三次采样指纹不变
+    # 2. 等结构稳定：连续两次采样指纹不变
     stable_count = 0
     previous = None
     while time.time() < deadline:
         current = _fingerprint(page)
-        if previous is not None and current == previous:
+        if previous is not None and current == previous and current:
             stable_count += 1
             if stable_count >= 2:
                 break
@@ -106,11 +108,38 @@ def wait_until_ready(page: Page, settle_ms: int, max_wait_ms: int = 20000) -> st
     # 3. 稳定后再给一小段缓冲，让异步渲染收尾
     page.wait_for_timeout(min(settle_ms, 1500))
 
-    # 缓冲后如果又冒出加载遮罩，说明还在加载
+    # 缓冲后如果又冒出加载遮罩，说明页面在结构稳定之后又发起了新请求。
+    # 这不算失败——列表自己刷新很常见；但要如实告诉调用方，别当"没有数据"。
     if _visible_loading(page):
-        return "loading_stuck"
+        return "settled_then_loading"
 
     return "ready"
+
+
+def wait_out_empty_state(page: Page, max_wait_ms: int = 6000) -> bool:
+    """页面停在空状态时，再多看一眼数据会不会来。
+
+    实测踩过：某个列表页在 1.2 秒时渲染完筛选项、显示"暂无数据"、没有
+    任何加载遮罩——结构稳定、看起来加载完了。但真正的数据请求 2 秒后才
+    发出，3.2 秒时表格填充 10 行。此时如果直接判"空数据"就是误报。
+
+    遮罩消失只代表上一轮加载结束，不代表数据已经到位。所以发现空状态时
+    继续观察，一旦有数据或出现遮罩就继续等。
+
+    返回 True 表示「等到了变化」，调用方应重新采样。
+    """
+    deadline = time.time() + max_wait_ms / 1000
+    baseline = _fingerprint(page)
+
+    while time.time() < deadline:
+        page.wait_for_timeout(400)
+        if _visible_loading(page):
+            return True
+        current = _fingerprint(page)
+        if current != baseline:
+            return True
+
+    return False
 
 
 def _visible_loading(page: Page) -> list[str]:

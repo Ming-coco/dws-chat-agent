@@ -518,7 +518,13 @@
       .topbar-actions button { flex: 1; }
       .preset-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
     }
-  </style>
+  
+    /* 项目配置面板的下拉：父级 .panel 有层叠上下文，菜单会被下面的区块盖住。
+       这里单独抬高 z-index，并让它脱离父级的裁剪。 */
+    #pcProjectPicker { position: relative; z-index: 50; }
+    #pcProjectPicker .project-menu { z-index: 200; }
+    #projectConfigPanel { overflow: visible; }
+</style>
   <script src="/theme.js"></script>
 </head>
 <body>
@@ -570,6 +576,89 @@
       </div>
       <div id="runtimeWorkflow" class="empty">正在读取运行中配置…</div>
     </section>
+
+    <section class="panel" id="projectConfigPanel" aria-labelledby="projectConfigTitle" hidden>
+      <div class="section-head">
+        <div>
+          <h2 id="projectConfigTitle">项目配置</h2>
+          <p>每台服务器、每个数据库的连接信息。保存后 agent 执行任务时会从这里读取，不必每次告诉它。</p>
+        </div>
+        <span id="projectSaveState" class="badge">未配置</span>
+      </div>
+
+      <div class="project-field">
+        <span>项目</span>
+        <div class="project-picker" id="pcProjectPicker">
+          <div class="project-chips">
+            <span class="project-empty" id="pcProjectCurrent">未选择</span>
+            <button id="pcProjectToggle" class="project-toggle ghost" type="button">选择项目</button>
+          </div>
+          <div class="project-menu" id="pcProjectMenu" hidden>
+            <input id="pcProjectFilter" type="search" placeholder="输入关键字过滤" autocomplete="off">
+            <div class="project-options" id="pcProjectOptions"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="projectForm" hidden>
+        <h3 class="project-group-title">基本信息</h3>
+        <label class="field">
+          <span>前端地址</span>
+          <input id="pcFrontend" type="text" placeholder="http://192.0.2.10:8090">
+        </label>
+        <label class="field">
+          <span>备注</span>
+          <input id="pcNote" type="text" placeholder="例如：项目甲 测试环境">
+        </label>
+        <label class="field">
+          <span>登录账号</span>
+          <input id="pcLoginUser" type="text" placeholder="登录被测系统的账号">
+        </label>
+        <label class="field">
+          <span>登录密码</span>
+          <input id="pcLoginPassword" type="password" placeholder="留空表示不修改">
+        </label>
+
+        <h3 class="project-group-title">服务器</h3>
+        <label class="field"><span>地址</span><input id="pcServerHost" type="text" placeholder="192.0.2.10"></label>
+        <label class="field"><span>端口</span><input id="pcServerPort" type="number" placeholder="22"></label>
+        <label class="field"><span>用户</span><input id="pcServerUser" type="text" placeholder="admin"></label>
+        <label class="field"><span>密码</span><input id="pcServerPassword" type="password" placeholder="留空表示不修改"></label>
+        <label class="field"><span>部署目录</span><input id="pcDeployDir" type="text" placeholder="/opt/app"></label>
+
+        <div class="section-head">
+          <div><h3 class="project-group-title">数据库</h3></div>
+          <button id="pcAddDatabase" class="ghost" type="button">添加数据库</button>
+        </div>
+        <div id="pcDatabases"></div>
+
+        <p class="message">这里点「保存项目配置」立即写入并在下次使用时生效，不需要再点右上角的「保存并应用」。</p>
+        <div class="project-actions">
+          <button id="pcSave" class="primary" type="button">保存项目配置</button>
+          <span id="pcMessage" class="message" role="status"></span>
+        </div>
+      </div>
+    </section>
+
+    <template id="pcDatabaseRow">
+      <div class="project-db-row">
+        <label class="field"><span>名称</span><input data-db="name" type="text" placeholder="主库"></label>
+        <label class="field"><span>类型</span>
+          <select data-db="type">
+            <option value="mysql">mysql</option>
+            <option value="clickhouse">clickhouse</option>
+            <option value="postgres">postgres</option>
+            <option value="elasticsearch">elasticsearch</option>
+          </select>
+        </label>
+        <label class="field"><span>地址</span><input data-db="host" type="text" placeholder="192.0.2.20"></label>
+        <label class="field"><span>端口</span><input data-db="port" type="number" placeholder="3306"></label>
+        <label class="field"><span>库名</span><input data-db="schema" type="text" placeholder="app_db"></label>
+        <label class="field"><span>用户</span><input data-db="user" type="text" placeholder="root"></label>
+        <label class="field"><span>密码</span><input data-db="password" type="password" placeholder="留空表示不修改"></label>
+        <button class="ghost danger pc-db-remove" type="button">删除</button>
+      </div>
+    </template>
 
     <section class="notice">
       <span><strong>只编辑本地配置。</strong> 登录态、凭证和 provider 私有参数不会下发；白名单联系人保存到本机 config.json。</span>
@@ -1736,5 +1825,6 @@
     loadRuntimeWorkflow();
     loadConfig();
   </script>
+  <script src="/settings-projects.js"></script>
 </body>
 </html>

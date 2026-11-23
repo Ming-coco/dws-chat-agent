@@ -42,6 +42,11 @@ def command(profile: Any, mount_escalate: bool = False, *, model_override: str |
     mount_browser = profile.options.get("browser") is not False
     if mount_browser:
         result.extend(["--extension", str(Path(__file__).with_name("pi_browser.ts"))])
+    # 页面体检（部署后确认系统有没有被改坏）：默认挂载。底层是独立的
+    # e2e_runner 包，不依赖 agent 内部结构。options.e2e=false 关闭。
+    mount_e2e = profile.options.get("e2e") is not False
+    if mount_e2e:
+        result.extend(["--extension", str(Path(__file__).with_name("pi_e2e.ts"))])
     configured_tools = profile.options.get(
         "tools", "read,grep,find,ls" if profile.read_only else ""
     )
@@ -64,6 +69,10 @@ def command(profile: Any, mount_escalate: bool = False, *, model_override: str |
                         tool_names.append(name)
             if mount_browser and "browser_run" not in tool_names:
                 tool_names.append("browser_run")
+            if mount_e2e:
+                for name in ("e2e_run", "e2e_discover", "e2e_list_configs"):
+                    if name not in tool_names:
+                        tool_names.append(name)
             for name in _DWS_TOOL_NAMES:
                 if name not in tool_names:
                     tool_names.append(name)
