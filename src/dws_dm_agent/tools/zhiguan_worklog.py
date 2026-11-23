@@ -705,17 +705,100 @@ def good_topic(token: str) -> bool:
     return bool(re.search(r"[a-z]{3,}|[A-Z]{3,}", token))
 
 
-def summarize_chat(items: list, max_items: int = 4, max_len: int = 200) -> str:
+# 中文里的技术话题不长成标识符，靠这些词把「在聊什么事」捞出来
+ZH_KEYWORDS = (
+    "漏洞", "依赖", "基线", "镜像", "构建", "编译", "部署", "回滚", "升级", "迁移", "切库",
+    "索引", "慢查询", "超时", "并发", "事务", "序列化", "分页", "导出", "报表", "权限",
+    "鉴权", "缓存", "队列", "定时任务", "跑批", "对账", "口径", "字段", "表结构", "接口",
+    "联调", "需求", "排查", "告警", "监控", "视图", "流程",
+)
+ZH_TOPIC = re.compile("(%s)" % "|".join(ZH_KEYWORDS))
+
+
+def route_topic(text: str) -> str:
+    """从一句话里挑一个中文技术话题，挑不到就返回空。
+
+    只取关键词本身：前后各带两个字会把「端得漏洞是你」这种半截话带进来。
+    """
+    m = ZH_TOPIC.search(text or "")
+    return m.group(1) if m else ""
+
+
+LLM_TIMEOUT = 180
+
+
+def llm_summarize(prompt: str, cfg: dict) -> str:
+    """让模型把一段素材压成一句话；没配模型或调用失败就返回空，由调用方回退。"""
+    chat_cfg = cfg.get("chat") or {}
+    if chat_cfg.get("use_model", True) is False:
+        return ""
+    cmd = chat_cfg.get("model_command")
+    if not cmd:
+        cmd = [str(x) for x in (cfg.get("summarizer") or {}).get("command") or []]
+    if not cmd:
+        return ""
+    try:
+        proc = subprocess.run(
+            cmd + ["--print"] if cmd[-1] == "claude" else cmd,
+            input=prompt, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=LLM_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log("[chat] 模型总结不可用（%s），改用规则" % type(exc).__name__)
+        return ""
+    text = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not text:
+        log("[chat] 模型总结失败（exit=%s），改用规则" % proc.returncode)
+        return ""
+    # 模型偶尔会带上解释或前后缀，只取第一行有效内容
+    for line in text.splitlines():
+        line = line.strip().strip("。 ")
+        if len(line) >= 6:
+            return line
+    return ""
+
+
+CHAT_PROMPT = """把下面这段钉钉聊天记录概括成一句适合写进工时的话。
+
+要求：
+- 只写做了什么、在哪个项目或模块上，不写人名、不写谁和谁说的
+- 合并重复的事，突出排查/修复/优化了什么
+- 不超过 40 字，直接给结论，不要解释、不要引号、不要标点开头
+
+聊天记录：
+%s
+"""
+
+
+def summarize_chat_with_model(items: list, cfg: dict, max_len: int = 200) -> str:
+    """把聊天记录交给模型总结；模型不可用时返回空。"""
+    if not items:
+        return ""
+    lines = []
+    for m in sorted(items, key=lambda x: x["time"])[:30]:
+        who = "" if m.get("single") else (m.get("project") or m.get("conversation") or "")
+        lines.append("- %s%s" % ("[%s] " % who if who else "", m["text"]))
+    got = llm_summarize(CHAT_PROMPT % "\n".join(lines), cfg)
+    if not got:
+        return ""
+    return ("沟通与协助：%s。" % got.rstrip("。"))[:max_len]
+
+
+def summarize_chat(items: list, max_items: int = 4, max_len: int = 200,
+                   cfg: dict | None = None) -> str:
     """把当天聊过的事压成一句「沟通与协助」。
 
-    只写聊了什么、在哪个项目上，不写是谁——工时是给自己看的，
-    人名和聊天原话都没有信息量，还会把真正的内容挤掉。
+    优先交给模型：规则拼出来的话永远是「跟进 X、Y 相关问题」，
+    读起来像清单而不是「做了什么」。模型不可用时再退回关键词规则。
     """
     if not items:
         return ""
+    if cfg is not None:
+        by_model = summarize_chat_with_model(items, cfg, max_len=max_len)
+        if by_model:
+            return by_model
 
-    topics, seen = [], set()
-    projects = []
+    topics, seen, projects = [], set(), []
     for m in sorted(items, key=lambda x: x["time"]):
         project = m.get("project") or ""
         if project and project not in projects:
@@ -725,6 +808,16 @@ def summarize_chat(items: list, max_items: int = 4, max_len: int = 200) -> str:
                 continue
             seen.add(t.lower())
             topics.append(t)
+
+    # 一句英文标识符都没有的聊天（中文讨论需求、口径、漏洞）也要能说出来
+    if len(topics) < max_items:
+        for m in sorted(items, key=lambda x: x["time"]):
+            t = route_topic(m["text"])
+            if t and t not in seen:
+                seen.add(t)
+                topics.append(t)
+            if len(topics) >= max_items:
+                break
 
     if not topics and not projects:
         return ""
@@ -999,7 +1092,38 @@ GAIN_HINT = re.compile(
 )
 
 
-def commit_highlights(body: str, limit: int = 2, max_len: int = 90) -> list:
+SECURITY_HINT = re.compile(r"漏洞|CVE-|security|高危|严重", re.IGNORECASE)
+VERSION_BUMP = re.compile(r"([A-Za-z][\w.-]*)\s+([\d.]+)\s*(?:→|->)\s*([\d.]+)")
+LEDGER_COUNT = re.compile(r"台账\s*(\d+)\s*条|(\d+)\s*条")
+
+
+def summarize_security(subject: str, body: str) -> str:
+    """依赖升级的提交正文是 CVE 清单，逐条列出来只会把工时撑爆。
+
+    留三样东西：修了几处、升了哪几个依赖、升到哪一版。
+    """
+    bumps = []
+    for m in VERSION_BUMP.finditer(body or ""):
+        name, old, new = m.group(1), m.group(2), m.group(3)
+        if name.lower() in ("cve",):
+            continue
+        entry = "%s %s→%s" % (name, old, new)
+        if entry not in bumps:
+            bumps.append(entry)
+    counts = [int(x) for x in re.findall(r"台账\s*(\d+)\s*条", body or "")]
+    head = clean_subject(subject)
+    if bumps:
+        listed = "、".join(bumps[:3])
+        more = "等 %d 个依赖" % len(bumps) if len(bumps) > 3 else ""
+        text = "%s（%s%s）" % (head, listed, more)
+    else:
+        text = head
+    if counts:
+        text = "%s，共 %d 条台账" % (text, sum(counts))
+    return text[:110]
+
+
+def commit_highlights(body: str, limit: int = 2, max_len: int = 70) -> list:
     """从提交正文里挑出「做了什么、提升多少」。
 
     提交标题一般只说「优化了跑批」，正文才写清楚改了哪几处、压测从多少降到多少。
@@ -1048,8 +1172,17 @@ def commit_highlights(body: str, limit: int = 2, max_len: int = 90) -> list:
     return out
 
 
+WORKLOG_DIR_NAMES = {"工作日志", "日志", "日报", "worklog", "worklogs", "daily"}
+WORKLOG_NAME_HINTS = ("工作日志", "日报", "周报")
+
+
 def find_worklog_docs(root: Path, day: datetime, max_depth: int = 3):
-    """Locate the hand-written daily log markdown for `day` under one project root."""
+    """Locate the hand-written daily log markdown for `day` under one project root.
+
+    只认「工作日志」目录下的文件，或者名字里带「工作日志 / 日报」的。
+    光凭文件名里有日期是不够的：`企业所属产业链查询-新旧实现梳理-20261117.md`
+    这种技术文档也会命中，把整篇分析当成当天日志塞进工时。
+    """
     root = Path(root)
     if not root.exists():
         return []
@@ -1064,11 +1197,15 @@ def find_worklog_docs(root: Path, day: datetime, max_depth: int = 3):
             d for d in dirnames
             if d not in (".git", "node_modules", ".venv", "__pycache__", "dist", "build", "target", ".dsh-work", ".dsh-tmp")
         ]
+        in_worklog_dir = any(p.lower() in WORKLOG_DIR_NAMES for p in cur.parts[base_depth:])
         for name in filenames:
             if not name.endswith(".md"):
                 continue
-            if any(s in name for s in stamps):
-                hits.append(cur / name)
+            if not any(s in name for s in stamps):
+                continue
+            if not in_worklog_dir and not any(h in name for h in WORKLOG_NAME_HINTS):
+                continue
+            hits.append(cur / name)
     return hits
 
 
@@ -1274,9 +1411,14 @@ def summarize(mapping_name: str, ev: dict, cfg: dict) -> str:
             if key in seen:
                 continue
             seen.add(key)
-            # 标题说的是「做了什么」，正文里的压测/计数才是「提升多少」
-            highlights = commit_highlights(item.get("body") or "", limit=highlight_limit)
-            picked.append({"text": c, "highlights": highlights})
+            # 标题说的是「做了什么」，正文里的压测/计数才是「提升多少」。
+            # 安全修复例外：正文是 CVE 清单，只概括「升了哪几个依赖」。
+            body = item.get("body") or ""
+            if SECURITY_HINT.search(s) or SECURITY_HINT.search(body):
+                picked.append({"text": summarize_security(s, body), "highlights": []})
+            else:
+                highlights = commit_highlights(body, limit=highlight_limit)
+                picked.append({"text": c, "highlights": highlights})
             if len(picked) >= per_repo_limit:
                 break
         if picked:
@@ -1535,7 +1677,7 @@ def fill_day(client: McpClient, cfg: dict, day: date, dry_run: bool = False, for
             brief.append(summarize_meetings(meetings))
         if chats:
             brief.append(summarize_chat(chats, max_items=int(
-                (cfg.get("chat") or {}).get("max_items", 3))))
+                (cfg.get("chat") or {}).get("max_items", 3)), cfg=cfg))
         brief.extend(side_notes)
         note = " ".join(b for b in brief if b)
         if note:
@@ -1594,7 +1736,7 @@ def fill_day(client: McpClient, cfg: dict, day: date, dry_run: bool = False, for
             brief.append(summarize_meetings(meetings))
         if chats:
             brief.append(summarize_chat(chats, max_items=int(
-                (cfg.get("chat") or {}).get("max_items", 3))))
+                (cfg.get("chat") or {}).get("max_items", 3)), cfg=cfg))
         brief.extend(side_notes)
         note = " ".join(b for b in brief if b)
         if note:
@@ -1704,31 +1846,43 @@ def fill_day(client: McpClient, cfg: dict, day: date, dry_run: bool = False, for
         unassigned = []
         for item in chats:
             owner_name = match_mapping_by_title(item["conversation"], cfg)
-            line = "%s %s" % (item["time"], item["text"])
             if owner_name and owner_name in owner:
-                notes_by_project[owner_name].append(line)
+                notes_by_project[owner_name].append(item["text"])
             else:
                 unassigned.append(item)
 
+        said_by_project = {}
         for name, lines in notes_by_project.items():
-            target = owner[name]
-            gists = [best_line([{"text": t}]) for t in lines]
-            said = "；".join(dict.fromkeys(g for g in gists if g))
+            # 按项目归属的那几条也交给模型，别再用 best_line 拼半截原话
+            picked = [{"time": "", "text": t, "conversation": name, "project": name,
+                       "single": False} for t in lines]
+            said = summarize_chat(picked, cfg=cfg).replace("沟通与协助：", "").rstrip("。")
             if said:
-                target["content"] = ("%s 沟通与协助：%s。" % (target["content"], said))[
-                    : int(cfg.get("max_content_len", 1800))
-                ]
-                log("[chat] %d 条沟通写入 %s" % (len(lines), target["targetId"]))
+                said_by_project[name] = said
 
+        # 挂不上项目的聊天也要写，但只写一处：跟按项目匹配的合并成一句「沟通与协助」，
+        # 否则同一条条目里会出现两段「沟通与协助」
+        loose = ""
         if unassigned:
-            biggest = max(entries, key=lambda e: e["hours"] or 0)
-            note = summarize_chat(unassigned, max_items=int(
-                (cfg.get("chat") or {}).get("max_items", 3)))
-            if note:
-                biggest["content"] = ("%s %s" % (biggest["content"], note))[
+            loose = summarize_chat(unassigned, max_items=int(
+                (cfg.get("chat") or {}).get("max_items", 3)), cfg=cfg)
+            loose = loose.replace("沟通与协助：", "").rstrip("。")
+
+        if said_by_project:
+            for name, said in said_by_project.items():
+                target = owner[name]
+                text = said if not loose else "%s；%s" % (said, loose)
+                target["content"] = ("%s 沟通与协助：%s。" % (target["content"], text))[
                     : int(cfg.get("max_content_len", 1800))
                 ]
-                log("[chat] 剩余 %d 条沟通写入 %s" % (len(unassigned), biggest["targetId"]))
+                log("[chat] 沟通写入 %s" % target["targetId"])
+            loose = ""
+        if loose:
+            biggest = max(entries, key=lambda e: e["hours"] or 0)
+            biggest["content"] = ("%s 沟通与协助：%s。" % (biggest["content"], loose))[
+                : int(cfg.get("max_content_len", 1800))
+            ]
+            log("[chat] 剩余沟通写入 %s" % biggest["targetId"])
 
     # 内部工具等 SKIP 目录的提交：压成一小段挂在最重的那条上，不额外占条目
     if side_notes:

@@ -530,6 +530,24 @@ class ParseWorklogDocTests(unittest.TestCase):
         doc.write_text("**主题**：x\n", encoding="utf-8")
         self.assertEqual(W.find_worklog_docs(self.root, datetime(2026, 11, 5)), [])
 
+    def test_analysis_doc_dated_today_is_not_a_worklog(self):
+        """技术分析文档名字里也带日期，不能被当成当天的工作日志。"""
+        (self.root / "文档核对").mkdir()
+        (self.root / "文档核对" / "企业所属产业链查询-新旧实现梳理-20261104.md").write_text(
+            "## 老实现\n\n1. 现在的做法\n", encoding="utf-8")
+        self.assertEqual(W.find_worklog_docs(self.root, datetime(2026, 11, 4)), [])
+
+    def test_doc_inside_the_worklog_folder_is_found(self):
+        (self.root / "工作日志").mkdir()
+        doc = self.root / "工作日志" / "2026-11-04.md"
+        doc.write_text("## 工时内容\n\n做了一件事。\n", encoding="utf-8")
+        self.assertEqual(W.find_worklog_docs(self.root, datetime(2026, 11, 4)), [doc])
+
+    def test_doc_named_like_a_daily_log_anywhere_is_found(self):
+        doc = self.root / "2026-11-04_工作日志.md"
+        doc.write_text("**主题**：x\n", encoding="utf-8")
+        self.assertEqual(W.find_worklog_docs(self.root, datetime(2026, 11, 4)), [doc])
+
     def test_hand_written_section_wins_over_the_auto_summary(self):
         doc = self.root / "2026-11-06_周五_工作日志.md"
         doc.write_text(
@@ -795,7 +813,31 @@ class CommitHighlightTests(unittest.TestCase):
         self.assertIn("392.7s", text)
         self.assertNotIn("\n", text)
 
-    def test_summary_without_a_body_still_reads_cleanly(self):
+    def test_security_commit_collapses_the_cve_list(self):
+        body = ("pagehelper 5.1.11 -> 5.3.2（严重 CVE-2022-28111，orderBy 盲注）；"
+                "freemarker 2.3.31 -> 2.3.35（严重 CVE-2026-84939，路径穿越）；"
+                "gson 2.8.6 -> 2.10.1（高危 CVE-2022-25647）；台账3条")
+        text = W.summarize_security("[security] 修复依赖严重漏洞", body)
+        self.assertIn("pagehelper 5.1.11→5.3.2", text)
+        self.assertIn("台账", text)
+        self.assertNotIn("CVE", text)
+        self.assertLessEqual(len(text), 110)
+
+    def test_security_commit_without_versions_keeps_the_subject(self):
+        text = W.summarize_security("[security] 修复依赖高危漏洞（严重30条/高危37条）", "")
+        self.assertIn("修复依赖高危漏洞", text)
+
+    def test_security_commits_are_summarised_in_the_entry(self):
+        ev = {"mapping": {}, "git": [{"repo": "ys-zk-product", "commits": 1, "subjects": [],
+                                      "details": [{"subject": "[security] 修复依赖严重漏洞",
+                                                   "body": "hutool-all 5.8.2 -> 5.8.41（CVE-2023-24162）；台账6条"}]}],
+              "files": {"files": 0, "samples": []}, "docs": [], "commits": 1}
+        text = W.summarize("客户 B", ev, base_cfg())
+        self.assertIn("hutool-all 5.8.2→5.8.41", text)
+        self.assertNotIn("CVE-2023-24162", text)
+
+
+
         ev = {"mapping": {}, "git": [{"repo": "r", "commits": 1, "subjects": [],
                                       "details": [{"subject": "fix(db): 修复方言兼容", "body": ""}]}],
               "files": {"files": 0, "samples": []}, "docs": [], "commits": 1}
