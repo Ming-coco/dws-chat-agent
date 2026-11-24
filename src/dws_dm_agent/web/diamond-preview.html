@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Oxanium:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
   <link rel="icon" href="/diamond-favicon.svg?v=3" type="image/svg+xml">
-  <link rel="stylesheet" href="/diamond-preview.css?v=1">
+  <link rel="stylesheet" href="/diamond-preview.css?v=9">
   <script src="/theme.js"></script>
 </head>
 <body>
@@ -26,7 +26,6 @@
         <a class="rail-link" href="#operations"><span>02</span><strong>Operations</strong></a>
         <a class="rail-link" href="#channels"><span>03</span><strong>Channels</strong></a>
       </nav>
-      <a class="rail-link rail-settings" href="/settings"><span>04</span><strong>Settings</strong></a>
     </aside>
 
     <header class="network-topbar">
@@ -245,10 +244,176 @@
         title.append(line, node("p", "", item.requestPreview || "历史记录未保存请求摘要"));
         const timing = node("span", "channel-time", `${time(item.finishedAt)} / ${duration(item.startedAt, item.finishedAt)}`);
         summary.append(sequence, title, timing); details.append(summary);
-        const body = node("div", "channel-body"); addBlock(body, "对方消息", item.requestPreview || "历史记录未保存请求摘要"); addBlock(body, "模型路径", lane); addBlock(body, "处理结果", item.handled); addBlock(body, "原因", item.reason);
+        const body = node("div", "channel-body");
+        // 详情和轨迹分成两个页签，默认看详情：
+        // 调用轨迹只在排查时需要，不该跟处理结果抢版面。
+        const tabs = node("div", "channel-tabs");
+        const tabDetail = node("button", "channel-tab on", "详情");
+        const tabTrace = node("button", "channel-tab", "轨迹");
+        tabDetail.type = "button"; tabTrace.type = "button";
+        tabs.append(tabDetail, tabTrace);
+        body.append(tabs);
+
+        const detailPane = node("div", "channel-pane");
+        addBlock(detailPane, "对方消息", item.requestPreview || "历史记录未保存请求摘要");
+        addBlock(detailPane, "模型路径", lane);
+        addBlock(detailPane, "处理结果", item.handled);
+        addBlock(detailPane, "原因", item.reason);
+
+        const tracePane = node("div", "channel-pane");
+        tracePane.hidden = true;
+        tracePane.append(tracePanel(item.traceId, item.sessionId));
+
+        body.append(detailPane, tracePane);
+
+        const switchTo = (showTrace) => {
+          tabDetail.classList.toggle("on", !showTrace);
+          tabTrace.classList.toggle("on", showTrace);
+          detailPane.hidden = showTrace;
+          tracePane.hidden = !showTrace;
+        };
+        tabDetail.addEventListener("click", () => switchTo(false));
+        tabTrace.addEventListener("click", () => switchTo(true));
         details.append(body); details.open = openRuns.has(item.sessionId);
         details.addEventListener("toggle", () => details.open ? openRuns.add(item.sessionId) : openRuns.delete(item.sessionId)); box.append(details);
       });
+    }
+
+    // ---- 调用链 ----
+    // 与普通控制台同一套数据（/api/traces），只是配色跟着钻石主题走。
+
+    const traceCache = new Map();
+
+    function spanText(ms) {
+      const value = Math.max(0, Number(ms) || 0);
+      if (value < 1000) return `${value}ms`;
+      if (value < 60000) return `${(value / 1000).toFixed(1)}s`;
+      const minutes = Math.floor(value / 60000);
+      const seconds = Math.round((value % 60000) / 1000);
+      return `${minutes}分${String(seconds).padStart(2, "0")}秒`;
+    }
+
+    function stepTone(step) {
+      if (step.kind === "stage") return "stage";
+      if (step.kind === "input") return "input";
+      if (step.kind === "thought") return "thought";
+      if (step.kind === "mark") return step.ok ? "mark" : "bad";
+      if (step.kind === "guard" && !step.ok) return "bad";
+      if (!step.ok) return "bad";
+      if ((step.duration || 0) >= 10000) return "slow";
+      return "";
+    }
+
+    function stepLabel(step) {
+      if (step.kind === "mark") return `结束：${step.name || "终止"}`;
+      if (step.kind === "input") return "对方消息";
+      if (step.kind === "thought") {
+        return step.duration ? `思考 · ${spanText(step.duration)}` : "思考";
+      }
+      if (step.kind === "reply") return step.name || "模型输出";
+      if (step.kind === "tool") return `${step.name || "工具"} · ${spanText(step.duration)}`;
+      if (step.kind === "stage") return step.name;
+      if (step.kind === "guard") return `校验：${step.name || "拦截"}${step.ok ? " 通过" : " 拦下"}`;
+      if (step.kind === "send") return `投递：${step.name || ""}`;
+      return step.name || step.kind;
+    }
+
+    function tracePanel(traceId, sessionId) {
+      // 外面已经有「详情 / 轨迹」页签，这里不再套折叠，直接是时间轴。
+      const box = node("div", "trace-panel");
+      const host = node("div", "trace-body", "加载中…");
+      box.append(host);
+
+      (async () => {
+        try {
+          const trace = await loadTrace(traceId, sessionId);
+          clear(host);
+          if (!trace) {
+            host.append(node("div", "empty", "这次处理没有留下调用轨迹"));
+            return;
+          }
+          host.append(renderTrace(trace));
+        } catch (error) {
+          clear(host);
+          host.append(node("div", "empty", `读取失败：${error.message}`));
+        }
+      })();
+      return box;
+    }
+
+    async function loadTrace(traceId, sessionId) {
+      const key = traceId || sessionId;
+      if (traceCache.has(key)) return traceCache.get(key);
+      if (!traceId) { traceCache.set(key, null); return null; }
+
+      const response = await fetch("/api/traces", {cache: "no-store"});
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      const fit = (data.traces || []).find((item) => item.traceId === traceId);
+      if (!fit) { traceCache.set(key, null); return null; }
+
+      const detail = await fetch(`/api/traces?file=${encodeURIComponent(fit.file)}`, {cache: "no-store"});
+      const trace = detail.ok ? await detail.json() : null;
+      traceCache.set(key, trace);
+      return trace;
+    }
+
+    function renderTrace(trace) {
+      const box = node("div", "trace");
+      // 不排序：记录顺序就是发生顺序
+      const steps = (trace.steps || []).slice();
+
+      let total = Number(trace.totalMs) || 0;
+      if (!total) {
+        steps.forEach((step) => {
+          total = Math.max(total, (Number(step.started) || 0) + (Number(step.duration) || 0));
+        });
+      }
+
+      const head = node("div", "trace-head");
+      head.append(
+        node("span", "trace-total", `总耗时 ${spanText(total)}`),
+        node("span", "trace-count", `${steps.filter(s => s.kind === "tool").length} 次工具调用`),
+        node("span", "trace-id", trace.traceId || "")
+      );
+      box.append(head);
+
+      // 输入单独放最前面：整条链的起点，比混在时间轴里更清楚
+      if (trace.input) {
+        const input = node("div", "trace-input");
+        input.append(node("strong", "", "输入"));
+        input.append(node("pre", "trace-content", trace.input));
+        box.append(input);
+      }
+
+      if (!steps.length) {
+        box.append(node("div", "empty", "没有记录到步骤"));
+        return box;
+      }
+
+      const list = node("div", "trace-steps");
+      steps.forEach((step) => {
+        const row = node("div", `trace-step ${stepTone(step)}`.trim());
+        row.append(node("span", "trace-dot"));
+        const main = node("div", "trace-main");
+        const line = node("div", "trace-line");
+        line.append(node("span", "trace-name", stepLabel(step)));
+        line.append(node("span", "trace-offset", `+${spanText(step.started)}`));
+        main.append(line);
+        if (step.content) main.append(node("pre", "trace-content", step.content));
+        row.append(main);
+        list.append(row);
+      });
+      box.append(list);
+
+      const blocked = steps.filter(step => step.kind === "guard" && !step.ok);
+      if (blocked.length) {
+        const warn = node("div", "trace-blocked");
+        warn.append(node("strong", "", "被拦下的原文"));
+        blocked.forEach(step => warn.append(node("pre", "trace-content", step.content || "(空)")));
+        box.append(warn);
+      }
+      return box;
     }
 
     function populateFilters(data) {
@@ -272,8 +437,12 @@
         if (!networkBootScheduled) {
           networkBootScheduled = true;
           const settle = () => { stage.dataset.networkState = networkHealthy ? "ready" : "stale"; };
-          if (matchMedia("(prefers-reduced-motion: reduce)").matches) settle();
-          else setTimeout(settle, 3200);
+          // 动画开关走 html[data-motion]（theme.js 写入，默认 on）。
+            // 直接看 prefers-reduced-motion 的话，系统一开「减少动效」，
+            // boot-corners 的收拢动画会被瞬间切走，一帧都看不到。
+            const motion = document.documentElement.dataset.motion || "on";
+            if (motion === "off") settle();
+            else setTimeout(settle, 3200);
         } else if (stage.dataset.networkState !== "booting") {
           stage.dataset.networkState = healthy ? "ready" : "stale";
         }

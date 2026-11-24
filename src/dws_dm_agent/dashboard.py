@@ -676,6 +676,8 @@ class DashboardServer:
         group_lister: Callable[[], list[dict[str, Any]]] | None = None,
         project_lister: Callable[[], list[str]] | None = None,
         project_store: Any = None,
+        trace_lister: Any = None,
+        trace_loader: Any = None,
         sandbox_status: Callable[[], dict[str, Any]] | None = None,
         sandbox_refresh: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
@@ -701,6 +703,8 @@ class DashboardServer:
         # 项目配置（服务器、数据库连接信息）。没注入时接口不注册，
         # 设置页里那块面板保持隐藏。
         self.project_store = project_store
+        self.trace_lister = trace_lister
+        self.trace_loader = trace_loader
         self.sandbox_status = sandbox_status
         self.sandbox_refresh = sandbox_refresh
         self.server: LocalThreadingHTTPServer | None = None
@@ -856,8 +860,6 @@ class DashboardServer:
                     self._send_json({"projects": projects})
                     return
                 if path == "/api/project-config" and dashboard.project_store is not None:
-                    from urllib.parse import parse_qs
-
                     try:
                         query = (
                             parse_qs(self.path.split("?", 1)[1])
@@ -871,6 +873,57 @@ class DashboardServer:
                             )
                             return
                         config = dashboard.project_store.load(name)
+
+                        # 显示密码：只有本机请求才允许，且每次记日志。
+                        # 面板本来只监听 127.0.0.1，这里再兜一层：
+                        # 万一被改成对外监听，也不能把明文密码送出去。
+                        reveal = (query.get("reveal") or [""])[0].strip()
+                        if reveal:
+                            client = self.client_address[0] if self.client_address else ""
+                            if client not in {"127.0.0.1", "::1", "localhost"}:
+                                LOG.warning(
+                                    "password reveal denied client=%s project=%s",
+                                    client,
+                                    name,
+                                )
+                                self._send_json(
+                                    {"error": "只有本机可以查看密码"}, status=403
+                                )
+                                return
+                            LOG.warning(
+                                "password reveal project=%s client=%s", name, client
+                            )
+                            secrets: dict[str, str] = {}
+                            if reveal == "server":
+                                secrets["password"] = config.server.password
+                            elif reveal.startswith("frontend:"):
+                                try:
+                                    index = int(reveal.split(":", 1)[1])
+                                    secrets["password"] = config.frontends[
+                                        index
+                                    ].login_password
+                                except (ValueError, IndexError):
+                                    self._send_json(
+                                        {"error": "前端序号无效"}, status=400
+                                    )
+                                    return
+                            elif reveal.startswith("database:"):
+                                try:
+                                    index = int(reveal.split(":", 1)[1])
+                                    secrets["password"] = config.databases[
+                                        index
+                                    ].password
+                                except (ValueError, IndexError):
+                                    self._send_json(
+                                        {"error": "数据库序号无效"}, status=400
+                                    )
+                                    return
+                            else:
+                                self._send_json({"error": "未知的 reveal 目标"}, status=400)
+                                return
+                            self._send_json(secrets)
+                            return
+
                         payload = {
                             "config": config.to_dict(mask_password=True),
                             "saved": dashboard.project_store.exists(name),
@@ -888,6 +941,25 @@ class DashboardServer:
                             )
                         except Exception:  # noqa: BLE001
                             pass
+                    return
+                if path == "/api/traces":
+                    if dashboard.trace_lister is None:
+                        self.send_error(404)
+                        return
+                    try:
+                        query = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+                        target = (query.get("file") or [""])[0].strip()
+                        if target:
+                            # 展开单个：返回完整步骤
+                            payload = dashboard.trace_loader(target) if dashboard.trace_loader else None
+                            if payload is None:
+                                self._send_json({"error": "找不到该记录"}, status=404)
+                                return
+                            self._send_json(payload)
+                        else:
+                            self._send_json({"traces": dashboard.trace_lister()})
+                    except Exception as exc:  # noqa: BLE001
+                        self._send_json({"error": str(exc)}, status=500)
                     return
                 if path == "/api/sandbox" and dashboard.sandbox_status is not None:
                     try:
@@ -1041,13 +1113,18 @@ class DashboardServer:
         active_conversations = {
             item.get("conversationId") for item in runtime.get("active", [])
         }
-        with sqlite3.connect(
+        # 显式关闭：with sqlite3.connect(...) 只管理事务，不会释放文件句柄。
+        # 泄漏的句柄会让 Windows 上的临时目录删不掉（测试里表现为 PermissionError）。
+        connection = sqlite3.connect(
             f"file:{self.database.as_posix()}?mode=ro", uri=True
-        ) as connection:
+        )
+        try:
             connection.row_factory = sqlite3.Row
             recent = self._recent_runs(connection, limit)
             queued = self._queued(connection, active_conversations)
             summary = self._summary(connection, runtime, queued)
+        finally:
+            connection.close()
         active = []
         for item in runtime.get("active", []):
             visible = dict(item)
@@ -1111,7 +1188,7 @@ class DashboardServer:
         rows = connection.execute(
             """
             SELECT session_id, contact_name, started_at, finished_at, action, status,
-                   handled, reason, codex_exit_code, request_preview
+                   handled, reason, codex_exit_code, request_preview, trace_id
             FROM runs ORDER BY finished_at DESC LIMIT ?
             """,
             (max(1, min(limit, 200)),),
@@ -1130,6 +1207,8 @@ class DashboardServer:
                     "reason": row["reason"],
                     "requestPreview": row["request_preview"],
                     "codexExitCode": row["codex_exit_code"],
+                    # 链路追踪 id：前端按它去找这次处理的调用链
+                    "traceId": row["trace_id"] or "",
                 }
             )
         return result

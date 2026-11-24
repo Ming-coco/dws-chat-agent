@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>DWS Chat Agent · 控制台</title>
   <link rel="icon" href="/favicon.svg?v=3" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=2">
+  <link rel="stylesheet" href="/app.css?v=7">
   <script src="/theme.js"></script>
 </head>
 <body>
@@ -170,10 +170,190 @@
         title.append(line, node("p", "", item.requestPreview || "历史记录未保存请求摘要"));
         top.append(title, node("span", "run-time", `${time(item.finishedAt)} · ${duration(item.startedAt, item.finishedAt)}`)); summary.append(top); details.append(summary);
         const body = node("div", "run-body"); addBlock(body, "对方消息", item.requestPreview || "历史记录未保存请求摘要"); addBlock(body, "模型路径", lane); addBlock(body, "处理结果", item.handled); addBlock(body, "原因", item.reason);
+        // 调用链默认不展开、不加载：首页每 3 秒刷新，
+        // 每次都把上百个步骤拉下来没有意义。
+        // 按 traceId 找调用链：一条消息无论跑了几个会话，都只有这一个 id
+        body.append(tracePanel(item.traceId, item.sessionId));
         details.append(body); details.open = openRuns.has(item.sessionId);
         details.addEventListener("toggle", () => details.open ? openRuns.add(item.sessionId) : openRuns.delete(item.sessionId));
         box.append(details);
       });
+    }
+
+    // ---- 调用链 ----
+
+    // 每个 run 的调用链缓存，避免反复请求同一份
+    const traceCache = new Map();
+
+    /** 毫秒转成可读时长：1.2s / 1分34秒 / 18分04秒 */
+    function spanText(ms) {
+      const value = Math.max(0, Number(ms) || 0);
+      if (value < 1000) return `${value}ms`;
+      if (value < 60000) return `${(value / 1000).toFixed(1)}s`;
+      const minutes = Math.floor(value / 60000);
+      const seconds = Math.round((value % 60000) / 1000);
+      return `${minutes}分${String(seconds).padStart(2, "0")}秒`;
+    }
+
+    /** 一步的样式：慢的标黄，失败的标红 */
+    function stepTone(step) {
+      if (step.kind === "stage") return "stage";
+      if (step.kind === "input") return "input";
+      if (step.kind === "thought") return "thought";
+      if (step.kind === "mark") return step.ok ? "mark" : "bad";
+      if (step.kind === "guard" && !step.ok) return "bad";
+      if (!step.ok) return "bad";
+      if ((step.duration || 0) >= 10000) return "slow";
+      return "";
+    }
+
+    /** 一步的一句话说明 */
+    function stepLabel(step) {
+      if (step.kind === "mark") return `结束：${step.name || "终止"}`;
+      if (step.kind === "input") return "对方消息";
+      if (step.kind === "thought") {
+        return step.duration ? `思考 · ${spanText(step.duration)}` : "思考";
+      }
+      if (step.kind === "reply") return step.name || "模型输出";
+      if (step.kind === "tool") {
+        return `${step.name || "工具"} · ${spanText(step.duration)}`;
+      }
+      if (step.kind === "stage") {
+        // 阶段是分组标题，耗时由后面的步骤体现；
+        // 显示 0ms 只会误导人
+        return step.name;
+      }
+      if (step.kind === "guard") {
+        return `校验：${step.name || "拦截"}${step.ok ? " 通过" : " 拦下"}`;
+      }
+      if (step.kind === "send") {
+        return `投递：${step.name || ""}`;
+      }
+      return step.name || step.kind;
+    }
+
+    /** 生成一个调用链面板，返回 <details> */
+    function tracePanel(traceId, sessionId) {
+      const details = node("details", "trace-panel");
+      const summary = node("summary", "trace-summary", "调用链");
+      details.append(summary);
+      const host = node("div", "trace-body", "展开后加载…");
+      details.append(host);
+
+      details.addEventListener("toggle", async () => {
+        if (!details.open || details.dataset.loaded) return;
+        details.dataset.loaded = "1";
+        clear(host);
+        host.append(node("div", "empty", "正在读取…"));
+        try {
+          const trace = await loadTrace(traceId, sessionId);
+          if (!trace) {
+            clear(host);
+            host.append(node("div", "empty", "这次处理没有留下调用链记录"));
+            return;
+          }
+          clear(host);
+          host.append(renderTrace(trace));
+        } catch (error) {
+          clear(host);
+          host.append(node("div", "empty", `读取失败：${error.message}`));
+        }
+      });
+      return details;
+    }
+
+    /** 按 traceId 找调用链。老记录没有 traceId，就显示无记录，不去猜。 */
+    async function loadTrace(traceId, sessionId) {
+      const key = traceId || sessionId;
+      if (traceCache.has(key)) return traceCache.get(key);
+
+      if (!traceId) {
+        traceCache.set(key, null);
+        return null;
+      }
+
+      const response = await fetch("/api/traces", {cache: "no-store"});
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      const list = data.traces || [];
+      const fit = list.find((item) => item.traceId === traceId);
+      if (!fit) { traceCache.set(key, null); return null; }
+
+      const detail = await fetch(`/api/traces?file=${encodeURIComponent(fit.file)}`, {cache: "no-store"});
+      const trace = detail.ok ? await detail.json() : null;
+      traceCache.set(key, trace);
+      return trace;
+    }
+
+    /** 把一份调用链渲染成时间轴 */
+    function renderTrace(trace) {
+      const box = node("div", "trace");
+      // 不排序：记录顺序就是发生顺序。
+      // 阶段用的是 begin/end 配对，started 固定为 0，参与排序会把它们全提到最前面。
+      const steps = (trace.steps || []).slice();
+
+      const head = node("div", "trace-head");
+      // 总耗时以 trace.totalMs 为准；为 0 时用最后一步的终点兜底
+      let total = Number(trace.totalMs) || 0;
+      if (!total) {
+        steps.forEach((step) => {
+          total = Math.max(total, (Number(step.started) || 0) + (Number(step.duration) || 0));
+        });
+      }
+      head.append(
+        node("span", "trace-total", `总耗时 ${spanText(total)}`),
+        node("span", "trace-count", `${steps.filter(s => s.kind === "tool").length} 次工具调用`)
+      );
+      box.append(head);
+
+      // 输入单独放最前面：整条链的起点
+      if (trace.input) {
+        const input = node("div", "trace-input");
+        input.append(node("strong", "", "输入"));
+        input.append(node("pre", "trace-content", trace.input));
+        box.append(input);
+      }
+
+      if (!steps.length) {
+        box.append(node("div", "empty", "没有记录到步骤"));
+        return box;
+      }
+
+      const list = node("div", "trace-steps");
+      steps.forEach((step) => {
+        const row = node("div", `trace-step ${stepTone(step)}`.trim());
+
+        // 左侧时间轴标记
+        const dot = node("span", "trace-dot");
+        row.append(dot);
+
+        const main = node("div", "trace-main");
+        const line = node("div", "trace-line");
+        line.append(node("span", "trace-name", stepLabel(step)));
+        // 相对开始的偏移，方便看出时间分布
+        line.append(node("span", "trace-offset", `+${spanText(step.started)}`));
+        main.append(line);
+
+        if (step.content) {
+          const pre = node("pre", "trace-content", step.content);
+          main.append(pre);
+        }
+        row.append(main);
+        list.append(row);
+      });
+      box.append(list);
+
+      // 被拦下的原文单独高亮，这是排查时最想看的
+      const blocked = steps.filter(step => step.kind === "guard" && !step.ok);
+      if (blocked.length) {
+        const warn = node("div", "trace-blocked");
+        warn.append(node("strong", "", "被拦下的原文"));
+        blocked.forEach(step => {
+          warn.append(node("pre", "trace-content", step.content || "(空)"));
+        });
+        box.append(warn);
+      }
+      return box;
     }
 
     function populateFilters(data) {

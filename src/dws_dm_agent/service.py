@@ -63,6 +63,8 @@ from .dashboard import AgentConfigStore, DashboardServer
 from .dws import DwsClient, _find_dws_error_code
 from .reply_guard import CONFIRM_REPLY, reply_problem
 from .project_config import ProjectStore
+from .run_trace import RunTrace, list_traces, load_trace, purge_expired
+from .core import new_trace_id
 from .mentions import mention_prefix, strip_bare_mentions
 from . import sandbox
 
@@ -482,6 +484,12 @@ class AgentService:
             group_lister=self._list_dingtalk_groups,
             project_lister=self._list_projects,
             project_store=ProjectStore(settings.state_dir / "projects"),
+            trace_lister=lambda: list_traces(
+                settings.state_dir / "traces", limit=50
+            ),
+            trace_loader=lambda name: load_trace(
+                settings.state_dir / "traces" / Path(name).name
+            ),
             sandbox_status=self._sandbox_status,
             sandbox_refresh=self._refresh_sandboxes,
             host=getattr(settings, "dashboard_host", "127.0.0.1"),
@@ -556,6 +564,39 @@ class AgentService:
     async def run(self) -> None:
         self.settings.state_dir.mkdir(parents=True, exist_ok=True)
         self.settings.worktree_root.mkdir(parents=True, exist_ok=True)
+        # 历史数据按保留期回收。启动时清一次就够：
+        # 这些只在排查时读，运行期间不需要频繁回收。
+        retention = self.settings.history_retention_days
+        removed_traces = purge_expired(
+            self.settings.state_dir / "traces", retention
+        )
+        if removed_traces:
+            LOG.info("purged %d expired traces", removed_traces)
+
+        # 项目配置格式升级：旧版把前端存成单个字段，现在改成了数组。
+        # 这里一次性转完，之后代码里只有一种格式。
+        try:
+            upgraded = ProjectStore(
+                self.settings.state_dir / "projects"
+            ).migrate_all()
+            if upgraded:
+                LOG.info("migrated project configs: %s", ", ".join(upgraded))
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("project config migration failed: %s", exc)
+
+        cutoff = datetime.now(self.settings.timezone) - timedelta(days=retention)
+        try:
+            removed_rows = self.store.purge_history(cutoff)
+            total_rows = sum(removed_rows.values())
+            if total_rows:
+                LOG.info(
+                    "purged %d expired history rows %s",
+                    total_rows,
+                    {k: v for k, v in removed_rows.items() if v},
+                )
+        except Exception as exc:  # noqa: BLE001
+            # 清理失败不该阻断服务启动
+            LOG.warning("history purge failed: %s", exc)
         LOG.info("starting mode=%s contacts=%d", self.mode, len(self.settings.contacts))
         self._rebuild_sandboxes(apply=True)
         days = self._task_memory_inactive_days()
@@ -661,6 +702,8 @@ class AgentService:
                         contact=contact,
                         content=message.content,
                         created_at=message.created_at,
+                        # 补漏的事件也要有 trace_id，否则这条消息的调用链无处可查
+                        trace_id=new_trace_id(message.created_at),
                         sender_open_dingtalk_id=message.sender_open_dingtalk_id,
                         sender_name=message.sender,
                     )
@@ -717,6 +760,7 @@ class AgentService:
                     contact=contact,
                     content=message.content,
                     created_at=message.created_at,
+                    trace_id=new_trace_id(message.created_at),
                 )
                 if self.store.claim_event(event):
                     self._enqueue(event)
@@ -801,6 +845,7 @@ class AgentService:
                 contact=contact,
                 content=message.content,
                 created_at=message.created_at,
+                trace_id=new_trace_id(message.created_at),
                 sender_open_dingtalk_id=message.sender_open_dingtalk_id,
                 sender_name=message.sender,
             )
@@ -1145,7 +1190,9 @@ class AgentService:
             candidate,
             self.settings.config_path,
             self.settings.workspace_root,
-            state_dir=self.settings.state_dir,
+            # state_dir 用于给页面测试桥接传递项目配置位置；
+            # 取不到就不传（runtime 里是可选参数），不影响配置应用本身。
+            state_dir=getattr(self.settings, "state_dir", None),
         )
         missing = [
             f"{name}: {binary}"
@@ -1667,6 +1714,7 @@ class AgentService:
                     contact=contact,
                     content=message.content,
                     created_at=message.created_at,
+                    trace_id=new_trace_id(message.created_at),
                     sender_open_dingtalk_id=message.sender_open_dingtalk_id,
                     sender_name=message.sender,
                 )
@@ -1773,6 +1821,46 @@ class AgentService:
         batch = initial_batch
         prior_attempt = ""
         max_replans = int(self.settings.raw.get("max_replans", 5))
+
+        # 调用链记录：一条消息从进来到投递完成，中间发生了什么。
+        # 出问题时能直接看这 18 分钟花在哪，而不是只有起止时间。
+        # 用消息自带的 trace_id：它在这条消息进系统时就生成了，
+        # 前台、执行、重试全程不变，所以能把整条链串起来。
+        trace = RunTrace(
+            self.settings.state_dir / "traces",
+            trace_id=batch[0].trace_id or new_trace_id(),
+            contact=batch[0].contact.alias,
+            # 配置缺失时按默认 30 天走，不要让整条处理链因为一个保留期崩掉
+            retention_days=int(
+                getattr(self.settings, "history_retention_days", 30)
+            ),
+        )
+        # 记下对方说了什么：调用链没有起点的话，事后看不出为什么做这些事。
+        # 这里用全文，不用 _request_preview 的 500 字摘要。
+        trace.set_input(
+            "\n\n".join(
+                f"[{item.sender_label}] {item.content}" for item in batch
+            )
+        )
+        trace.stage_begin("前台判断")
+        try:
+            await self._handle_batch_inner(
+                batch, prior_attempt, max_replans, trace
+            )
+        except Exception:
+            trace.finish(status="error", reason="exception")
+            raise
+        finally:
+            trace.finish()
+
+    async def _handle_batch_inner(
+        self,
+        initial_batch: list[IncomingEvent],
+        prior_attempt: str,
+        max_replans: int,
+        trace: "RunTrace | None",
+    ) -> None:
+        batch = initial_batch
         for attempt in range(max_replans):
             batch, history, latest_manual = await self._stabilize(batch)
             recent_context, _ = self._recent_context(history, batch)
@@ -1788,6 +1876,7 @@ class AgentService:
                     action="no_reply",
                     handled="人工会话仍在接管期，未自动回复",
                     reason="manual_message_within_cooldown",
+                    trace=trace,
                 )
                 self.store.update_event_status(
                     (item.message_id for item in batch), "skipped", "human_cooldown"
@@ -1867,7 +1956,8 @@ class AgentService:
                     prior_attempt,
                     front=True,
                     recent_context=recent_context,
-                )
+            trace=trace,
+        )
                 if front_result.consumed_supplements:
                     batch = self._deduplicate(
                         [*batch, *front_result.consumed_supplements]
@@ -1911,6 +2001,7 @@ class AgentService:
                     batch,
                     prior_attempt,
                     recent_context=recent_context,
+                    trace=trace,
                 )
                 if result.consumed_supplements:
                     batch = self._deduplicate(
@@ -1918,6 +2009,12 @@ class AgentService:
                     )
 
             if result.manual_takeover:
+                if trace is not None:
+                    trace.mark(
+                        "人工接管",
+                        ok=True,
+                        content="检测到人工介入，自动处理中断，已产生的调查结果未发送",
+                    )
                 await self._close_active_streaming_card(
                     batch[0].conversation_id, "已停止自动处理，已转人工。"
                 )
@@ -1932,11 +2029,24 @@ class AgentService:
                 prior_attempt = "对方补充了消息，按新的完整上下文继续。"
                 await asyncio.sleep(self.settings.quiet_window)
                 continue
+            if trace is not None and getattr(result, "silent", False):
+                trace.mark(
+                    "主动沉默",
+                    ok=True,
+                    content="模型判断无需回复，本次处理正常结束",
+                )
+                trace.set_outcome("silent", "silent")
             if result.silent:
                 # 模型显式选择沉默：成功终态，不触发兜底回复、不写发送队列。
                 await self._finish_silent(batch, result)
                 return
             if result.reply is None:
+                if trace is not None:
+                    trace.mark(
+                        "处理失败",
+                        ok=False,
+                        content=f"{result.error or '未产出回复'}"[:500],
+                    )
                 # 失败要通知联系人：卡片模式下此时才建卡，纯文本模式直接发文本。
                 await self._notify_terminal(
                     batch, result.session_id, "处理失败，请稍后重试或转人工处理。"
@@ -1959,6 +2069,14 @@ class AgentService:
                     batch[0].contact.alias,
                     len(result.reply),
                 )
+                # 原文全量留一份：只记字符数的话，事后没法知道它到底想说什么
+                if trace is not None:
+                    trace.guard(
+                        "asking_back",
+                        blocked=True,
+                        content=result.reply,
+                        extra={"chars": len(result.reply)},
+                    )
                 self._record_agent_result(batch, result, status="asking_back")
                 result.reply = CONFIRM_REPLY
                 problem = ""
@@ -2003,6 +2121,15 @@ class AgentService:
                     result.reply,
                     session_id=result.session_id,
                 )
+                # 记下最终结果。必须放在拿到 outcome 之后：写在前面会引用
+                # 尚未绑定的变量，异常还会被下面的 except 吞成「发送失败」。
+                if trace is not None:
+                    trace.set_outcome(
+                        "sent" if outcome in {"sent", "shadow"} else str(outcome)
+                    )
+                    # 把实际投递出去的正文也记一笔：
+                    # 只看工具调用不知道最后回了什么，等于没闭环。
+                    trace.send(content=result.reply, status=str(outcome))
             except Exception as exc:
                 await self._close_active_streaming_card(
                     batch[0].conversation_id, "结果发送失败，请稍后重试。"
@@ -2031,6 +2158,7 @@ class AgentService:
             action="no_reply",
             handled="对方持续补充消息，本轮未抢答",
             reason="max_replans_reached",
+            trace=trace,
         )
         self.store.update_event_status(
             (item.message_id for item in batch), "skipped", "max_replans_reached"
@@ -2189,8 +2317,14 @@ class AgentService:
         handled: str,
         reason: str,
         session_id: str = "",
+        trace: "RunTrace | None" = None,
     ) -> None:
         now = datetime.now(self.settings.timezone)
+        if trace is not None:
+            # 不走 agent 的终态也要在轨迹里留痕，
+            # 否则看起来像处理到一半断了。
+            trace.mark(reason or status, ok=status in {"sent"}, content=handled)
+            trace.set_outcome(status, reason)
         self.store.record_run(
             session_id=session_id or f"code-{uuid.uuid4().hex[:12]}",
             conversation_id=batch[0].conversation_id,
@@ -2203,6 +2337,7 @@ class AgentService:
             reason=reason,
             codex_exit_code=None,
             request_preview=self._request_preview(batch),
+            trace_id=batch[0].trace_id,
         )
 
     async def _finish_silent(
@@ -2247,6 +2382,7 @@ class AgentService:
             reason=result.error,
             codex_exit_code=result.exit_code,
             request_preview=self._request_preview(batch),
+            trace_id=batch[0].trace_id,
         )
 
     def _task_memory_inactive_days(self) -> int:
@@ -2426,12 +2562,14 @@ class AgentService:
         prior_attempt: str,
         *,
         recent_context: Sequence[Mapping[str, str]] = (),
+        trace: "RunTrace | None" = None,
     ) -> AgentResult:
         """按主 worker + fallbacks 链执行；无回复视为该 agent 失败，切换链上下一个。"""
         result = await self._run_agent(
             batch,
             prior_attempt,
             recent_context=recent_context,
+            trace=trace,
         )
         fallbacks = self.agent_runtime._stage("worker").profile.fallbacks
         for index, agent_name in enumerate(fallbacks, start=1):
@@ -2455,7 +2593,8 @@ class AgentService:
                 prior_attempt,
                 recent_context=recent_context,
                 agent_override=agent_name,
-            )
+            trace=trace,
+        )
         return result
 
     async def _run_agent(
@@ -2466,6 +2605,7 @@ class AgentService:
         front: bool = False,
         recent_context: Sequence[Mapping[str, str]] = (),
         agent_override: str | None = None,
+        trace: "RunTrace | None" = None,
     ) -> AgentResult:
         stage = "front" if front else "worker"
         profile = re.sub(
@@ -2529,6 +2669,9 @@ class AgentService:
                 task_context=task_context,
                 workspace=workspace,
             )
+            # 挂上调用链记录器：工具调用会写进 trace，事后能回放。
+            # 同时记下真实会话 id——首页的每条记录用它来匹配调用链。
+            session.trace = trace
             if task_context is not None:
                 # 写入租约先于会话启动登记：task_tools.py 直连审计库的
                 # 事务在拿到 SQLite 写锁后仍会校验租约，接管/取消后排队

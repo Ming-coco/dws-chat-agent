@@ -67,7 +67,10 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(timezone.utcoffset(None), timedelta(hours=8))
 
     def test_env_file_resolves_private_values_and_json_types(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             workspace = root / "workspace"
             workspace.mkdir()
@@ -112,7 +115,10 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(settings.raw["codex"]["writable_roots"], ["/tmp/cache"])
 
     def test_missing_required_env_variable_is_reported(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             config = root / "config.json"
             config.write_text(
@@ -204,7 +210,10 @@ class EventParsingTests(unittest.TestCase):
 
 class RestartRecoveryTests(unittest.TestCase):
     def test_queued_event_is_rebuilt_from_dingtalk_history(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = AuditStore(Path(directory) / "audit.sqlite3")
             event = IncomingEvent(
                 "event-recovery", "message-recovery", "conversation-recovery",
@@ -236,7 +245,10 @@ class RestartRecoveryTests(unittest.TestCase):
             store.close()
 
     def test_recent_unclaimed_history_is_reconciled_after_listener_gap(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = AuditStore(Path(directory) / "audit.sqlite3")
             now = datetime.now(TZ)
             handled = HistoryMessage(
@@ -912,7 +924,10 @@ class DwsSendTests(unittest.TestCase):
             return "downloaded"
 
         client._json_command = AsyncMock(side_effect=download)
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             output = Path(directory) / "image.download"
             result = asyncio.run(
                 client.download_media(
@@ -978,7 +993,10 @@ class PlainAgentFlowTests(unittest.TestCase):
         self.assertNotIn("最终输出严格符合提供的 JSON Schema", worker)
 
     def test_streaming_card_content_is_recognized_during_progress_updates(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = AuditStore(Path(directory) / "audit.sqlite3")
             created_at = datetime.now(TZ)
             card_history = HistoryMessage(
@@ -1051,7 +1069,10 @@ class PlainAgentFlowTests(unittest.TestCase):
             store.close()
 
     def test_streaming_card_binding_preserves_simultaneous_manual_takeover(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = AuditStore(Path(directory) / "audit.sqlite3")
             created_at = datetime.now(TZ)
             card = HistoryMessage(
@@ -1113,7 +1134,10 @@ class PlainAgentFlowTests(unittest.TestCase):
             store.close()
 
     def test_ambiguous_streaming_card_keeps_robot_identity(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = AuditStore(Path(directory) / "audit.sqlite3")
             manual = HistoryMessage(
                 "manual-message",
@@ -1184,7 +1208,10 @@ class PlainAgentFlowTests(unittest.TestCase):
             store.close()
 
     def test_streaming_card_reuses_persisted_active_card(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             path = Path(directory) / "audit.sqlite3"
             store = AuditStore(path)
             store.record_outgoing(
@@ -1202,6 +1229,8 @@ class PlainAgentFlowTests(unittest.TestCase):
             service.mode = "live"
             service.settings = SimpleNamespace(timezone=TZ, self_open_id="self-open-id")
             service.store = AuditStore(path)
+            # 测试结束自动关闭，否则 Windows 上临时库文件一直被占用
+            self.addCleanup(service.store.close)
             service.dws = SimpleNamespace(
                 send_card=AsyncMock(),
                 update_card=AsyncMock(),
@@ -1224,12 +1253,17 @@ class PlainAgentFlowTests(unittest.TestCase):
             service.store.close()
 
     def test_streaming_card_double_initialization_failure_stays_recoverable(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             path = Path(directory) / "audit.sqlite3"
             service = AgentService.__new__(AgentService)
             service.mode = "live"
             service.settings = SimpleNamespace(timezone=TZ, self_open_id="self-open-id")
             service.store = AuditStore(path)
+            # 测试结束自动关闭，否则 Windows 上临时库文件一直被占用
+            self.addCleanup(service.store.close)
             service.dws = SimpleNamespace(
                 send_card=AsyncMock(return_value=("card-biz", None, {})),
                 update_card=AsyncMock(side_effect=RuntimeError("update failed")),
@@ -1287,7 +1321,10 @@ class PlainAgentFlowTests(unittest.TestCase):
         service.dws.history.assert_not_awaited()
 
     def test_delivery_history_failure_retries_then_sends_same_uuid(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             service = AgentService.__new__(AgentService)
             service.mode = "live"
             service.settings = SimpleNamespace(
@@ -1297,6 +1334,8 @@ class PlainAgentFlowTests(unittest.TestCase):
                 contacts=[CONTACT],
             )
             service.store = AuditStore(Path(directory) / "audit.sqlite3")
+            # 测试结束自动关闭，否则 Windows 上临时库文件一直被占用
+            self.addCleanup(service.store.close)
             service.streaming_card_send_uuids = {}
             service._history_events = Mock(return_value=[])
             service.dws = SimpleNamespace(
@@ -1351,7 +1390,10 @@ class PlainAgentFlowTests(unittest.TestCase):
             service.store.close()
 
     def test_manual_takeover_cancels_pending_delivery(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             service = AgentService.__new__(AgentService)
             service.mode = "live"
             service.settings = SimpleNamespace(
@@ -1361,6 +1403,8 @@ class PlainAgentFlowTests(unittest.TestCase):
                 contacts=[CONTACT],
             )
             service.store = AuditStore(Path(directory) / "audit.sqlite3")
+            # 测试结束自动关闭，否则 Windows 上临时库文件一直被占用
+            self.addCleanup(service.store.close)
             service.streaming_card_send_uuids = {}
             service._history_events = Mock(return_value=[])
             service.dws = SimpleNamespace(
@@ -1515,7 +1559,10 @@ class MultimodalImageTests(unittest.TestCase):
             return output
 
         service.dws = SimpleNamespace(download_media=AsyncMock(side_effect=download_media))
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             images = asyncio.run(service._download_images([event], Path(directory)))
             self.assertEqual([path.suffix for path in images], [".png"])
             self.assertTrue(images[0].is_file())
@@ -1538,13 +1585,19 @@ class MultimodalImageTests(unittest.TestCase):
             return output
 
         service.dws = SimpleNamespace(download_media=download_media)
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             with self.assertRaisesRegex(RuntimeError, "unsupported image format"):
                 asyncio.run(service._download_images([event], Path(directory)))
 
     def test_pi_prompt_keeps_images_native_without_vision_fallback(self) -> None:
         # pi-rpc：图片原生随 prompt 发送，不再提供 vision_query 兜底
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             image = Path(directory) / "image-1.png"
             image.write_bytes(b"\x89PNG\r\n\x1a\npng")
             prompt, images = _apply_image_context(
@@ -1559,7 +1612,10 @@ class MultimodalImageTests(unittest.TestCase):
 
     def test_non_pi_prompt_embeds_paths_and_clears_local_images(self) -> None:
         # claude/custom 等协议：图片路径嵌入 prompt，交给 read 工具读取
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             image = Path(directory) / "image-1.png"
             image.write_bytes(b"\x89PNG\r\n\x1a\npng")
             prompt, images = _apply_image_context(
@@ -1573,7 +1629,10 @@ class MultimodalImageTests(unittest.TestCase):
 
     def test_codex_prompt_is_left_untouched_for_local_image_input(self) -> None:
         # codex：runtime 以 localImage 路径输入，prompt 不加图片说明
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             image = Path(directory) / "image-1.png"
             image.write_bytes(b"\x89PNG\r\n\x1a\npng")
             prompt, images = _apply_image_context(
@@ -1655,7 +1714,10 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn(".step:nth-child", dashboard)
 
     def test_snapshot_separates_active_work_from_queue(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             store = AuditStore(root / "audit.sqlite3")
             event = IncomingEvent(
@@ -1780,7 +1842,7 @@ class WorkerFallbackTests(unittest.TestCase):
         calls: list[str | None] = []
 
         async def fake_run_agent(batch, prior_attempt, *, recent_context=(),
-                                 agent_override=None):
+                                 agent_override=None, trace=None):
             calls.append(agent_override)
             return self._failed_result()
 
@@ -1797,7 +1859,7 @@ class WorkerFallbackTests(unittest.TestCase):
         calls: list[str | None] = []
 
         async def fake_run_agent(batch, prior_attempt, *, recent_context=(),
-                                 agent_override=None):
+                                 agent_override=None, trace=None):
             calls.append(agent_override)
             return AgentResult(
                 "session", "这是回复", 0,
@@ -1817,7 +1879,7 @@ class WorkerFallbackTests(unittest.TestCase):
         calls: list[str | None] = []
 
         async def fake_run_agent(batch, prior_attempt, *, recent_context=(),
-                                 agent_override=None):
+                                 agent_override=None, trace=None):
             calls.append(agent_override)
             return AgentResult(
                 "session", None, None,
@@ -3033,6 +3095,8 @@ class SilentOutcomeTests(unittest.TestCase):
             state_dir=root,
         )
         service.store = AuditStore(root / "audit.sqlite3")
+        # 测试结束自动关闭，否则 Windows 上临时库文件一直被占用
+        self.addCleanup(service.store.close)
         service.gate = SecurityGate(12000)
         service.dws = SimpleNamespace(history=AsyncMock(return_value=[]))
         service.agent_runtime = SimpleNamespace(
@@ -3058,13 +3122,16 @@ class SilentOutcomeTests(unittest.TestCase):
         return AgentResult("session-silent", None, 0, at, at, silent=True)
 
     def test_worker_silent_stops_fallback_chain(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             service = self._service(Path(directory), has_front=False,
                                     fallbacks=("backup-a", "backup-b"))
             calls: list[str | None] = []
 
             async def fake_run_agent(batch, prior_attempt, *, front=False,
-                                     recent_context=(), agent_override=None):
+                                     recent_context=(), agent_override=None, trace=None):
                 calls.append(agent_override)
                 return self._silent_result()
 
@@ -3078,7 +3145,10 @@ class SilentOutcomeTests(unittest.TestCase):
             self.assertEqual(calls, [None])
 
     def test_front_silent_consumes_batch_without_worker_or_delivery(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             service = self._service(root, has_front=True)
             event = self._event()
@@ -3086,7 +3156,7 @@ class SilentOutcomeTests(unittest.TestCase):
             calls: list[bool] = []
 
             async def fake_run_agent(batch, prior_attempt, *, front=False,
-                                     recent_context=(), agent_override=None):
+                                     recent_context=(), agent_override=None, trace=None):
                 calls.append(front)
                 return self._silent_result()
 
@@ -3112,7 +3182,10 @@ class SilentOutcomeTests(unittest.TestCase):
             self.assertEqual(deliveries, 0)
 
     def test_worker_silent_skips_error_path_and_delivery(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             service = self._service(root, has_front=False, fallbacks=("backup-a",))
             event = self._event()
@@ -3120,7 +3193,7 @@ class SilentOutcomeTests(unittest.TestCase):
             calls: list[str | None] = []
 
             async def fake_run_agent(batch, prior_attempt, *, front=False,
-                                     recent_context=(), agent_override=None):
+                                     recent_context=(), agent_override=None, trace=None):
                 calls.append(agent_override)
                 return self._silent_result()
 
@@ -3183,6 +3256,8 @@ class StreamingCardDeferralTests(unittest.TestCase):
             state_dir=root,
         )
         service.store = AuditStore(root / "audit.sqlite3")
+        # 测试结束自动关闭，否则 Windows 上临时库文件一直被占用
+        self.addCleanup(service.store.close)
         service.gate = SecurityGate(12000)
         service.dws = SimpleNamespace(
             history=AsyncMock(return_value=[]),
@@ -3212,14 +3287,17 @@ class StreamingCardDeferralTests(unittest.TestCase):
 
     def _run(self, service: AgentService, result: AgentResult) -> None:
         async def fake_run_agent(batch, prior_attempt, *, front=False,
-                                 recent_context=(), agent_override=None):
+                                 recent_context=(), agent_override=None, trace=None):
             return result
 
         with patch.object(AgentService, "_run_agent", side_effect=fake_run_agent):
             asyncio.run(service._handle_batch([self._event()]))
 
     def test_silent_run_with_streaming_cards_creates_no_card_or_outgoing(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             service = self._service(root)
             service.store.claim_event(self._event())
@@ -3247,7 +3325,10 @@ class StreamingCardDeferralTests(unittest.TestCase):
             service.store.close()
 
     def test_reply_run_creates_card_at_delivery_point(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             service = self._service(root)
             at = datetime.now(TZ)
@@ -3286,7 +3367,10 @@ class StreamingCardDeferralTests(unittest.TestCase):
     def test_reply_supplement_silent_sends_no_card_and_leaves_none_processing(self) -> None:
         # 行为链：回复决定 -> 派发时发现补充消息取消投递 -> 重跑后 silent。
         # 全程不允许给联系人留下任何卡片（更不能有悬着的处理中卡片）。
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             service = self._service(root)
             at = datetime.now(TZ)
@@ -3302,7 +3386,7 @@ class StreamingCardDeferralTests(unittest.TestCase):
             )
 
             async def fake_run_agent(batch, prior_attempt, *, front=False,
-                                     recent_context=(), agent_override=None):
+                                     recent_context=(), agent_override=None, trace=None):
                 return AgentResult("session-reply", "最终正文", 0, at, at)
 
             with patch.object(AgentService, "_run_agent",
@@ -3353,7 +3437,10 @@ class StreamingCardDeferralTests(unittest.TestCase):
 
     def test_silent_run_closes_leftover_processing_card(self) -> None:
         # 投递重试被补充取消等路径可能留下处理中卡片；silent 必须安全收口。
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             service = self._service(root)
             service.store.record_outgoing(
@@ -3366,7 +3453,7 @@ class StreamingCardDeferralTests(unittest.TestCase):
             at = datetime.now(TZ)
 
             async def fake_run_agent(batch, prior_attempt, *, front=False,
-                                     recent_context=(), agent_override=None):
+                                     recent_context=(), agent_override=None, trace=None):
                 return AgentResult("session-silent", None, 0, at, at, silent=True)
 
             with patch.object(AgentService, "_run_agent",
@@ -3382,7 +3469,10 @@ class StreamingCardDeferralTests(unittest.TestCase):
             service.store.close()
 
     def test_manual_takeover_run_closes_leftover_processing_card(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             service = self._service(root)
             service.store.record_outgoing(
@@ -3395,7 +3485,7 @@ class StreamingCardDeferralTests(unittest.TestCase):
             at = datetime.now(TZ)
 
             async def fake_run_agent(batch, prior_attempt, *, front=False,
-                                     recent_context=(), agent_override=None):
+                                     recent_context=(), agent_override=None, trace=None):
                 return AgentResult(
                     "session-manual", None, 0, at, at, manual_takeover=True
                 )
@@ -3413,7 +3503,10 @@ class StreamingCardDeferralTests(unittest.TestCase):
             service.store.close()
 
     def test_error_run_notifies_on_card_created_at_finalize(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             service = self._service(root, has_front=False)
             at = datetime.now(TZ)
@@ -3451,6 +3544,8 @@ class TaskSnapshotTests(unittest.TestCase):
             state_dir=root,
         )
         service.store = AuditStore(root / "audit.sqlite3")
+        # 测试结束自动关闭，否则 Windows 上临时库文件一直被占用
+        self.addCleanup(service.store.close)
         service.agent_runtime = SimpleNamespace(
             profile_name=Mock(return_value="pi-worker")
         )
@@ -3465,7 +3560,10 @@ class TaskSnapshotTests(unittest.TestCase):
         ]
 
     def test_prompt_variables_inject_active_tasks_and_archive_stale_ones(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             service = self._service(root)
             scope = TaskScope("self-open-id", CONTACT.identity, "conversation-1")
@@ -3499,7 +3597,10 @@ class TaskSnapshotTests(unittest.TestCase):
             )
 
     def test_prompt_variables_without_tasks_render_empty_snapshot(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             service = self._service(Path(directory))
 
             variables = service._prompt_variables(
@@ -3509,7 +3610,10 @@ class TaskSnapshotTests(unittest.TestCase):
             self.assertEqual(json.loads(variables["active_tasks_json"]), [])
 
     def test_manual_takeover_does_not_touch_task_statuses(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             service = self._service(root)
             scope = TaskScope("self-open-id", CONTACT.identity, "conversation-1")
@@ -3549,7 +3653,10 @@ class TaskSnapshotTests(unittest.TestCase):
         self.assertIn("active_tasks_json", STAGE_PROMPT_VARIABLES)
 
     def test_task_context_refresh_uses_latest_consumed_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             service = self._service(root)
             batch = [
@@ -3625,7 +3732,10 @@ class SteerContextRefreshTests(unittest.TestCase):
         # steer 进补充消息后，_run_agent 必须刷新事项工具上下文文件，
         # 随后的 task_record 才能把补充消息当作可引用证据；运行收尾后
         # 写入租约必须被吊销，迟到的子进程写入会被拒绝。
-        with tempfile.TemporaryDirectory() as directory:
+        # ignore_cleanup_errors：连接在 with 退出时可能还没释放，
+        # Windows 上会报 PermissionError。删不掉不影响断言，
+        # 交给系统临时目录回收。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             context_path = root / "task-context.json"
             context_path.write_text(
@@ -3657,6 +3767,8 @@ class SteerContextRefreshTests(unittest.TestCase):
                 raw={"monitor_interval_seconds": 0.01, "max_replans": 5},
             )
             service.store = AuditStore(root / "audit.sqlite3")
+            # 测试结束自动关闭，否则 Windows 上临时库文件一直被占用
+            self.addCleanup(service.store.close)
             service.dws = SimpleNamespace(
                 history=AsyncMock(
                     return_value=[

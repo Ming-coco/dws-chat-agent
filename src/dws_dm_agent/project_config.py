@@ -34,6 +34,16 @@ class ProjectConfigError(ValueError):
 
 
 @dataclass
+class FrontendConfig:
+    """一套前端。PC 端、移动端各自独立配地址和登录凭据。"""
+
+    name: str = ""
+    url: str = ""
+    login_user: str = ""
+    login_password: str = ""
+
+
+@dataclass
 class DatabaseConfig:
     name: str = ""
     type: str = "mysql"
@@ -56,11 +66,9 @@ class ServerConfig:
 @dataclass
 class ProjectConfig:
     name: str = ""
-    frontend: str = ""
     note: str = ""
-    # 登录被测系统的账号。密码和服务器密码一样只回传掩码。
-    login_user: str = ""
-    login_password: str = ""
+    # 一个项目可能有多套前端（PC / 移动端），各配各的地址和账号。
+    frontends: list[FrontendConfig] = field(default_factory=list)
     server: ServerConfig = field(default_factory=ServerConfig)
     databases: list[DatabaseConfig] = field(default_factory=list)
 
@@ -73,27 +81,39 @@ class ProjectConfig:
         data = asdict(self)
         server = data.get("server") or {}
         server["deployDir"] = server.pop("deploy_dir", "")
-        data.pop("e2e_config", None)
-        if mask_password and data.get("login_password"):
-            data["login_password"] = MASK
         if mask_password:
             if server.get("password"):
                 server["password"] = MASK
             for database in data.get("databases") or []:
                 if database.get("password"):
                     database["password"] = MASK
+            for frontend in data.get("frontends") or []:
+                if frontend.get("login_password"):
+                    frontend["login_password"] = MASK
         return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ProjectConfig":
         server_raw = data.get("server") or {}
         databases_raw = data.get("databases") or []
+
+        # 只认 frontends 数组。旧格式由 migrate_legacy() 在启动时一次性转换，
+        # 读取路径不再保留兼容分支。
+        frontends = [
+            FrontendConfig(
+                name=str(item.get("name") or f"前端{index + 1}"),
+                url=str(item.get("url") or ""),
+                login_user=str(item.get("login_user") or ""),
+                login_password=str(item.get("login_password") or ""),
+            )
+            for index, item in enumerate(data.get("frontends") or [])
+            if isinstance(item, dict)
+        ]
+
         return cls(
             name=str(data.get("name") or ""),
-            frontend=str(data.get("frontend") or ""),
             note=str(data.get("note") or ""),
-            login_user=str(data.get("login_user") or ""),
-            login_password=str(data.get("login_password") or ""),
+            frontends=frontends,
             server=ServerConfig(
                 host=str(server_raw.get("host") or ""),
                 port=_to_int(server_raw.get("port"), 22),
@@ -122,6 +142,30 @@ def _to_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def migrate_legacy(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """把旧格式的单个 frontend 转成 frontends 数组。
+
+    返回 (新数据, 是否发生了改动)。只处理一次：
+    转换后旧字段被删除，再跑就是原样返回。
+    """
+    if "frontends" in raw:
+        return raw, False
+
+    url = raw.pop("frontend", None)
+    if not url:
+        return raw, False
+
+    raw["frontends"] = [
+        {
+            "name": "前端",
+            "url": str(url),
+            "login_user": str(raw.pop("login_user", "") or ""),
+            "login_password": str(raw.pop("login_password", "") or ""),
+        }
+    ]
+    return raw, True
 
 
 class ProjectStore:
@@ -158,9 +202,49 @@ class ProjectStore:
             data = json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError) as error:
             raise ProjectConfigError(f"读取失败 {path.name}: {error}") from error
+
+        # 旧格式在这里就地升级：from_dict 只认新格式，
+        # 所以读到旧的先转一遍再解析。
+        data, migrated = migrate_legacy(data)
         config = ProjectConfig.from_dict(data)
         config.name = name
+        if migrated:
+            # 写回，下次读就是新格式了
+            try:
+                self.save(config)
+            except (OSError, ProjectConfigError):
+                # 写不进去也不影响本次读取
+                pass
         return config
+
+    def migrate_all(self) -> list[str]:
+        """把所有旧格式的项目文件升级成新格式，返回升级过的项目名。
+
+        服务启动时调一次。已经在 load() 里做了单文件迁移，
+        这里是批量版，方便日志里一次性看到升级了哪些。
+        """
+        migrated: list[str] = []
+        for path in sorted(self.root.glob("*.json")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            data, changed = migrate_legacy(raw)
+            if not changed:
+                continue
+            try:
+                # 直接写文件，不走 save()：save 内部会 load 旧配置来保留掩码密码，
+                # 而 load 又会触发迁移，形成无限递归（实测栈溢出）。
+                # 迁移只是搬格式，旧文件里存的就是真密码，原样搬过去即可。
+                path.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                _restrict_to_owner(path)
+                migrated.append(path.stem)
+            except OSError:
+                continue
+        return migrated
 
     def save(self, config: ProjectConfig) -> Path:
         if not config.name:
@@ -171,8 +255,13 @@ class ProjectStore:
         previous = self.load(config.name)
         if config.server.password == MASK:
             config.server.password = previous.server.password
-        if config.login_password == MASK:
-            config.login_password = previous.login_password
+        # 前端密码同样：掩码表示没改，沿用原值。按位置对应，
+        # 因为用户可能在中间插入了一条，用名字匹配反而容易错位。
+        for index, frontend in enumerate(config.frontends):
+            if frontend.login_password != MASK:
+                continue
+            if index < len(previous.frontends):
+                frontend.login_password = previous.frontends[index].login_password
         for index, database in enumerate(config.databases):
             if database.password != MASK:
                 continue
@@ -234,10 +323,12 @@ def _icacls(args: list[str]) -> bool:
 def describe(config: ProjectConfig) -> str:
     """给 agent 看的一句话摘要。不包含任何密码。"""
     parts: list[str] = []
-    if config.frontend:
-        label = f"前端 {config.frontend}"
-        if config.login_user:
-            label += f"（账号 {config.login_user}）"
+    for frontend in config.frontends:
+        if not frontend.url:
+            continue
+        label = f"{frontend.name or '前端'} {frontend.url}"
+        if frontend.login_user:
+            label += f"（账号 {frontend.login_user}）"
         parts.append(label)
     if config.server.host:
         parts.append(f"服务器 {config.server.user}@{config.server.host}:{config.server.port}")

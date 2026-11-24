@@ -29,6 +29,14 @@ _ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
+def _int_or(value: Any, default: int) -> int:
+    """把配置值转成 int，转不了就用默认值。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     raw: dict[str, Any]
@@ -43,6 +51,10 @@ class Settings:
     sandbox_root: Path
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8765
+    # 历史保留天数：会话记录（runs/events/outgoing/manual_messages）
+    # 和调用轨迹（state/traces）都用这个值，避免出现「有记录没轨迹」的空档。
+    # 事项记忆（tasks）不受影响，那是长期上下文。
+    history_retention_days: int = 30
 
     @property
     def mode(self) -> str:
@@ -303,6 +315,7 @@ def load_settings(path: Path, env_path: Path = DEFAULT_ENV) -> Settings:
         sandbox_root=sandbox_root,
         dashboard_host=dashboard_host,
         dashboard_port=dashboard_port,
+        history_retention_days=_int_or(raw.get("history_retention_days"), 30),
     )
 
 

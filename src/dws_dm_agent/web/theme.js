@@ -2,6 +2,13 @@
   "use strict";
 
   const DESIGN_KEY = "dws-chat-agent-design-v1";
+  // 默认设计。syncDesignRoute 会按设计切换页面：
+  // diamond 的去 /diamond-preview，metropolis 的回 /。
+  const DEFAULT_DESIGN = "diamond";
+  // 动画偏好：on 不看系统设置 / follow 跟随系统 / off 强制关闭。
+  const MOTION_KEY = "dws-chat-agent-motion-v1";
+  const MOTION_VALUES = ["on", "follow", "off"];
+  const DEFAULT_MOTION = "on";
   const STORAGE_KEY = "dws-chat-agent-theme-v1";
   const CUSTOM_THEMES_KEY = "dws-chat-agent-custom-themes-v1";
   const HEX = /^#[0-9a-f]{6}$/i;
@@ -307,9 +314,13 @@
 
   function currentDesign() {
     const stored = localStorage.getItem(DESIGN_KEY);
-    // 默认落在控制台。以前默认是 diamond，会让访问 "/" 立刻被重定向到
-    // /diamond-preview，等于控制台首页默认打不开。
-    return designs.find(item => item.id === stored) || designs[0];
+    // 没存过就用默认设计；存的 id 已经不认识了也回退到默认，
+    // 不要掉到 designs[0]——那会让默认值随数组顺序悄悄漂移。
+    return (
+      designs.find(item => item.id === stored) ||
+      designs.find(item => item.id === DEFAULT_DESIGN) ||
+      designs[0]
+    );
   }
 
   function selectDesign(id) {
@@ -355,5 +366,29 @@
     previewCustom,
     normalize
   };
+  // 动画开关：写到 html 上，CSS 按它决定要不要忽略系统的「减少动效」。
+  // 默认 on —— 这是本地运维控制台，使用者看得见自己在选什么。
+  function currentMotion() {
+    const stored = localStorage.getItem(MOTION_KEY);
+    return MOTION_VALUES.includes(stored) ? stored : DEFAULT_MOTION;
+  }
+
+  function selectMotion(value) {
+    const next = MOTION_VALUES.includes(value) ? value : DEFAULT_MOTION;
+    localStorage.setItem(MOTION_KEY, next);
+    document.documentElement.dataset.motion = next;
+    window.dispatchEvent(new CustomEvent("dws-motion-change", {detail:{motion:next}}));
+    return next;
+  }
+
+  // 先写属性再渲染，避免动画先被系统关掉再打开的闪烁
+  document.documentElement.dataset.motion = currentMotion();
+
+  window.DwsTheme.motion = {
+    current: currentMotion,
+    select: selectMotion,
+    values: MOTION_VALUES.slice(),
+  };
+
   syncDesignRoute(initialDesign);
 })();

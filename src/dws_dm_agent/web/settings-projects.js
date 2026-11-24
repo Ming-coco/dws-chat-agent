@@ -29,14 +29,13 @@
   const form = document.getElementById("projectForm");
   const message = document.getElementById("pcMessage");
   const saveState = document.getElementById("projectSaveState");
+  const frontendsBox = document.getElementById("pcFrontends");
+  const frontendTemplate = document.getElementById("pcFrontendRow");
   const rowTemplate = document.getElementById("pcDatabaseRow");
   const databasesBox = document.getElementById("pcDatabases");
 
   const fields = {
-    frontend: document.getElementById("pcFrontend"),
     note: document.getElementById("pcNote"),
-    loginUser: document.getElementById("pcLoginUser"),
-    loginPassword: document.getElementById("pcLoginPassword"),
     serverHost: document.getElementById("pcServerHost"),
     serverPort: document.getElementById("pcServerPort"),
     serverUser: document.getElementById("pcServerUser"),
@@ -179,6 +178,29 @@
     message.className = "message" + (kind ? " " + kind : "");
   }
 
+  function addFrontendRow(data) {
+    const fragment = frontendTemplate.content.cloneNode(true);
+    const row = fragment.querySelector(".project-db-row");
+    const values = data || {};
+    row.querySelectorAll("[data-fe]").forEach((input) => {
+      const key = input.dataset.fe;
+      if (key === "login_password") {
+        input.value = values.login_password ? MASK : "";
+        input.placeholder = values.login_password ? "已设置，留空表示不修改" : "未设置";
+      } else if (values[key] !== undefined && values[key] !== null) {
+        input.value = values[key];
+      }
+    });
+    row.querySelector(".pc-fe-remove").addEventListener("click", () => row.remove());
+    frontendsBox.appendChild(row);
+    // 等插入完成后再扫，才能算出正确的下标
+    setTimeout(() => {
+      if (typeof decorateAllPasswords === "function") {
+        decorateAllPasswords(frontendsBox);
+      }
+    }, 0);
+  }
+
   function addDatabaseRow(data) {
     const fragment = rowTemplate.content.cloneNode(true);
     const row = fragment.querySelector(".project-db-row");
@@ -213,10 +235,20 @@
 
     return {
       name: currentProject,
-      frontend: fields.frontend.value.trim(),
       note: fields.note.value.trim(),
-      login_user: fields.loginUser.value.trim(),
-      login_password: fields.loginPassword.value,
+      frontends: (() => {
+        const items = [];
+        frontendsBox.querySelectorAll(".project-db-row").forEach((row) => {
+          const item = {};
+          row.querySelectorAll("[data-fe]").forEach((input) => {
+            item[input.dataset.fe] = input.value.trim();
+          });
+          // 空行跳过，避免存一堆空前端
+          if (!item.url && !item.name) return;
+          items.push(item);
+        });
+        return items;
+      })(),
       server: {
         host: fields.serverHost.value.trim(),
         port: Number(fields.serverPort.value) || 22,
@@ -229,14 +261,12 @@
   }
 
   function fill(config) {
-    fields.frontend.value = config.frontend || "";
     fields.note.value = config.note || "";
-    fields.loginUser.value = config.login_user || "";
-    // 登录密码同样是掩码占位，不回显真实值
-    fields.loginPassword.value = config.login_password ? MASK : "";
-    fields.loginPassword.placeholder = config.login_password
-      ? "已设置，留空表示不修改"
-      : "未设置";
+
+    frontendsBox.innerHTML = "";
+    (config.frontends || []).forEach((frontend) => addFrontendRow(frontend));
+    // 至少留一行空白的，不然界面上没有可填的地方
+    if (!(config.frontends || []).length) addFrontendRow();
     const server = config.server || {};
     fields.serverHost.value = server.host || "";
     fields.serverPort.value = server.port || 22;
@@ -282,11 +312,10 @@
     // 缺了它会让「只填了账号」的保存被静默拦住。
     if (
       !payload.server.host &&
-      !payload.frontend &&
-      !payload.login_user &&
+      !payload.frontends.length &&
       !payload.databases.length
     ) {
-      setMessage("至少填一项：前端地址、登录账号、服务器或数据库", "error");
+      setMessage("至少填一项：前端、服务器或数据库", "error");
       return;
     }
 
@@ -350,6 +379,13 @@
         closeMenu();
       });
 
+      const addFrontendButton = document.getElementById("pcAddFrontend");
+      if (addFrontendButton) addFrontendButton.addEventListener("click", () => {
+        addFrontendRow();
+        const last = frontendsBox.lastElementChild;
+        if (last) last.scrollIntoView({block: "nearest"});
+      });
+
       const addButton = document.getElementById("pcAddDatabase");
       if (addButton) addButton.addEventListener("click", () => {
         addDatabaseRow();
@@ -363,6 +399,176 @@
     } catch (error) {
       console.error("[pc] boot 失败:", error);
     }
+  }
+
+  // ---- 动画效果开关 ----
+  // theme.js 负责把选择写到 html[data-motion]，CSS 按它决定是否忽略系统的「减少动效」。
+  function bootMotionSwitch() {
+    const group = document.getElementById("motionSwitch");
+    if (!group) return;
+    const theme = window.DwsTheme;
+    if (!theme || !theme.motion) return;
+
+    const sync = (value) => {
+      group.querySelectorAll("button[data-motion]").forEach((button) => {
+        button.setAttribute("aria-checked", String(button.dataset.motion === value));
+      });
+    };
+
+    sync(theme.motion.current());
+    group.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-motion]");
+      if (!button) return;
+      const next = theme.motion.select(button.dataset.motion);
+      sync(next);
+      // 立即刷新，让首页的动效按新设置重来一遍
+      if (typeof theme.refresh === "function") theme.refresh();
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", bootMotionSwitch);
+  } else {
+    bootMotionSwitch();
+  }
+
+  // ---- 密码框的显示/隐藏 ----
+  // 扫描所有 type=password 的输入框，统一加一个眼睛按钮。
+  // 用委托扫描而不是逐个改 HTML：以后新加的密码框会自动带上。
+  const EYE_OPEN =
+    '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.8"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/>' +
+    '<circle cx="12" cy="12" r="3"/></svg>';
+  const EYE_OFF =
+    '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.8"><path d="M3 3l18 18"/>' +
+    '<path d="M10.6 6.2A10.9 10.9 0 0 1 12 6c6.4 0 10 6 10 6a17 17 0 0 1-3 3.6"/>' +
+    '<path d="M6.3 6.9A16.6 16.6 0 0 0 2 12s3.6 6 10 6a10.8 10.8 0 0 0 4.2-.8"/>' +
+    '<path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>';
+
+  /**
+   * 给密码框加眼睛按钮。
+   * target 说明这一格的密码属于谁，形如 "server" / "frontend:0" / "database:1"，
+   * 点眼睛时按它向后端要明文。
+   */
+  function decoratePassword(input, target) {
+    if (input.dataset.eyeReady) return;
+    input.dataset.eyeReady = "1";
+    if (target) input.dataset.secretTarget = target;
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "password-field";
+    input.parentNode.insertBefore(wrapper, input);
+    wrapper.appendChild(input);
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "password-eye";
+    button.setAttribute("aria-label", "显示密码");
+    button.title = "显示密码";
+    // 父级可能是 <label>，不拦 mousedown 的话点按钮会顺带把焦点转给输入框
+    button.addEventListener("mousedown", (event) => event.preventDefault());
+    button.innerHTML = EYE_OPEN;
+    wrapper.appendChild(button);
+
+    // 记住原始内容（掩码或空），用来恢复和判断「有没有设置过」
+    const original = input.value;
+
+    const restore = () => {
+      input.type = "password";
+      input.value = original;
+      button.innerHTML = EYE_OPEN;
+      button.setAttribute("aria-label", "显示密码");
+      button.title = "显示密码";
+    };
+
+    input.addEventListener("blur", () => {
+      // 失焦就收回去，不留明文在屏幕上
+      if (input.type === "text") restore();
+    });
+
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (input.type === "text") {
+        restore();
+        return;
+      }
+
+      // 没填过密码就没必要问后端
+      if (!original) {
+        input.type = "text";
+        button.innerHTML = EYE_OFF;
+        button.setAttribute("aria-label", "隐藏密码");
+        input.focus({ preventScroll: true });
+        return;
+      }
+
+      const targetName = input.dataset.secretTarget;
+      if (!targetName || !currentProject) {
+        // 没有明确归属（比如还没保存过的新行），只能切显示方式
+        input.type = "text";
+        button.innerHTML = EYE_OFF;
+        input.focus({ preventScroll: true });
+        return;
+      }
+
+      try {
+        button.disabled = true;
+        const query = new URLSearchParams({ name: currentProject, reveal: targetName });
+        const response = await fetch(`/api/project-config?${query}`, { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        input.type = "text";
+        input.value = data.password ?? "";
+        button.innerHTML = EYE_OFF;
+        button.setAttribute("aria-label", "隐藏密码");
+        button.title = "隐藏密码";
+        input.focus({ preventScroll: true });
+      } catch (error) {
+        setMessage(`查看密码失败：${error.message}`, "error");
+      } finally {
+        button.disabled = false;
+      }
+    });
+  }
+
+  /** 扫描页面上所有密码框。动态新增的行也要重新扫一次。 */
+  function decorateAllPasswords(root) {
+    const scope = root || document;
+    // 前端列表
+    scope.querySelectorAll("#pcFrontends .project-db-row").forEach((row) => {
+      const index = [...row.parentNode.children].indexOf(row);
+      const input = row.querySelector("[data-fe='login_password']");
+      if (input) decoratePassword(input, `frontend:${index}`);
+    });
+    // 服务器
+    const serverInput = scope.querySelector("#pcServerPassword");
+    if (serverInput) decoratePassword(serverInput, "server");
+    // 数据库列表
+    scope.querySelectorAll("#pcDatabases .project-db-row").forEach((row) => {
+      const index = [...row.parentNode.children].indexOf(row);
+      const input = row.querySelector("[data-db='password']");
+      if (input) decoratePassword(input, `database:${index}`);
+    });
+    // 兜底：其它密码框只做显示切换，不查后端
+    scope.querySelectorAll('input[type="password"]').forEach((input) => {
+      decoratePassword(input, input.dataset.secretTarget || "");
+    });
+  }
+
+  // 新增数据库行、切换前端之后都要补一次
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest("#pcAddDatabase, #pcAddFrontend")) return;
+    // 等 DOM 插好再扫
+    setTimeout(() => decorateAllPasswords(), 0);
+  });
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => decorateAllPasswords());
+  } else {
+    decorateAllPasswords();
   }
 
   if (document.readyState === "loading") {

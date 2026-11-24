@@ -524,6 +524,42 @@
     #pcProjectPicker { position: relative; z-index: 50; }
     #pcProjectPicker .project-menu { z-index: 200; }
     #projectConfigPanel { overflow: visible; }
+
+    .motion-group { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+    .motion-group .hint { margin: 0 0 10px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+    .motion-switch { display: inline-flex; gap: 0; border: 1px solid var(--line-strong); border-radius: 999px; padding: 3px; background: var(--control); }
+    .motion-switch button { border: 0; background: transparent; color: var(--muted-strong); font-size: 12px; padding: 6px 14px; border-radius: 999px; cursor: pointer; transition: background .16s, color .16s; }
+    .motion-switch button:hover { color: var(--text); }
+    .motion-switch button[aria-checked="true"] { background: var(--accent-soft); color: var(--accent-ink); }
+
+    /* 密码框：右侧的眼睛按钮 */
+    .password-field { position: relative; display: block; width: 100%; }
+    /* 右侧留出按钮的宽度，文字不会被盖住 */
+    .password-field input { width: 100%; padding-right: 40px; }
+    .password-eye {
+      position: absolute;
+      right: 3px;
+      top: 50%;
+      /* 用固定像素偏移而不是百分比，避免输入框高度变化时按钮跟着晃 */
+      margin-top: -16px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      border: 0;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      /* 只过渡颜色，不碰 layout 属性，杜绝抖动 */
+      transition: color .16s, background-color .16s;
+    }
+    .password-eye:hover { color: var(--text); background: var(--control); }
+    .password-eye:active { background: var(--accent-soft); }
+    .password-eye:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
+    .password-eye svg { pointer-events: none; }
 </style>
   <script src="/theme.js"></script>
 </head>
@@ -567,6 +603,16 @@
         </div>
         <div class="theme-group"><h3>布局</h3><div id="designThemes" class="design-grid"></div></div>
       </details>
+
+      <div class="theme-group motion-group">
+        <h3>动画效果</h3>
+        <p class="hint">控制首页的扫描线、角标收拢等动效。系统开启「减少动效」时，只有选「跟随系统」才会停下。</p>
+        <div id="motionSwitch" class="motion-switch" role="radiogroup" aria-label="动画效果">
+          <button type="button" data-motion="on" role="radio" aria-checked="true">始终播放</button>
+          <button type="button" data-motion="follow" role="radio" aria-checked="false">跟随系统</button>
+          <button type="button" data-motion="off" role="radio" aria-checked="false">始终关闭</button>
+        </div>
+      </div>
     </section>
 
     <section class="panel" aria-labelledby="runtimeTitle">
@@ -603,21 +649,16 @@
       <div id="projectForm" hidden>
         <h3 class="project-group-title">基本信息</h3>
         <label class="field">
-          <span>前端地址</span>
-          <input id="pcFrontend" type="text" placeholder="http://192.0.2.10:8090">
-        </label>
-        <label class="field">
           <span>备注</span>
           <input id="pcNote" type="text" placeholder="例如：项目甲 测试环境">
         </label>
-        <label class="field">
-          <span>登录账号</span>
-          <input id="pcLoginUser" type="text" placeholder="登录被测系统的账号">
-        </label>
-        <label class="field">
-          <span>登录密码</span>
-          <input id="pcLoginPassword" type="password" placeholder="留空表示不修改">
-        </label>
+
+        <div class="section-head">
+          <div><h3 class="project-group-title">前端</h3></div>
+          <button id="pcAddFrontend" class="ghost" type="button">添加前端</button>
+        </div>
+        <p class="hint">PC 端、移动端各自一套，地址和登录账号分别填。</p>
+        <div id="pcFrontends"></div>
 
         <h3 class="project-group-title">服务器</h3>
         <label class="field"><span>地址</span><input id="pcServerHost" type="text" placeholder="192.0.2.10"></label>
@@ -639,6 +680,16 @@
         </div>
       </div>
     </section>
+
+    <template id="pcFrontendRow">
+      <div class="project-db-row">
+        <label class="field"><span>名称</span><input data-fe="name" type="text" placeholder="PC端"></label>
+        <label class="field"><span>地址</span><input data-fe="url" type="text" placeholder="http://192.0.2.10:8090"></label>
+        <label class="field"><span>登录账号</span><input data-fe="login_user" type="text" placeholder="登录账号"></label>
+        <label class="field"><span>登录密码</span><input data-fe="login_password" type="password" placeholder="留空表示不修改"></label>
+        <button class="ghost danger pc-fe-remove" type="button">删除</button>
+      </div>
+    </template>
 
     <template id="pcDatabaseRow">
       <div class="project-db-row">
