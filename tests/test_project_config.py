@@ -61,7 +61,7 @@ class ProjectStoreTests(unittest.TestCase):
     def test_save_then_load(self) -> None:
         self.store.save(self._sample())
         loaded = self.store.load("项目甲")
-        self.assertEqual(loaded.frontend, "http://192.0.2.10:8090")
+        self.assertEqual(loaded.frontends[0].url, "http://192.0.2.10:8090")
         self.assertEqual(loaded.server.host, "192.0.2.10")
         self.assertEqual(len(loaded.databases), 1)
         self.assertEqual(loaded.databases[0].schema, "app_db")
@@ -85,9 +85,9 @@ class ProjectStoreTests(unittest.TestCase):
         self.store.save(self._sample())
         for index in range(3):
             config = self.store.load("项目甲")
-            config.frontend = f"http://192.0.2.10:809{index}"
+            config.frontends[0].url = f"http://192.0.2.10:809{index}"
             self.store.save(config)
-        self.assertTrue(self.store.load("项目甲").frontend.endswith("8092"))
+        self.assertTrue(self.store.load("项目甲").frontends[0].url.endswith("8092"))
 
     def test_masked_password_keeps_previous_value(self) -> None:
         self.store.save(self._sample())
@@ -106,7 +106,7 @@ class ProjectStoreTests(unittest.TestCase):
     def test_unknown_project_returns_blank(self) -> None:
         config = self.store.load("没配过的")
         self.assertEqual(config.name, "没配过的")
-        self.assertEqual(config.frontend, "")
+        self.assertEqual(config.frontends, [])
         self.assertEqual(config.databases, [])
 
     def test_illegal_names_are_rejected(self) -> None:

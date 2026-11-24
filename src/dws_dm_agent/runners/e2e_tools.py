@@ -86,14 +86,22 @@ def _list_projects() -> dict[str, Any]:
             config = store.load(name)
         except Exception:  # noqa: BLE001
             continue
-        if not config.frontend:
+        usable = [frontend for frontend in config.frontends if frontend.url]
+        if not usable:
             continue
         projects.append(
             {
                 "project": name,
-                "frontend": config.frontend,
-                "loginUser": config.login_user,
                 "note": config.note,
+                # 一套项目可能有 PC / 移动端多个前端，逐个列出
+                "frontends": [
+                    {
+                        "name": frontend.name,
+                        "url": frontend.url,
+                        "loginUser": frontend.login_user,
+                    }
+                    for frontend in usable
+                ],
             }
         )
 
@@ -112,11 +120,11 @@ def _discover(args: dict[str, Any]) -> dict[str, Any]:
     if not project:
         return _missing_project()
 
-    resolved = _resolve_project(project)
+    resolved = _resolve_project(project, str(args.get("frontend") or ""))
     if isinstance(resolved, dict):
         return resolved
 
-    config, environment = resolved
+    config, environment, frontend = resolved
     payload = _invoke(
         ["discover", "--config", str(config), "--json"], environment=environment
     )
@@ -172,11 +180,11 @@ def _run(args: dict[str, Any]) -> dict[str, Any]:
             ),
         }
 
-    resolved = _resolve_project(project)
+    resolved = _resolve_project(project, str(args.get("frontend") or ""))
     if isinstance(resolved, dict):
         return resolved
 
-    config, environment = resolved
+    config, environment, frontend = resolved
     command = ["run", "--config", str(config), "--json"]
     only = str(args.get("only") or "").strip()
     if only:
@@ -250,7 +258,9 @@ def _missing_project() -> dict[str, Any]:
     }
 
 
-def _resolve_project(project: str) -> tuple[Path, dict[str, str]] | dict[str, Any]:
+def _resolve_project(
+    project: str, frontend_name: str = ""
+) -> tuple[Path, dict[str, str]] | dict[str, Any]:
     """把项目名解析成一份临时 e2e 配置 + 运行环境变量。
 
     返回 (配置文件路径, 环境变量) 表示成功；返回 dict 表示失败，
@@ -271,17 +281,49 @@ def _resolve_project(project: str) -> tuple[Path, dict[str, str]] | dict[str, An
         }
 
     config = store.load(project)
-    if not config.frontend:
+    if not config.frontends:
         return {
-            "error": f"项目 {project} 没填前端地址",
+            "error": f"项目 {project} 没有配置前端",
+            "hint": "去「设置 → 项目配置」加一套前端（地址 + 登录账号）。",
+        }
+
+    # 选前端：按名字或下标；不指定就用第一个
+    usable = [frontend for frontend in config.frontends if frontend.url]
+    if not usable:
+        return {
+            "error": f"项目 {project} 的前端都没有填地址",
             "hint": "前端地址是必填项，去「设置 → 项目配置」补上。",
         }
 
-    if not config.login_user or not config.login_password:
+    chosen = None
+    if frontend_name:
+        for frontend in usable:
+            if frontend.name == frontend_name:
+                chosen = frontend
+                break
+        if chosen is None:
+            # 也允许传下标（1 开始），方便按顺序选
+            try:
+                index = int(frontend_name) - 1
+                if 0 <= index < len(usable):
+                    chosen = usable[index]
+            except ValueError:
+                pass
+        if chosen is None:
+            return {
+                "error": f"项目 {project} 没有名为 {frontend_name} 的前端",
+                "hint": "用 e2e_projects 看可用的前端名，或直接不传 frontend 用第一个。",
+                "available": [f.name for f in usable],
+            }
+    else:
+        chosen = usable[0]
+
+    if not chosen.login_user or not chosen.login_password:
         return {
-            "error": f"项目 {project} 缺少登录账号或密码",
-            "hint": "页面测试需要登录，去「设置 → 项目配置」补上登录账号和密码。",
+            "error": f"项目 {project} 的前端「{chosen.name}」缺少登录账号或密码",
+            "hint": "页面测试需要登录，去「设置 → 项目配置」补上。",
         }
+    # 不用给 dataclass 挂动态字段，直接把选中的前端带出去
 
     # 生成一份临时配置给 e2e_runner 用。账号密码走环境变量，
     # 不落盘——配置文件里只写 ${VAR} 引用。
@@ -320,12 +362,13 @@ def _resolve_project(project: str) -> tuple[Path, dict[str, str]] | dict[str, An
         encoding="utf-8",
     )
 
+    # _resolve_project 已经把选中的前端作为第三项返回，直接用
     environment = {
-        "E2E_BASE_URL": config.frontend,
-        "E2E_USER": config.login_user,
-        "E2E_PASS": config.login_password,
+        "E2E_BASE_URL": frontend.url,
+        "E2E_USER": frontend.login_user,
+        "E2E_PASS": frontend.login_password,
     }
-    return config_path, environment
+    return config_path, environment, frontend
 
 
 def _safe_name(name: str) -> str:
