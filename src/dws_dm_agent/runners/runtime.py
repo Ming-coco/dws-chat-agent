@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,6 +58,53 @@ _PI_IMAGE_MIME_TYPES = {
     ".gif": "image/gif",
     ".webp": "image/webp",
 }
+
+
+def _monotonic_ms() -> int:
+    """单调时钟的毫秒数，用来算工具耗时。"""
+    return int(time.monotonic() * 1000)
+
+
+def _tool_call_detail(
+    event: Mapping[str, Any], args: Any = None
+) -> str:
+    """把一次工具调用的参数和结果整理成可读文本，全量保留。
+
+    排查时最想知道的是「这一步到底在干什么、拿到了什么」，
+    摘要到 100 字就没法用了。结果太长时保留前 4000 字，
+    足够判断内容性质，又不至于把整个数据库查询结果塞进来。
+    """
+    parts: list[str] = []
+    arguments = (
+        args
+        or event.get("arguments")
+        or event.get("input")
+        or event.get("args")
+    )
+    if arguments:
+        try:
+            parts.append(
+                "参数: "
+                + json.dumps(arguments, ensure_ascii=False, indent=1)
+            )
+        except (TypeError, ValueError):
+            parts.append(f"参数: {arguments}")
+    result = event.get("result") or event.get("output")
+    if result is not None:
+        text_result = (
+            result if isinstance(result, str) else
+            json.dumps(result, ensure_ascii=False, default=str)
+        )
+        if len(text_result) > 4000:
+            text_result = (
+                text_result[:4000]
+                + f"\n…（共 {len(text_result)} 字，已截断）"
+            )
+        parts.append(f"结果: {text_result}")
+    error = event.get("error")
+    if error:
+        parts.append(f"错误: {error}")
+    return "\n".join(parts)
 
 
 def _pi_image_payloads(
@@ -164,6 +212,14 @@ class AgentSession:
         self._codex_item_phases: dict[str, str] = {}
         self._codex_reasoning: dict[str, str] = {}
         self._pi_thinking: dict[int, str] = {}
+        # 工具调用的开始时间，按调用 id 记：同一轮可能并发多个工具。
+        self._pi_tool_started: dict[str, int] = {}
+        # 参数在 start 事件里，结果在 end 事件里，靠调用 id 拼起来
+        self._pi_tool_args: dict[str, Any] = {}
+        # 思考段落开始的时刻（毫秒），thinking_end 时用来算耗时
+        self._pi_think_started: int = 0
+        # 调用链记录器，由调用方注入；为空时不做记录。
+        self.trace: Any = None
 
     @property
     def exit_code(self) -> int | None:
@@ -604,6 +660,8 @@ class AgentSession:
                 update_type = str(update.get("type") or "")
                 if update_type == "text_delta":
                     self._capture_stream_delta(str(update.get("delta") or ""))
+                elif update_type == "thinking_start":
+                    self._pi_think_started = _monotonic_ms()
                 elif update_type == "thinking_delta":
                     index = int(update.get("contentIndex") or 0)
                     value = self._pi_thinking.get(index, "") + str(
@@ -613,26 +671,58 @@ class AgentSession:
                     self._capture_progress(value)
                 elif update_type == "thinking_end":
                     self._capture_progress(str(update.get("content") or ""))
-            elif event_type == "tool_execution_start" and _is_escalate_tool(
-                event.get("toolName")
-            ):
-                self._capture_escalation()
-            elif (
-                event_type == "tool_execution_end"
-                and not event.get("isError")
-                and _is_no_reply_tool(event.get("toolName"))
-            ):
-                # 只在工具真正执行成功后才承认 silent；工具失败时模型继续正常
-                # 收尾，不能把一次失败的 no_reply 当成沉默吞掉后续正文。
-                self._capture_silent()
+                    if self.trace is not None:
+                        # 一段思考记一条，不按 delta 拆成几十条
+                        began = self._pi_think_started or _monotonic_ms()
+                        self.trace.thought(
+                            str(update.get("content") or ""),
+                            started_ms=began,
+                            duration_ms=max(0, _monotonic_ms() - began),
+                        )
+                        self._pi_think_started = 0
+            elif event_type == "tool_execution_start":
+                # 记下开始时间和参数：end 事件里只有结果，没有入参
+                call_id = str(event.get("toolCallId") or event.get("id") or "")
+                self._pi_tool_started[call_id] = _monotonic_ms()
+                self._pi_tool_args[call_id] = event.get("args")
+                if _is_escalate_tool(event.get("toolName")):
+                    self._capture_escalation()
+            elif event_type == "tool_execution_end":
+                call_id = str(event.get("toolCallId") or event.get("id") or "")
+                began = self._pi_tool_started.pop(call_id, None)
+                args = self._pi_tool_args.pop(call_id, None)
+                if self.trace is not None:
+                    # end 事件自带 durationMs，比用单调时钟差值更准
+                    reported = event.get("durationMs")
+                    duration = (
+                        int(reported)
+                        if isinstance(reported, (int, float))
+                        else (_monotonic_ms() - began if began is not None else 0)
+                    )
+                    self.trace.tool(
+                        str(event.get("toolName") or ""),
+                        started_ms=began if began is not None else _monotonic_ms(),
+                        duration_ms=duration,
+                        ok=not event.get("isError"),
+                        content=_tool_call_detail(event, args),
+                    )
+                if (
+                    not event.get("isError")
+                    and _is_no_reply_tool(event.get("toolName"))
+                ):
+                    self._capture_silent()
             elif event_type == "message_end":
                 text = _assistant_text(event)
                 if text and _is_pi_intermediate_message(event.get("message")):
                     # 工具调用间隔中的中间陈述（带 toolCall 或 error/aborted 终止）
                     # 只走进度展示，不能作为最终回复交付。
                     self._capture_progress(text)
+                    if self.trace is not None:
+                        self.trace.reply(text, final=False)
                 elif text:
                     self._capture_body(text, final=True)
+                    if self.trace is not None:
+                        self.trace.reply(text, final=True)
             elif event_type == "agent_end":
                 messages = event.get("messages")
                 if isinstance(messages, list):

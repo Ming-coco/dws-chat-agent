@@ -538,9 +538,22 @@ textarea:focus-visible {
   outline-offset: 1px;
 }
 
+/* 动画开关由 theme.js 写入 html[data-motion]，默认 on。
+   只有用户选「跟随系统」时才看系统的减少动效设置。 */
+html[data-motion="off"] { scroll-behavior: auto; }
+html[data-motion="off"] *,
+html[data-motion="off"] *::before,
+html[data-motion="off"] *::after {
+  animation-duration: .001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .001ms !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  html { scroll-behavior: auto; }
-  *, *::before, *::after {
+  html[data-motion="follow"] { scroll-behavior: auto; }
+  html[data-motion="follow"] *,
+  html[data-motion="follow"] *::before,
+  html[data-motion="follow"] *::after {
     animation-duration: .001ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: .001ms !important;
@@ -564,3 +577,115 @@ textarea:focus-visible {
 @media (max-width: 520px) {
   .metrics { grid-template-columns: 1fr; }
 }
+
+/* ---- 调用链 ---- */
+/* 首页每条处理记录下面挂一块时间轴，默认收起，展开才加载明细。 */
+.trace-panel {
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+.trace-summary {
+  cursor: pointer;
+  color: var(--muted-strong);
+  font-size: 12px;
+  padding: 4px 0;
+  user-select: none;
+}
+.trace-summary:hover { color: var(--text); }
+.trace-body { padding: 8px 0 0; }
+.trace-head {
+  display: flex;
+  gap: 14px;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+.trace-total { color: var(--accent-ink); font-weight: 500; }
+.trace-steps { display: grid; gap: 2px; }
+.trace-step {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 6px;
+  align-items: start;
+  padding: 3px 0;
+}
+.trace-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--line-strong);
+  margin-top: 6px;
+  justify-self: center;
+  flex-shrink: 0;
+}
+.trace-step.stage .trace-dot { background: transparent; border: 1px solid var(--line-strong); }
+.trace-step.stage .trace-name { color: var(--muted-strong); font-size: 11px; letter-spacing: .02em; }
+.trace-step.stage { margin-top: 6px; }
+.trace-step.slow .trace-dot { background: var(--warning-border); }
+.trace-step.bad .trace-dot { background: var(--danger-border); }
+.trace-main { min-width: 0; }
+.trace-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+.trace-name {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trace-step.slow .trace-name { color: var(--warning-ink); }
+.trace-step.bad .trace-name { color: var(--danger-ink); }
+.trace-offset {
+  color: var(--muted);
+  font-size: 11px;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.trace-content {
+  margin: 5px 0 7px;
+  padding: 7px 9px;
+  background: var(--panel-2);
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--muted-strong);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow: auto;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+.trace-blocked {
+  margin-top: 12px;
+  padding: 9px 11px;
+  border: 1px solid var(--danger-border);
+  border-radius: 8px;
+  background: var(--danger-soft);
+}
+.trace-blocked strong {
+  color: var(--danger-ink);
+  font-size: 12px;
+  display: block;
+  margin-bottom: 4px;
+}
+.trace-blocked .trace-content { background: rgb(0 0 0 / .25); }
+
+    /* 调用链：输入块与思考步骤 */
+    .trace-input { margin-bottom: 12px; padding: 9px 11px; border-left: 2px solid var(--accent); background: var(--panel-2); border-radius: 0 6px 6px 0; }
+    .trace-input strong { display: block; margin-bottom: 5px; color: var(--accent-ink); font-size: 11px; }
+    .trace-input .trace-content { margin: 0; padding: 0; background: transparent; max-height: 160px; }
+    .trace-step.thought .trace-name { color: var(--muted); }
+    .trace-step.thought .trace-dot { background: transparent; border: 1px solid var(--muted); }
+    .trace-step.thought .trace-content { color: var(--muted-strong); font-style: italic; }
+    .trace-step.input .trace-name { color: var(--accent-ink); font-weight: 500; }
+
+    /* 终态标记 */
+    .trace-step.mark { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
+    .trace-step.mark .trace-dot { background: var(--accent); }
+    .trace-step.mark .trace-name { color: var(--accent-ink); font-weight: 500; }
+    .trace-step.mark.bad .trace-dot { background: var(--danger-border); }
+    .trace-step.mark.bad .trace-name { color: var(--danger-ink); }

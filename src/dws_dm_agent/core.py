@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import hashlib
 import json
 import re
@@ -94,10 +96,28 @@ class IncomingEvent:
     # 这条消息是否 @ 到了本人。回复时据此决定要不要 @ 回去；控制台轮询的
     # 历史消息不经过 @ 判断，保持默认 False。
     mentions_self: bool = False
+    # 链路追踪 id，消息进系统时生成，贯穿处理全过程。
+    # 一次处理会经过前台和若干次执行，各自是独立的会话 id；
+    # 只有 trace_id 能把它们串成一条链。
+    trace_id: str = ""
 
     @property
     def sender_label(self) -> str:
         return self.sender_name or self.contact.display_name
+
+
+def new_trace_id(when: datetime | None = None) -> str:
+    """生成一个链路追踪 id。
+
+    格式 20261123-141905-3f2a：日期、时间、4 位随机。
+    人工排查时会把这个 id 复制到日志里搜，所以保持可读、可排序。
+    随机位用来避免同一秒内并发冲突。
+    """
+    moment = when or datetime.now()
+    suffix = hashlib.sha1(
+        f"{moment.timestamp()}{os.urandom(8).hex()}".encode()
+    ).hexdigest()[:4]
+    return f"{moment.strftime('%Y%m%d-%H%M%S')}-{suffix}"
 
 
 @dataclass(frozen=True)
@@ -350,13 +370,17 @@ def parse_dws_event(
     if not event_id:
         event_id = f"event:{sha256_text(message_id + content)[:24]}"
     created_raw = _deep_value(payload, {"create_time", "createTime", "timestamp", "time"})
+    created_at = parse_local_datetime(created_raw, timezone)
     return IncomingEvent(
         event_id=event_id,
         message_id=message_id,
         conversation_id=conversation_id,
         contact=contact,
         content=content,
-        created_at=parse_local_datetime(created_raw, timezone),
+        created_at=created_at,
+        # 链路追踪 id 在这里生成：入口处一次性确定，
+        # 之后前台、执行、重试全程复用同一份。
+        trace_id=new_trace_id(created_at),
         sender_open_dingtalk_id=sender_id,
         sender_name=sender_name,
         # 记下「这条是 @ 到我的」。回复时据此决定要不要 @ 回去：只 @ 我的人
@@ -413,10 +437,28 @@ class AuditStore:
                 except sqlite3.OperationalError:
                     time.sleep(0.05)
         self.connection.execute("PRAGMA foreign_keys=ON")
+        self._add_trace_columns()
         self._migrate()
 
     def close(self) -> None:
         self.connection.close()
+
+    def _add_trace_columns(self) -> None:
+        """给已有数据库补 trace_id 列。
+
+        SQLite 的 ADD COLUMN 是原子的，重复执行只会报「已存在」，
+        忽略即可。历史记录的 trace_id 留空，界面按它找不到调用链时
+        显示「无记录」，不做推断。
+        """
+        for table in ("events", "runs"):
+            try:
+                self.connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN trace_id TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                # 已经加过
+                pass
+        self.connection.commit()
 
     def _migrate(self) -> None:
         self.connection.executescript(
@@ -431,7 +473,8 @@ class AuditStore:
                 content_length INTEGER NOT NULL,
                 request_preview TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'queued',
-                reason TEXT NOT NULL DEFAULT ''
+                reason TEXT NOT NULL DEFAULT '',
+                trace_id TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS outgoing (
                 send_uuid TEXT PRIMARY KEY,
@@ -480,7 +523,8 @@ class AuditStore:
                 external_calls_json TEXT NOT NULL,
                 warnings_json TEXT NOT NULL,
                 request_preview TEXT NOT NULL DEFAULT '',
-                codex_exit_code INTEGER
+                codex_exit_code INTEGER,
+                trace_id TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS runs_finished_at ON runs(finished_at);
             CREATE TABLE IF NOT EXISTS tasks (
@@ -981,6 +1025,39 @@ class AuditStore:
         )
         self.connection.commit()
 
+    # 清理时按时间比较的字段。各表的时间列名不一样，分开列出。
+    _HISTORY_TABLES = (
+        ("runs", "finished_at"),
+        ("events", "received_at"),
+        ("outgoing", "sent_at"),
+        ("manual_messages", "sent_at"),
+    )
+
+    def purge_history(self, before: datetime) -> dict[str, int]:
+        """删掉早于 before 的过程记录，返回各表删除条数。
+
+        只删过程记录：
+          runs / events / outgoing   —— 会话列表和消息流水
+          manual_messages            —— 人工接管判断只看最近一小段，
+                                        30 天前的记录没有判断价值
+        不删：
+          tasks / task_changes  —— 事项记忆，删了会丢上下文
+          console_cursors       —— 轮询位置指针，与历史无关
+        """
+        cutoff = before.isoformat()
+        removed: dict[str, int] = {}
+        for table, column in self._HISTORY_TABLES:
+            try:
+                cursor = self.connection.execute(
+                    f"DELETE FROM {table} WHERE {column} < ?", (cutoff,)
+                )
+                removed[table] = cursor.rowcount or 0
+            except sqlite3.OperationalError:
+                # 表不存在或列名变了：跳过，不要让清理阻断启动
+                continue
+        self.connection.commit()
+        return removed
+
     def remove_manual(self, message_id: str) -> None:
         if not message_id:
             return
@@ -1041,6 +1118,7 @@ class AuditStore:
         reason: str,
         codex_exit_code: int | None,
         request_preview: str = "",
+        trace_id: str = "",
     ) -> None:
         self.connection.execute(
             """
@@ -1048,8 +1126,8 @@ class AuditStore:
                 session_id, conversation_id, contact_user_id, contact_name,
                 started_at, finished_at, action, status, handled, reason,
                 changes_json, validation_json, external_calls_json, warnings_json,
-                request_preview, codex_exit_code
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                request_preview, codex_exit_code, trace_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -1068,6 +1146,7 @@ class AuditStore:
                 "[]",
                 sanitize_text(request_preview, 500),
                 codex_exit_code,
+                trace_id,
             ),
         )
         self.connection.commit()

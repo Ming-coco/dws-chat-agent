@@ -634,9 +634,10 @@ html[data-design="metropolis"] .network-footer {
   100% { top: 112%; opacity: 0; }
 }
 @keyframes signal-sharpen {
-  from { filter: blur(9px); opacity: .15; }
-  60% { filter: blur(2px); opacity: .92; }
-  to { filter: blur(0); opacity: 1; }
+  0% { filter: blur(9px); opacity: .15; }
+  55% { filter: blur(3px); opacity: .8; }
+  80% { filter: blur(1px); opacity: .96; }
+  100% { filter: blur(0); opacity: 1; }
 }
 @keyframes node-pulse {
   0%, 12% { left: 0; opacity: 0; transform: scale(.4); }
@@ -732,8 +733,172 @@ html[data-design="metropolis"] .network-footer {
 }
 
 @media (hover: none) { .diamond-mark:hover svg { transform: none; } }
-@media (prefers-reduced-motion: reduce) {
-  html { scroll-behavior: auto; }
-  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
-  .dot-field, .tactical-plane, .network-stage::before { translate: none !important; }
+/* 动画开关：html[data-motion] 由 theme.js 写入。
+   on（默认）不看系统设置；follow 才跟随系统的「减少动效」；
+   off 强制静止。默认值给 on，因为这是本地运维控制台，
+   使用者自己知道要不要动画。 */
+html[data-motion="off"] *,
+html[data-motion="off"] *::before,
+html[data-motion="off"] *::after {
+  animation-duration: .001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .001ms !important;
 }
+html[data-motion="off"] { scroll-behavior: auto; }
+html[data-motion="off"] .dot-field,
+html[data-motion="off"] .tactical-plane,
+html[data-motion="off"] .network-stage::before { translate: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-motion="follow"] { scroll-behavior: auto; }
+  html[data-motion="follow"] *,
+  html[data-motion="follow"] *::before,
+  html[data-motion="follow"] *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+  html[data-motion="follow"] .dot-field,
+  html[data-motion="follow"] .tactical-plane,
+  html[data-motion="follow"] .network-stage::before { translate: none !important; }
+}
+
+/* ---- 调用链（频道列表里的展开面板）---- */
+
+.trace-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: baseline;
+  font: 9px/1 ui-monospace, monospace;
+  letter-spacing: .12em;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+.trace-total { color: var(--accent-ink); }
+.trace-id { margin-left: auto; opacity: .5; }
+
+.trace-steps { display: grid; gap: 1px; }
+.trace-step {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 4px 0;
+}
+.trace-dot {
+  width: 6px;
+  height: 6px;
+  margin-top: 6px;
+  justify-self: center;
+  transform: rotate(45deg);
+  background: var(--line-strong);
+}
+.trace-step.stage .trace-dot { background: transparent; border: 1px solid var(--line-strong); }
+.trace-step.slow .trace-dot { background: var(--accent); }
+.trace-step.bad .trace-dot { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+
+.trace-main { min-width: 0; }
+.trace-line { display: flex; justify-content: space-between; gap: 12px; }
+.trace-name {
+  font: 11px/1.4 ui-monospace, monospace;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trace-step.stage .trace-name {
+  color: var(--accent-ink);
+  font-size: 9px;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+}
+.trace-step.slow .trace-name { color: var(--accent); }
+.trace-step.bad .trace-name { color: var(--danger); }
+.trace-offset {
+  font: 9px/1.4 ui-monospace, monospace;
+  color: var(--muted);
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.trace-content {
+  margin: 5px 0 8px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+  border-left: 2px solid var(--line-strong);
+  font: 10px/1.55 ui-monospace, monospace;
+  color: var(--muted-strong);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+}
+.trace-blocked {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+.trace-blocked strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--danger);
+  font: 9px/1 ui-monospace, monospace;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+}
+.trace-blocked .trace-content { border-left-color: var(--danger); background: rgb(0 0 0 / .3); }
+
+/* ---- 详情 / 轨迹 页签 ---- */
+.channel-tabs {
+  display: inline-flex;
+  gap: 0;
+  margin-bottom: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line));
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
+}
+.channel-tab {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: 9px/1 ui-monospace, monospace;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  padding: 8px 18px;
+  cursor: pointer;
+  transition: color .16s, background .16s;
+}
+.channel-tab:hover { color: var(--text-secondary); }
+.channel-tab.on {
+  color: var(--accent-ink);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.channel-pane { min-width: 0; }
+.channel-pane[hidden] { display: none; }
+
+/* 轨迹面板：不再自带折叠头，直接铺时间轴 */
+.trace-panel {
+  margin-top: 4px;
+  padding-top: 0;
+  border-top: 0;
+}
+.trace-body { padding: 0; }
+
+/* 输入块：整条链的起点 */
+.trace-input { margin-bottom: 14px; padding: 10px 12px; border-left: 2px solid var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.trace-input strong { display: block; margin-bottom: 6px; color: var(--accent-ink); font: 9px/1 ui-monospace, monospace; letter-spacing: .18em; text-transform: uppercase; }
+.trace-input .trace-content { margin: 0; border: 0; background: transparent; padding: 0; }
+
+/* 思考与输出：用不同颜色区分，思考是灰的，输出是正文色 */
+.trace-step.thought .trace-name { color: var(--muted); font-style: italic; }
+.trace-step.thought .trace-dot { background: transparent; border: 1px solid var(--muted); }
+.trace-step.thought .trace-content { color: var(--muted); font-style: italic; background: color-mix(in srgb, var(--panel) 60%, transparent); }
+.trace-step.input .trace-name { color: var(--accent-ink); }
+
+/* 终态标记：时间轴末尾，说明这次处理为什么停在这里 */
+.trace-step.mark { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); }
+.trace-step.mark .trace-dot { background: var(--accent); transform: rotate(45deg) scale(1.15); }
+.trace-step.mark .trace-name { color: var(--accent-ink); font-weight: 500; }
+.trace-step.mark.bad .trace-dot { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+.trace-step.mark.bad .trace-name { color: var(--danger); }
